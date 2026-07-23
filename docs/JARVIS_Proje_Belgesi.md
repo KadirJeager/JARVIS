@@ -1,7 +1,7 @@
 # JARVIS — Kişisel Otonom Asistan Projesi
 
 **Belge tarihi:** 23 Temmuz 2026
-**Revizyon:** 23 Temmuz 2026 — SIP/dış telefon hizmetleri çıkarıldı (GSM köprüsü + telesekreter modeli), Tailscale çıkarıldı (GCP-yerli connector deseni), Telegram kanal olmaktan çıkıp Kadir adına kullanılan araca dönüştü (uygulama ana kanal — Gemini benzeri tek yüzey), kademeli ajan fabrikası eklendi, bulut-öncelikli yerleşim ilkesi (İlke 12) eklendi.
+**Revizyon:** 23 Temmuz 2026 — SIP/dış telefon hizmetleri çıkarıldı (GSM köprüsü + telesekreter modeli), Tailscale çıkarıldı (GCP-yerli connector deseni), Telegram kanal olmaktan çıkıp Kadir adına kullanılan araca dönüştü (uygulama ana kanal — Gemini benzeri tek yüzey), kademeli ajan fabrikası eklendi, bulut-öncelikli yerleşim ilkesi (İlke 12) eklendi. Nihai amaç "ikame" olarak netlendi (§1): görev döngüsü (§7.6), araç kazanım merdiveni (§8.5) ve Geliştirici ajanı eklendi; fabrika, ikame ufkunun ölçeklenme motoru olarak yeniden gerekçelendirildi.
 **Durum:** **Nihai hedef mimari ("North Star").** Bu belge adım adım yürünecek bir yol planı değil, varılacak yerin tanımıdır; ayrıntılı uygulama planlaması (görev kırılımı, zamanlama) ayrıca ve sonra yapılacaktır. Belgenin görevi, yol boyunca bu hedeften sapılmamasını sağlamaktır.
 **Sahibi:** Kadir
 
@@ -11,7 +11,9 @@
 
 Tamamen bulutta (Google Cloud) yaşayan, telefon / akıllı saat / bilgisayar / akıllı ev üzerinden her an erişilebilen, sesli komutla gerçek dünyada işlem yapabilen (sipariş, taksi, arama karşılama), kullanıcı hiçbir şey söylemeden de gerektiğinde kendiliğinden konuşan, **zamanla akıllanan** ve **asistan kimliğine sahip** otonom bir kişisel yapay zeka asistanı.
 
-Jarvis, Kadir'in yerine geçmez; Kadir'in **asistanı** olarak konuşur ("Kadir'in asistanı Jarvis"). Kendi telefon numarası, kendi Telegram botu ve gerektiğinde kendi e-posta adresi vardır. Kadir'i tanır, hatalarından ders çıkarır ve her hafta bir önceki haftadan daha iyi çalışır.
+**Nihai amaç — ikame:** Jarvis'in varış noktası, Kadir'in yaptığı **her işte** onu ikame edebilmektir. Bu belgede sayılan yetenekler (telefon, sipariş, ev…) kapsamın *sınırı değil örnekleridir* — yazılım projelerini yönetmek, GitHub'la çalışmak, bilgisayar kullanmak, uzun soluklu bir hedefi sonuna kadar kovalamak da aynı ufkun içindedir. Yöntem İlke 10'dur (alan alan, dar-sağlam büyüme); ufuk açık uçludur. Büyüme motoru: görev döngüsü (§7.6) + kademeli fabrika ve araç kazanım merdiveni (§8.5).
+
+İkame **işlev** düzlemindedir, **kimlik** düzleminde değil: Jarvis dış dünyaya karşı Kadir gibi davranmaz, Kadir'in **asistanı** olarak konuşur ("Kadir'in asistanı Jarvis"; İlke 8). Kendi telefon numarası ve gerektiğinde kendi e-posta adresi vardır. Kadir'i tanır, hatalarından ders çıkarır ve her hafta bir önceki haftadan daha iyi çalışır.
 
 ---
 
@@ -78,7 +80,7 @@ Bu ilkeler tüm mimari kararların üstündedir; bir çözüm bu ilkelerle çeli
 
 ### 4.1 Beyin (Orkestratör)
 - **Teknoloji:** Cloud Run + Google ADK, Gemini API (ağır analiz için Pro sınıfı, hızlı işler için Flash sınıfı model). **Model adlandırma kuralı:** tüm yapılandırmalarda `-latest` alias'ları kullanılır (`gemini-flash-latest`, `gemini-pro-latest`); sabit sürüm pinlenmez — pinli sürümler yeni API kullanıcılarına kapatılabiliyor (23 Tem 2026'da `gemini-2.5-flash` ile yaşandı).
-- **Yapı:** Tek orkestratör + derleme anında tanımlı statik uzman ajanlar: Sekreter (takvim/mail/hatırlatma), Operatör (tarayıcı otomasyonu), Ev Sorumlusu (HA), Araştırmacı, Arşivci (hafıza/özetleme/öğrenme). Her ajanın araç listesi sabittir.
+- **Yapı:** Tek orkestratör + derleme anında tanımlı statik uzman ajanlar: Sekreter (takvim/mail/hatırlatma), Operatör (tarayıcı otomasyonu), Ev Sorumlusu (HA), Araştırmacı, **Geliştirici** (yazılım projeleri: GitHub, kod durumu/geri bildirim, consult_claude, masaüstü worker), Arşivci (hafıza/özetleme/öğrenme). Her ajanın araç listesi sabittir; liste araç kazanım merdiveniyle (§8.5) onaylı büyür.
 - **Kalıcılık:** State Firestore'da, dosyalar GCS API ile okunur/yazılır. Cloud Run'a disk mount (GCSFuse vb.) yapılmaz — cold start'ı şişirir, tutarlılık sorunu getirir.
 - **API kotası gerçeği:** Google AI Pro (öğrenci) aboneliği **API kotası vermez**; API ayrı dünyadır. Ücretsiz API katmanıyla başlanır, yoğunluk artınca ücretli katmana (Tier 1) geçilir.
 
@@ -180,6 +182,7 @@ Mekanizmalar:
 3. **`check_my_vitals`:** Jarvis kendi kota sayaçlarını, harcamasını, servis sağlığını sorgulayabilir.
 4. **Değerlendirme döngüsü:** Üst üste hatada ajan körlemesine retry yapmaz; durup "burada ne oluyor?" akıl yürütmesi çalışır → strateji değişir (model düşür, ertele, kullanıcıya danış).
 5. **Fallback'ler seçimdir, hardcode değildir:** Alternatif yolları model *seçer*, politika katmanı *sınırlar*.
+6. **Görev döngüsü (uzun soluklu hedefler):** "Nihai amaca kadar çalış" tipi işler sürekli açık bir süreçle değil, kuyruklanmış adımlarla yürür: görev kuyruğa (Pub/Sub) yazılır → her uyanışta bir adım ilerletilir → durum Firestore'a checkpoint'lenir → değerlendirme döngüsü "bitti mi / strateji değişmeli mi?" diye bakar → bitmediyse görev kendini yeniden kuyruklar. Her görevin bir **bütçesi** vardır (adım/token/para tavanı, `check_my_vitals` ile izlenir); bütçesi biten görev durur ve Kadir'e danışır. Scale-to-zero (İlke 9) böylece uzun görevlerde de korunur; "gece boyu projeyi bitir" hedefi yüzlerce kısa uyanışa bölünür.
 
 ---
 
@@ -210,12 +213,16 @@ Jarvis'in zekası iki kaynaktan gelir: modelin kalitesi (Google'ın işi) ve bir
 - Bu döngü, "gittikçe akıllanma"nın görünür kanıtıdır ve sistemin sağlığını da izlettirir.
 
 ### 8.5 Kademeli Ajan Fabrikası
+**Varlık sebebi ikame ufkudur (§1):** Kadir'in yaptığı her iş türüne derleme anında statik bir ajan atanamaz. Statik çekirdek (Kademe 0) en sık işleri taşır; kuyruğun sonsuz çeşitliliğini, şablondan parametreyle örneklenen geçici ajanlar (Kademe 1) karşılar; tekrarlayan alanlar onayla kalıcı ajana dönüşür (Kademe 2). Fabrika, açık uçlu kapsamın sonlu mimariyle taşınmasının cevabıdır.
+
 Dinamik ajan üretimi tek bir açma/kapama kararı değil, olgunlukla tırmanılan bir merdivendir (İlke 11). Politika katmanı, `check_my_vitals` ve dry-run modu fabrikanın ön koşullarıdır ve mimaride zaten vardır.
 
 - **Kademe 0 — Statik çekirdek:** Derleme anında tanımlı 5-6 uzman ajan. Omurga budur; değişmez.
 - **Kademe 1 — Kalıphane (şablondan türetme):** Derleme anında tanımlı ajan *şablonları*; orkestratör çalışma anında bunları parametreyle örnekler (araç alt kümesi + tarif + token tavanı + TTL). Şablon sayısı sabit olduğundan debug yüzeyi statik mimariye yakındır. Aşama 5'te devreye girer.
 - **Kademe 2 — Onaylı fabrika (HITL):** Orkestratör yeni bir ajan tanımı önerir (talimat + araç listesi + bölge ataması); öneri uygulamadaki onay merkezine düşer; Kadir onaylarsa kayıt defterine kalıcı ajan olarak yazılır. Üretim çalışma anında değil, **onay anında** gerçekleşir — runtime hep statik ajanlarla döner, ama ajan kümesi evrimleşir.
 - **Kademe 3 — Serbest fabrika:** Onaysız çalışma-anı üretimi. Kapısı ölçülebilirdir: Kademe 2, üst üste 8 haftalık retro'da fabrika kaynaklı sıfır kritik hata raporlamadan tartışmaya dahi açılmaz.
+
+**Araç kazanım merdiveni (aynı mantığın araç düzlemine izdüşümü):** Jarvis, bir görev için eksik yeteneği *kendisi tespit eder* ve kurulumunu *kendisi hazırlar* ("GitHub erişimi gerekiyor; şu MCP aracını, şu scope'larla ekleyeceğim") — öneri onay merkezine düşer, Kadir'in tek tık onayıyla araç kayıt defterine girer ve matriste bölgesi atanır. Keşif ve kurulum otonomdur; **yetkilendirme her zaman insanlıdır** — kimlik bilgisi/scope veren hiçbir adım onaysız gerçekleşmez (İlke 6). Düşük riskli (salt-okunur) araç sınıfları güven arttıkça sarıya ("ekle + bildir") gevşetilebilir — kodda, sohbette değil. İkame ufku (§1) alan alan böyle genişler: yeni alan = onaylı yeni araçlar + gerekirse Kademe 1-2'den yeni ajan.
 
 **Değişmezler (kademeden bağımsız fabrika anayasası):**
 1. Üretilmiş ajan matriste **misafir muamelesi** görür: yeşil+sarı ile başlar, kırmızıya asla; bölge terfisi yalnızca Kadir onayıyla.
@@ -275,8 +282,8 @@ Bu tablo bir takvim veya görev planı değildir (belgenin statüsü gereği —
 | **1 — Omurga** | Cloud Run + ADK beyni, asgari sohbet istemcisi (Web/PWA — nihai uygulamanın ilk kabuğu, §15), 3 kademeli hafıza + kullanıcı profili + ders defteri iskeleti, politika katmanı, Firestore loglama | Kendi uygulamamdan yazışıyorum, beni hatırlıyor ve tanımaya başlıyor, her eylem loglanıyor |
 | **2 — Ses** | Ses geçidi + Gemini Live, Android uygulama olgunlaşır (ASSIST intent + canlı ekran + onay merkezi), Wear OS asgari | Güç tuşuna basıp konuşuyorum, saatten komut veriyorum, onaylar uygulamadan akıyor |
 | **3 — Telefon** | GSM köprüsü pilotu (ikinci SIM + ses destekli modem/GoIP), koşullu yönlendirme, telesekreter screening + anons, canlı transkript + Devral, kayıt/RAG pipeline'ı, OTP köprüsü | Açmadığım arama Jarvis'e düşüyor, devralabiliyorum, "X'le ne konuşmuştuk" cevaplanıyor |
-| **4 — Eller ve Refleksler** | Tarayıcı operatörü (evde browser worker + kalıcı profil), dar akışlar: favori sipariş, taksi; olay katmanı + proaktif bildirimler; haftalık retro devrede | Sesli komutla sipariş geliyor; Jarvis kendiliğinden anlamlı şeyler söylüyor ve haftalık öğrenme raporu atıyor |
-| **5 — Ekosistem** | Home Assistant tam entegrasyon, Misafir Kapısı (MCP sunucu), consult_claude/gemini, Telegram'ı Kadir adına kullanma, fabrika Kademe 1 (kalıphane), A2A hazırlığı, WhatsApp kararı | Evi yönetiyor; mesajlarımı asistan imzasıyla yanıtlıyor; Claude↔Jarvis konuşuyor; sistem "tam Jarvis" |
+| **4 — Eller ve Refleksler** | Tarayıcı operatörü (evde browser worker + kalıcı profil), dar akışlar: favori sipariş, taksi; olay katmanı + **görev döngüsü** (uzun soluklu görevler, görev bütçesi; §7.6) + proaktif bildirimler; haftalık retro devrede | Sesli komutla sipariş geliyor; çok adımlı bir görevi kendi kendine sonuca taşıyor; Jarvis kendiliğinden anlamlı şeyler söylüyor ve haftalık öğrenme raporu atıyor |
+| **5 — Ekosistem** | Home Assistant tam entegrasyon, Misafir Kapısı (MCP sunucu), consult_claude/gemini, Telegram'ı Kadir adına kullanma, **Geliştirici ajanı + araç kazanım merdiveni** (§8.5), fabrika Kademe 1 (kalıphane), A2A hazırlığı, WhatsApp kararı | Evi yönetiyor; mesajlarımı asistan imzasıyla yanıtlıyor; yazılım projelerimde iş alıyor; Claude↔Jarvis konuşuyor; sistem "tam Jarvis" |
 
 ---
 
@@ -342,6 +349,9 @@ Prensip: boşta ~0; sabit giderler yalnızca telefon tarafında ve bilinçli. Fi
 - **GSM Köprüsü:** İkinci SIM'i taşıyan ses destekli modem/GoIP; telesekreter sesi + OTP/SMS + dış arama kimliği.
 - **Telesekreter Modeli:** Kadir'in ana hattının koşullu yönlendirmeyle ikinci hatta, oradan Jarvis'e düşmesi (§6).
 - **Kalıphane / Fabrika Kademeleri:** §8.5'teki kademeli dinamik ajan üretim modeli (Kademe 0-3).
+- **İkame:** Nihai amaç — Jarvis'in, Kadir'in yaptığı her işte onu işlev düzleminde ikame edebilmesi (kimlik düzleminde asistan kalır; §1).
+- **Görev Döngüsü:** Uzun soluklu hedeflerin kuyruklanmış adımlar + checkpoint + bütçe ile yürütülme deseni (§7.6).
+- **Araç Kazanım Merdiveni:** Jarvis'in eksik yeteneği kendisi tespit edip kurulumu hazırlaması, yetkinin tek tık onayla verilmesi (§8.5).
 - **Devral:** Uygulamada, süren bir aramayı Jarvis'ten canlı olarak alma eylemi.
 - **Hata=Gözlem:** Araç hatalarının yutulmayıp modele gösterilmesi ilkesi (İlke 4).
 - **Kullanıcı Modeli / Profil:** Kadir'in tercihlerini, rutinlerini ve kurallarını tutan yapılandırılmış hafıza (§8.1).
