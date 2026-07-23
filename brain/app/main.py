@@ -8,10 +8,12 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
+from . import voice
 from .auth import require_user
 
 APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
+app.include_router(voice.router)
 
 _runner: Runner | None = None
 _session_service = InMemorySessionService()
@@ -35,6 +37,12 @@ def _init() -> None:
         agent=build_agent(_memory, FirestoreAudit(db)),
         session_service=_session_service,
     )
+
+
+def get_runner_and_sessions() -> tuple[Runner, InMemorySessionService]:
+    """Accessor for voice.py: same Katman 1 runner/session_service, no privates touched."""
+    _init()
+    return _runner, _session_service
 
 
 async def run_turn(user_id: str, session_id: str, message: str) -> str:
