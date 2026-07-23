@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -82,15 +83,28 @@ def get_voice_runner_sessions_memory() -> "tuple[Runner, InMemorySessionService,
 
 
 async def _ensure_session(user_id: str, session_id: str):
-    """Get the ADK session or create it. Rehydration eklenene kadar (Task 4)
-    yalnızca get-or-create yapar."""
+    """Get the ADK session, or create it and rehydrate from the persistent
+    transcript so a cold-started instance keeps conversational context."""
     session = await _session_service.get_session(
         app_name=APP_NAME, user_id=user_id, session_id=session_id
     )
-    if session is None:
-        session = await _session_service.create_session(
-            app_name=APP_NAME, user_id=user_id, session_id=session_id
+    if session is not None:
+        return session
+    session = await _session_service.create_session(
+        app_name=APP_NAME, user_id=user_id, session_id=session_id
+    )
+    for msg in _messages.history(user_id, session_id):
+        event = Event(
+            author=msg["role"],  # "user" | "model"
+            content=types.Content(
+                role=msg["role"], parts=[types.Part(text=msg["text"])]
+            ),
         )
+        await _session_service.append_event(session, event)
+    logging.info(
+        "rehydrate: user=%s session=%s events=%d",
+        user_id, session_id, len(session.events),
+    )
     return session
 
 

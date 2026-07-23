@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from google.adk.sessions import InMemorySessionService
 
 import app.auth as auth_mod
 import app.main as main_mod
@@ -230,3 +231,32 @@ async def test_run_turn_persists_user_and_model_messages(monkeypatch):
     assert reply == "merhaba"
     hist = store.history("u@x.com", "s1")
     assert [(h["role"], h["text"]) for h in hist] == [("user", "selam"), ("model", "merhaba")]
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_rehydrates_from_history(monkeypatch):
+    store = MessageStore(FakeDB())
+    store.append("u@x.com", "s1", "user", "adim Kadir")
+    store.append("u@x.com", "s1", "model", "memnun oldum Kadir")
+    svc = InMemorySessionService()
+    monkeypatch.setattr(main_mod, "_session_service", svc)
+    monkeypatch.setattr(main_mod, "_messages", store)
+
+    session = await main_mod._ensure_session("u@x.com", "s1")
+    texts = [ev.content.parts[0].text for ev in session.events]
+    assert texts == ["adim Kadir", "memnun oldum Kadir"]
+    roles = [ev.content.role for ev in session.events]
+    assert roles == ["user", "model"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_existing_is_not_rehydrated(monkeypatch):
+    store = MessageStore(FakeDB())
+    store.append("u@x.com", "s1", "user", "eski")
+    svc = InMemorySessionService()
+    await svc.create_session(app_name=main_mod.APP_NAME, user_id="u@x.com", session_id="s1")
+    monkeypatch.setattr(main_mod, "_session_service", svc)
+    monkeypatch.setattr(main_mod, "_messages", store)
+
+    session = await main_mod._ensure_session("u@x.com", "s1")
+    assert session.events == []  # zaten vardı → geçmişten doldurulmaz
