@@ -158,7 +158,7 @@ async def ws_voice(ws: WebSocket) -> None:
         return
     from . import main
 
-    runner, sessions, memory = main.get_runner_sessions_memory()
+    runner, sessions, memory = main.get_voice_runner_sessions_memory()
     try:
         await VoiceBridge(runner, sessions, memory=memory).run(ws, user_id=email)
     except Exception:

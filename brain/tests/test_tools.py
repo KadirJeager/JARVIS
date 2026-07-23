@@ -25,3 +25,15 @@ def test_agent_wires_tools_and_policy():
     assert "get_user_profile" in tool_names
     assert agent.before_tool_callback is not None
     assert "Jarvis" in agent.instruction
+
+
+def test_agent_defaults_to_config_model_name():
+    from app import config
+
+    agent = build_agent(Memory(FakeDB()), FakeAudit())
+    assert agent.model == config.MODEL_NAME
+
+
+def test_agent_uses_explicit_model_override():
+    agent = build_agent(Memory(FakeDB()), FakeAudit(), model="gemini-3.1-flash-live-preview")
+    assert agent.model == "gemini-3.1-flash-live-preview"

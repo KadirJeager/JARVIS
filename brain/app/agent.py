@@ -17,11 +17,14 @@ engellendiğini açıkça söyle (hata = gözlem ilkesi).
 - Türkçe konuş; samimi ama profesyonel ol."""
 
 
-def build_agent(memory: Memory, audit) -> Agent:
+def build_agent(memory: Memory, audit, model: str | None = None) -> Agent:
+    """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
+    (text chat); voice sessions pass config.LIVE_MODEL instead -- same
+    instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory)."""
     tools.init(memory)
     return Agent(
         name="jarvis_orchestrator",
-        model=config.MODEL_NAME,
+        model=model or config.MODEL_NAME,
         instruction=INSTRUCTION,
         tools=tools.ALL_TOOLS,
         before_tool_callback=make_policy_callback(audit),

@@ -9,7 +9,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import voice
+from . import config, voice
 from .auth import require_user
 
 if TYPE_CHECKING:
@@ -22,6 +22,7 @@ app.include_router(voice.router)
 _runner: Runner | None = None
 _session_service = InMemorySessionService()
 _memory = None
+_voice_runner: Runner | None = None
 
 
 def _init() -> None:
@@ -53,6 +54,37 @@ def get_runner_and_sessions() -> tuple[Runner, InMemorySessionService]:
     """Thin back-compat delegate: same Katman 1 runner/session_service, no memory."""
     runner, sessions, _ = get_runner_sessions_memory()
     return runner, sessions
+
+
+def _init_voice() -> None:
+    """Lazy init for the voice-mode Runner: a SEPARATE Runner/Agent bound to
+    config.LIVE_MODEL (config.MODEL_NAME is not live-capable), sharing the
+    SAME _session_service and _memory instances as the text-chat runner --
+    same memory, same audit trail, same tools/policy, only the model differs.
+    See app/config.py's LIVE_MODEL comment + task-2a4-report.md for why the
+    live model can't just be config.MODEL_NAME."""
+    global _voice_runner
+    if _voice_runner is not None:
+        return
+    _init()  # ensures _session_service/_memory exist and are shared
+    from google.cloud import firestore
+
+    from .agent import build_agent
+    from .memory import FirestoreAudit
+
+    db = firestore.Client()
+    _voice_runner = Runner(
+        app_name=APP_NAME,
+        agent=build_agent(_memory, FirestoreAudit(db), model=config.LIVE_MODEL),
+        session_service=_session_service,
+    )
+
+
+def get_voice_runner_sessions_memory() -> "tuple[Runner, InMemorySessionService, Memory | None]":
+    """Accessor for voice.py: dedicated live-model Runner + the same Katman 1
+    session_service/memory instances as text chat, no privates touched."""
+    _init_voice()
+    return _voice_runner, _session_service, _memory
 
 
 async def run_turn(user_id: str, session_id: str, message: str) -> str:
