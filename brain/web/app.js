@@ -115,22 +115,30 @@ async function startVoice() {
   }
 
   // No more awaits from here on -- safe to commit to module-level state.
-  micStream = stream;
-  micCtx = ctx;
-  const source = micCtx.createMediaStreamSource(micStream);
-  micWorklet = new AudioWorkletNode(micCtx, "pcm-downsampler");
-  source.connect(micWorklet);
+  // Still guarded: a synchronous constructor throw (concurrent-AudioContext
+  // limit, malformed voice URL) must release everything and re-enable the
+  // button, or the mic leaks and the UI locks up permanently.
+  try {
+    micStream = stream;
+    micCtx = ctx;
+    const source = micCtx.createMediaStreamSource(micStream);
+    micWorklet = new AudioWorkletNode(micCtx, "pcm-downsampler");
+    source.connect(micWorklet);
 
-  playCtx = new AudioContext({ sampleRate: 24000 });
-  playNextStartTime = 0;
+    playCtx = new AudioContext({ sampleRate: 24000 });
+    playNextStartTime = 0;
 
-  const voiceUrl = window.JARVIS_VOICE_URL;
-  voiceWs = new WebSocket(voiceUrl);
-  voiceWs.binaryType = "arraybuffer";
-  voiceWs.onopen = onVoiceOpen;
-  voiceWs.onmessage = onVoiceMessage;
-  voiceWs.onclose = onVoiceDrop;
-  voiceWs.onerror = onVoiceDrop;
+    const voiceUrl = window.JARVIS_VOICE_URL;
+    voiceWs = new WebSocket(voiceUrl);
+    voiceWs.binaryType = "arraybuffer";
+    voiceWs.onopen = onVoiceOpen;
+    voiceWs.onmessage = onVoiceMessage;
+    voiceWs.onclose = onVoiceDrop;
+    voiceWs.onerror = onVoiceDrop;
+  } catch (err) {
+    cleanupVoice();
+    addMsg("Sesli mod başlatılamadı: " + err.message, "jarvis");
+  }
 }
 
 function onVoiceOpen() {
