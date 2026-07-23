@@ -95,6 +95,25 @@ class FakeCollection:
         return FakeQuery(self.docs.values()).limit(n)
 
 
+class FakeEvent:
+    """Minimal stand-in for ADK Event: has content with parts containing text."""
+    def __init__(self, text):
+        from types import SimpleNamespace
+        self.content = SimpleNamespace(parts=[SimpleNamespace(text=text)])
+
+    def is_final_response(self):
+        return True
+
+
+class FakeRunner:
+    """Stands in for ADK Runner: yields one final event echoing the message."""
+    def __init__(self, reply="cevap"):
+        self._reply = reply
+
+    async def run_async(self, *, user_id, session_id, new_message):
+        yield FakeEvent(self._reply)
+
+
 class FakeDB:
     def __init__(self):
         self.collections = {}

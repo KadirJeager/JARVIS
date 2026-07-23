@@ -81,8 +81,9 @@ def get_voice_runner_sessions_memory() -> "tuple[Runner, InMemorySessionService,
     return _voice_runner, _session_service, _memory
 
 
-async def run_turn(user_id: str, session_id: str, message: str) -> str:
-    _init()
+async def _ensure_session(user_id: str, session_id: str):
+    """Get the ADK session or create it. Rehydration eklenene kadar (Task 4)
+    yalnızca get-or-create yapar."""
     session = await _session_service.get_session(
         app_name=APP_NAME, user_id=user_id, session_id=session_id
     )
@@ -90,6 +91,13 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
         session = await _session_service.create_session(
             app_name=APP_NAME, user_id=user_id, session_id=session_id
         )
+    return session
+
+
+async def run_turn(user_id: str, session_id: str, message: str) -> str:
+    _init()
+    await _ensure_session(user_id, session_id)
+    _messages.append(user_id, session_id, "user", message)
     content = types.Content(role="user", parts=[types.Part(text=message)])
     reply = ""
     async for event in _runner.run_async(
@@ -97,7 +105,7 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
     ):
         if event.is_final_response() and event.content and event.content.parts:
             reply = event.content.parts[0].text or ""
-    _memory.snapshot_session(session_id, user_id, {"last_message": message, "last_reply": reply})
+    _messages.append(user_id, session_id, "model", reply)
     return reply
 
 

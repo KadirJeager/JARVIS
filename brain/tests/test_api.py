@@ -5,7 +5,7 @@ import app.auth as auth_mod
 import app.main as main_mod
 from app.auth import require_user
 from app.messages import MessageStore
-from tests.fakes import FakeDB
+from tests.fakes import FakeDB, FakeRunner
 
 
 @pytest.fixture()
@@ -211,3 +211,22 @@ def test_history_response_includes_ts(monkeypatch):
         assert "ts" in msg
         assert "role" in msg
         assert "text" in msg
+
+
+@pytest.mark.asyncio
+async def test_run_turn_persists_user_and_model_messages(monkeypatch):
+    """run_turn must append user message and model reply to _messages."""
+    store = MessageStore(FakeDB())
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply="merhaba"))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    async def fake_ensure(user_id, session_id):
+        return None  # session object unused by FakeRunner
+
+    monkeypatch.setattr(main_mod, "_ensure_session", fake_ensure)
+
+    reply = await main_mod.run_turn("u@x.com", "s1", "selam")
+    assert reply == "merhaba"
+    hist = store.history("u@x.com", "s1")
+    assert [(h["role"], h["text"]) for h in hist] == [("user", "selam"), ("model", "merhaba")]
