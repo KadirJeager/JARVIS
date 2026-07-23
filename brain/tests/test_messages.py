@@ -44,7 +44,7 @@ def test_sanitize_session_id_accepts_uuid_like():
     assert sanitize_session_id("web-2026-07-24") == "web-2026-07-24"
 
 
-@pytest.mark.parametrize("bad", ["", "  ", "a/b", "x" * 300, "a\nb"])
+@pytest.mark.parametrize("bad", ["", "  ", "a/b", "x" * 300, "a\nb", "web-2026-07-24\n"])
 def test_sanitize_session_id_rejects_invalid(bad):
     with pytest.raises(ValueError):
         sanitize_session_id(bad)

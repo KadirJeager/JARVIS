@@ -27,7 +27,7 @@ def sanitize_session_id(raw: str) -> str:
     Guards the client-supplied session_id before it reaches Firestore or gets
     used as a document key: allow only URL/id-safe chars, bounded length, no
     slashes/newlines/path tricks (spec §9 'session_id sanitization')."""
-    if isinstance(raw, str) and _SESSION_ID_RE.match(raw):
+    if isinstance(raw, str) and _SESSION_ID_RE.fullmatch(raw):
         return raw
     raise ValueError("gecersiz session_id")
 
@@ -54,6 +54,9 @@ class MessageStore:
         DESC + limit fetches the newest N (bounded read); we reverse to
         chronological so callers (UI render, rehydration replay) get natural
         order."""
+        # ts-tie risk (identical microsecond timestamps) is accepted: real flow has
+        # seconds of I/O between appends (user msg → LLM → model msg) so ties are rare;
+        # test determinism comes from injected now_fn; monotonic seq was judged YAGNI.
         query = (
             self.db.collection(COLLECTION)
             .where(filter=FieldFilter("user_id", "==", user_id))
