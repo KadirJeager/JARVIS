@@ -359,3 +359,30 @@ cd brain && gcloud run deploy jarvis-voice --source . --region europe-west1 --pr
 ## Kapsam Dışı (bilinçli)
 
 Android/Wear (2b/2c), "Devral" akışı ve arama kartları (telefon Katman 3'le gelir), barge-in inceliklerinin cilası, kalıcı oturum çerezi (2b'de), ses geçidinde ayrı hafıza (aynı beyin nesneleri kullanılır).
+
+---
+
+### Task 6: Otomatik live model çözücü (Kadir'in "hep en güncel" kuralı)
+
+**Neden:** Metin yolu `gemini-flash-latest` alias'ıyla otomatik güncel; ama live modellerin -latest alias'ı yok, tek alias'lı olan (2.5-native-audio-latest) ADK deadlock'una düşüyor. Çözücü, açılışta en yeni KULLANILABILIR genel-amaçlı 3.x+ live modeli seçer; Google 3.6-live veya live-latest çıkarınca Jarvis kendiliğinden geçer.
+
+**Files:**
+- Create: `brain/app/live_model.py`
+- Modify: `brain/app/config.py` (LIVE_MODEL sabitini `resolve_live_model()` fonksiyonuna çevir), `brain/app/main.py` (`_init_voice` çözücüyü çağırsın)
+- Test: `brain/tests/test_live_model.py`
+
+**Interfaces:**
+- `live_model.is_deadlock_safe(name: str) -> bool` — ADK'nın `_is_gemini_3_x_live` predicate'ini kullanır (kurulu kaynaktan doğrula: `google/adk/utils/model_name_utils.py`; importlanabiliyorsa onu kullan, değilse regex fallback `re.search(r"gemini-3\.\d+.*live", name)` — ADK'nın gerçek regex'ini birebir aynala).
+- `live_model.is_specialized(name: str) -> bool` — blocklist: `("translate", "image", "tts", "vision", "thinking")`.
+- `live_model.version_key(name: str) -> tuple` — `gemini-<major>.<minor>` → `(major, minor)`; parse edilemezse `(0, 0)`.
+- `live_model.resolve(fetch_models=None, fallback="gemini-3.1-flash-live-preview") -> str` — fetch_models enjekte edilebilir (test); default gerçek HTTP `GET /v1beta/models?key=$GOOGLE_API_KEY&pageSize=200` (urllib, yeni bağımlılık yok, 10sn timeout). Süzme: `bidiGenerateContent` destekli ∧ deadlock-safe ∧ ¬specialized. Boşsa fallback. Değilse `max(version_key)` (eşitlikte preview olmayanı yeğle, yoksa lexical). Seçileni `logging.info("resolved live model: %s", chosen)` ile DATA-log'la.
+- `config.resolve_live_model() -> str` — env `JARVIS_LIVE_MODEL` varsa onu döndür (mutlak ezme); yoksa `live_model.resolve()`'u try/except ile sarıp hata olursa fallback döndür + `logging.exception`.
+- `main._init_voice()` — `build_agent(..., model=config.resolve_live_model())`. Çözüm bir kez, instance ömründe olur (mevcut `if _voice_runner is not None: return` guard'ı yeterli).
+
+**TDD testleri:** (1) sahte liste [2.5-aliased, 3.1-live, 3.5-translate, hayali 3.6-flash-live] → 3.6 seçilir; (2) sadece [2.5, 3.5-translate] → fallback; (3) fetch fırlatırsa `config.resolve_live_model` fallback döndürür; (4) version_key sıralaması; (5) ADK predicate importlanabiliyorsa: seçilen model `is_deadlock_safe` geçer.
+
+**Canlı doğrulama (scratchpad, commit'siz):** gerçek `live_model.resolve()`'u `GOOGLE_API_KEY` ile çağır → bugün `gemini-3.1-flash-live-preview` dönmeli (gerçek HTTP + süzgeçler çalışıyor kanıtı). DATA-log: çekilen model sayısı, süzgeçten geçenler, seçilen.
+
+**Kabul edilmiş kalıntı risk:** "listede var ≠ çağrılabilir" (2.5-flash dersi) — her soğuk başlangıçta bidi-callability testi çok pahalı; süzgeç + fallback + log yeterli. Yeni Google sürümünden sonra ses bozulursa log seçilen modeli anında gösterir.
+
+- [ ] Adımlar: TDD (RED→GREEN), canlı doğrulama, tüm suite yeşil, commit `feat: auto-resolve newest usable live model (honors -latest rule for live)` + trailer.
