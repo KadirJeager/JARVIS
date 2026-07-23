@@ -1,6 +1,7 @@
 import os
 
 MODEL_NAME = os.environ.get("JARVIS_MODEL", "gemini-flash-latest")
+LIVE_MODEL = os.environ.get("JARVIS_LIVE_MODEL", "gemini-2.5-flash-native-audio-latest")
 DRY_RUN = os.environ.get("JARVIS_DRY_RUN", "0") == "1"
 OAUTH_CLIENT_ID = os.environ.get("JARVIS_OAUTH_CLIENT_ID", "")
 ALLOWED_EMAILS = set(
