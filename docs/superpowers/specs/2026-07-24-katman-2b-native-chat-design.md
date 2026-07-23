@@ -30,6 +30,20 @@ Başarı ölçütü: Telefonda uygulama açılır, giriş **hatırlanır**, önc
 - Çoklu konuşma başlığı (birden çok session_id yönetimi), çok-cihaz gerçek-zamanlı senkron — Katman 3+.
 - Wear OS — Katman 2c.
 
+### 2.1 Yol haritası — Gemini app dilim eşlemesi
+
+2b+ hem **UI/UX** hem **özellik yol haritası** olarak Google Gemini Android uygulamasını (2026 redesign) referans alır — kararları sıfırdan icat etmek yerine kanıtlanmış bir modeli taklit ederiz. **Marka Jarvis'tir** (LogoKJ, kendi paleti); Gemini'nin logosu/ismi/birebir görsel varlıkları kullanılmaz — yalnızca UX kalıpları ve genel layout dili.
+
+| JARVIS dilimi | Gemini karşılığı | Ne zaman |
+|---|---|---|
+| **1 (bu MVP)**: tek sohbet + kalıcı oturum | Ana chat yüzeyi + Library (geçmiş) çekirdeği | **şimdi** |
+| 2: çoklu konuşma + arama | Yan çekmece (New Chat, Search chats, Library) | sonra |
+| 3: native ses | Gemini Live (chat'e entegre, yazı↔ses geçişi) — 2a'yı native'e taşır | sonra |
+| 4: multimodal giriş | Images / Videos | sonra |
+| JARVIS-özel: ASSIST/güç tuşu, onay merkezi | kısmen "araçlar / bağlı uygulamalar" | sonra |
+
+Bu dilimin **kalıcı oturumu**, Gemini'nin "Library/geçmiş" kavramının çekirdeğidir: tek kalıcı `session_id`, Dilim 2'de çoklu konuşmaya doğal olarak genişler (bu yüzden şimdiden `user_id`+`session_id` ile anahtarlanıyor).
+
 ## 3. Mimari genel bakış
 
 Monorepo, iki ayrı toolchain:
@@ -73,6 +87,12 @@ Her modül tek sorumluluk; iyi tanımlı arayüzle konuşur; bağımsız test ed
 | Auth | Credential Manager (`androidx.credentials` + `googleid`) | Google'ın güncel önerdiği yol; eski `GoogleSignInClient` **değil** |
 
 Kesin bağımlılık **sürümleri** (Compose BOM, AGP, Kotlin, credentials, retrofit) plan aşamasında resmi kaynaktan pinlenecek — özellikle **AGP ↔ JDK uyumu** (ortamda JDK 26 var; AGP muhtemelen JDK 17/21 ister → ayrı JDK gerekecek).
+
+### 5.1 UI referansı — Gemini 2026 estetiği
+
+MVP'nin tek sohbet yüzeyi, Gemini app'in 2026 redesign'ını referans alır: **minimalist, immersive tek sohbet**, temiz boşluk, büyük okunur metin, yumuşak gradyan zemin — ama Gemini'nin mavi-beyazı yerine **Jarvis paleti + LogoKJ**. Compose UX kalıpları için açık kaynak referanslar: Google'ın resmi [Androidify](https://android-developers.googleblog.com/2025/09/androidify-ai-gemini-android-jetpack-compose-firebase-camerax.html) (AI-first Compose kalıpları) ve [GetStream/gemini-android](https://github.com/GetStream/gemini-android) (Compose chat UI). Bunlar **kalıp/desen** referansıdır, kod veya marka kopyası değil.
+
+Kesin görsel dil (renk token'ları, tipografi ölçeği, mesaj-balonu bileşenleri, input bar) implementation aşamasında **frontend-design** skill'iyle şekillenecek. Görsel doğrulama headless emulator ekran görüntüsünden yapılır (§11).
 
 ## 6. Backend eklemeleri (brain/)
 
