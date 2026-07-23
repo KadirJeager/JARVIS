@@ -185,5 +185,13 @@ def test_config_resolve_live_model_falls_back_when_resolve_raises(monkeypatch):
 
 def test_config_resolve_live_model_delegates_to_live_model_resolve(monkeypatch):
     monkeypatch.delenv("JARVIS_LIVE_MODEL", raising=False)
-    monkeypatch.setattr(live_model, "resolve", lambda: "gemini-3.9-flash-live-preview")
+    captured = {}
+
+    def fake_resolve(fallback=None):
+        captured["fallback"] = fallback
+        return "gemini-3.9-flash-live-preview"
+
+    monkeypatch.setattr(live_model, "resolve", fake_resolve)
     assert config.resolve_live_model() == "gemini-3.9-flash-live-preview"
+    # config must forward its single-source fallback pin to resolve()
+    assert captured["fallback"] == config.LIVE_MODEL_FALLBACK
