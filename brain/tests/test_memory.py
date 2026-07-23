@@ -1,5 +1,5 @@
 """Tests for tiered memory skeleton."""
-from app.memory import FirestoreAudit, Memory
+from app.memory import FirestoreAudit, Memory, _merge_ranked
 from tests.fakes import FakeDB
 
 
@@ -52,3 +52,26 @@ def test_search_uses_embed_fn_when_available():
     hits = m.search_memory("kahve nereden")
     assert calls  # embedding gerçekten çağrıldı
     assert "kahve" in hits[0]["text"]
+
+
+def test_merge_ranked_orders_by_distance_ascending_across_sources():
+    # Regression for the cross-collection ranking bug: a "facts" hit with a
+    # larger (worse) distance must not out-rank a closer "lessons" hit just
+    # because it happened to be appended first.
+    hits = [
+        (0.9, {"source": "facts", "text": "uzak fact"}),
+        (0.1, {"source": "lessons", "text": "yakın lesson"}),
+        (0.5, {"source": "facts", "text": "orta fact"}),
+    ]
+    result = _merge_ranked(hits, top_k=2)
+    assert [h["text"] for h in result] == ["yakın lesson", "orta fact"]
+
+
+def test_merge_ranked_respects_top_k_truncation():
+    hits = [(float(i), {"source": "facts", "text": str(i)}) for i in range(5)]
+    result = _merge_ranked(hits, top_k=3)
+    assert [h["text"] for h in result] == ["0", "1", "2"]
+
+
+def test_merge_ranked_empty_input():
+    assert _merge_ranked([], top_k=5) == []

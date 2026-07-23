@@ -17,6 +17,14 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _merge_ranked(hits: list[tuple[float, dict]], top_k: int) -> list[dict]:
+    """Sort (distance, hit) pairs ascending -- Firestore COSINE distance: smaller
+    means closer -- and truncate once to top_k. Pure and DB-free so the
+    cross-collection merge logic can be unit-tested without a real find_nearest."""
+    hits.sort(key=lambda pair: pair[0])
+    return [hit for _, hit in hits[:top_k]]
+
+
 def make_embed_fn() -> Callable[[str], list[float]]:
     """Real embedding factory: google-genai `gemini-embedding-001`, fixed to 768 dims
     (matches the Firestore vector index; see task-10-brief.md Step 4 note)."""
@@ -105,6 +113,9 @@ class Memory:
 
     def _search_semantic(self, query: str, top_k: int) -> list[dict]:
         query_vector = self.embed_fn(query)
+        # Uniform-backend assumption: "facts" and "lessons" always come from the
+        # same db (both real Firestore or both the fake), so probing one
+        # collection is enough to decide the path for both.
         if hasattr(self.db.collection("facts"), "find_nearest"):
             return self._search_semantic_native(query_vector, top_k)
         scored = []
@@ -121,25 +132,45 @@ class Memory:
         return [hit for _, hit in scored[:top_k]]
 
     def _search_semantic_native(self, query_vector: list[float], top_k: int) -> list[dict]:
-        """Real-Firestore ANN path via `find_nearest`. Not exercised by the
-        fake-DB test suite (FakeCollection has no find_nearest) — kept
-        intentionally thin: build the KNN query and read back plain dicts."""
+        """Real-Firestore ANN path via `find_nearest`. Each collection is queried
+        for its own top_k, so the two per-collection result sets must be merged
+        by distance (not just concatenated+truncated) before the final
+        truncation -- otherwise a collection that fills the quota first can
+        silently push out closer hits from the other collection.
+
+        `distance_result_field` makes Firestore return the computed COSINE
+        distance as a normal field on the document (verified against the
+        installed google-cloud-firestore 2.28.0 source: the name passed here is
+        forwarded to `StructuredQuery.FindNearest.distance_result_field`, and
+        the server adds it to `response_pb.document.fields`, which
+        `_query_response_to_snapshot` decodes into the snapshot like any other
+        field -- so it shows up in `snap.to_dict()`, no separate accessor).
+
+        Not exercised end-to-end by the fake-DB test suite (FakeCollection has
+        no find_nearest); the merge/sort/truncate step is covered directly via
+        `_merge_ranked`."""
         from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
         from google.cloud.firestore_v1.vector import Vector
 
-        hits = []
+        distance_field = "vector_distance"
+        hits: list[tuple[float, dict]] = []
         for name in ("facts", "lessons"):
             query = self.db.collection(name).find_nearest(
                 vector_field="embedding",
                 query_vector=Vector(query_vector),
                 distance_measure=DistanceMeasure.COSINE,
                 limit=top_k,
+                distance_result_field=distance_field,
             )
             for snap in query.stream():
                 data = snap.to_dict()
-                text = " ".join(str(v) for k, v in data.items() if k != "embedding")
-                hits.append({"source": name, "text": text})
-        return hits[:top_k]
+                distance = data.get(distance_field)
+                text = " ".join(
+                    str(v) for k, v in data.items()
+                    if k not in ("embedding", distance_field)
+                )
+                hits.append((distance, {"source": name, "text": text}))
+        return _merge_ranked(hits, top_k)
 
     # -- Tier 2 (short-term): session snapshot (§4.5)
     def snapshot_session(self, session_id: str, user_id: str, summary: dict) -> None:
