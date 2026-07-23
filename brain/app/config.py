@@ -39,7 +39,10 @@ def resolve_live_model() -> str:
     if env_override:
         return env_override
     try:
-        return live_model.resolve()
+        # Pass the same fallback so both failure branches (resolve()'s internal
+        # empty/fetch-error path and this outer catch-all) stay in sync if the
+        # pin is ever changed after an incident.
+        return live_model.resolve(fallback=LIVE_MODEL_FALLBACK)
     except Exception:
         logging.exception(
             "config.resolve_live_model: live_model.resolve() failed, using fallback %s",
