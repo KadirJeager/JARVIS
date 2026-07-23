@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 import app.auth as auth_mod
 import app.main as main_mod
 from app.auth import require_user
+from app.messages import MessageStore
+from tests.fakes import FakeDB
 
 
 @pytest.fixture()
@@ -111,3 +113,49 @@ def test_chat_allowlisted_verified_email_returns_200(monkeypatch):
         )
     assert r.status_code == 200
     assert r.json()["reply"] == "echo:selam"
+
+
+def test_history_returns_user_session_messages(monkeypatch):
+    store = MessageStore(FakeDB())
+    store.append("owner@example.com", "s1", "user", "selam")
+    store.append("owner@example.com", "s1", "model", "merhaba")
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)  # skip Firestore/Runner init
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/history", params={"session_id": "s1"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 200
+    assert [(m["role"], m["text"]) for m in r.json()["messages"]] == [
+        ("user", "selam"), ("model", "merhaba")
+    ]
+
+
+def test_history_requires_auth():
+    with TestClient(main_mod.app) as c:
+        r = c.get("/api/history", params={"session_id": "s1"})
+    assert r.status_code in (401, 403)
+
+
+def test_history_rejects_bad_session_id(monkeypatch):
+    monkeypatch.setattr(main_mod, "_messages", MessageStore(FakeDB()))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/history", params={"session_id": "a/b"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 400
+
+
+def test_chat_rejects_bad_session_id():
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.post("/api/chat", json={"session_id": "a/b", "message": "selam"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 400

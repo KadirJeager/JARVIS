@@ -9,7 +9,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, voice
+from . import config, messages, voice
 from .auth import require_user
 
 if TYPE_CHECKING:
@@ -22,12 +22,13 @@ app.include_router(voice.router)
 _runner: Runner | None = None
 _session_service = InMemorySessionService()
 _memory = None
+_messages: "messages.MessageStore | None" = None
 _voice_runner: Runner | None = None
 
 
 def _init() -> None:
     """Lazy init so tests can import the module without GCP credentials."""
-    global _runner, _memory
+    global _runner, _memory, _messages
     if _runner is not None:
         return
     from google.cloud import firestore
@@ -37,6 +38,7 @@ def _init() -> None:
 
     db = firestore.Client()
     _memory = Memory(db, embed_fn=make_embed_fn())
+    _messages = messages.MessageStore(db)
     _runner = Runner(
         app_name=APP_NAME,
         agent=build_agent(_memory, FirestoreAudit(db)),
@@ -116,14 +118,28 @@ async def healthz():
 @app.post("/api/chat")
 async def chat(req: ChatRequest, email: str = Depends(require_user)):
     try:
-        reply = await run_turn(user_id=email, session_id=req.session_id, message=req.message)
+        sid = messages.sanitize_session_id(req.session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Geçersiz oturum kimliği")
+    try:
+        reply = await run_turn(user_id=email, session_id=sid, message=req.message)
     except Exception:
-        logging.exception("chat: run_turn failed for user_id=%s session_id=%s", email, req.session_id)
+        logging.exception("chat: run_turn failed for user_id=%s session_id=%s", email, sid)
         raise HTTPException(
             status_code=502,
             detail="Jarvis şu anda cevap veremiyor (altyapı hatası). Az sonra tekrar dene.",
         )
     return {"reply": reply}
+
+
+@app.get("/api/history")
+async def history(session_id: str, email: str = Depends(require_user)):
+    _init()
+    try:
+        sid = messages.sanitize_session_id(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Geçersiz oturum kimliği")
+    return {"messages": _messages.history(user_id=email, session_id=sid)}
 
 
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web")
