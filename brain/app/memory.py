@@ -7,10 +7,13 @@ def _now() -> str:
 
 
 class Memory:
+    """Return strings like "kaydedildi" are intentionally Turkish: they are tool
+    outputs the agent relays to the (Turkish-speaking) user, not internal API text."""
+
     def __init__(self, db):
         self.db = db
 
-    # -- Kademe 3: user profile (§8.1)
+    # -- Tier 3 (long-term): user profile (§8.1)
     def get_profile(self) -> dict:
         snap = self.db.collection("profile").document("main").get()
         return snap.to_dict() if snap.exists else {}
@@ -19,12 +22,12 @@ class Memory:
         self.db.collection("profile").document("main").set(patch, merge=True)
         return self.get_profile()
 
-    # -- Kademe 3: explicit facts / preferences
+    # -- Tier 3 (long-term): explicit facts / preferences
     def remember_fact(self, fact: str) -> str:
         self.db.collection("facts").add({"text": fact, "ts": _now()})
         return "kaydedildi"
 
-    # -- Kademe 3: lesson log (§8.2)
+    # -- Tier 3 (long-term): lesson log (§8.2)
     def add_lesson(self, context: str, tried: str, went_wrong: str, correct: str) -> str:
         self.db.collection("lessons").add({
             "context": context, "tried": tried,
@@ -32,7 +35,8 @@ class Memory:
         })
         return "ders kaydedildi"
 
-    # -- Katman 1 search: substring over facts+lessons (semantic upgrade: Task 10)
+    # -- Layer-1 search: substring over facts+lessons, insertion order (recency
+    # ordering deliberately deferred; semantic search replaces this in Task 10)
     def search_memory(self, query: str, top_k: int = 5) -> list[dict]:
         q = query.lower()
         hits = []
@@ -44,7 +48,7 @@ class Memory:
                     hits.append({"source": name, "text": text})
         return hits[:top_k]
 
-    # -- Kademe 2: session snapshot (§4.5)
+    # -- Tier 2 (short-term): session snapshot (§4.5)
     def snapshot_session(self, session_id: str, user_id: str, summary: dict) -> None:
         self.db.collection("sessions").document(session_id).set(
             {"user_id": user_id, "ts": _now(), **summary}
