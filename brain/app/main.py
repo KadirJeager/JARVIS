@@ -44,18 +44,6 @@ def _init() -> None:
     )
 
 
-def get_runner_sessions_memory() -> "tuple[Runner, InMemorySessionService, Memory | None]":
-    """Accessor for voice.py: same Katman 1 runner/session_service/memory, no privates touched."""
-    _init()
-    return _runner, _session_service, _memory
-
-
-def get_runner_and_sessions() -> tuple[Runner, InMemorySessionService]:
-    """Thin back-compat delegate: same Katman 1 runner/session_service, no memory."""
-    runner, sessions, _ = get_runner_sessions_memory()
-    return runner, sessions
-
-
 def _init_voice() -> None:
     """Lazy init for the voice-mode Runner: a SEPARATE Runner/Agent bound to
     config.resolve_live_model() (config.MODEL_NAME is not live-capable),

@@ -162,8 +162,13 @@ async def ws_voice(ws: WebSocket) -> None:
         return
     from . import main
 
-    runner, sessions, memory = main.get_voice_runner_sessions_memory()
     try:
+        # Runner acquisition is inside the try too: a cold-start infra hiccup
+        # (Firestore client init, live-model resolution) must close the socket
+        # gracefully with an error frame, not propagate unhandled through
+        # Starlette (which has no websocket exception handler) -- matching how
+        # the text path wraps its _init() inside run_turn's caller.
+        runner, sessions, memory = main.get_voice_runner_sessions_memory()
         await VoiceBridge(runner, sessions, memory=memory).run(ws, user_id=email)
     except Exception:
         logging.exception("voice bridge failed for %s", email)
