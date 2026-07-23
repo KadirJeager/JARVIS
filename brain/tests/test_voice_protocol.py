@@ -4,13 +4,14 @@ import pytest
 
 from app import config
 from app.voice_protocol import (
-    AUDIO_IN_RATE, AUDIO_OUT_RATE, evt_error, evt_transcript,
+    AUDIO_IN_RATE, AUDIO_MIME_IN, AUDIO_OUT_RATE, evt_error, evt_transcript,
     evt_turn_complete, parse_hello,
 )
 
 
 def test_rates_fixed_by_contract():
     assert AUDIO_IN_RATE == 16000 and AUDIO_OUT_RATE == 24000
+    assert AUDIO_MIME_IN == "audio/pcm;rate=16000"
 
 
 def test_live_model_default_uses_latest_alias():
@@ -29,3 +30,7 @@ def test_parse_hello_roundtrip_and_reject():
         parse_hello("not json")
     with pytest.raises(ValueError):
         parse_hello(json.dumps({"no_token": 1}))
+    with pytest.raises(ValueError):
+        parse_hello("42")  # valid JSON, not an object
+    with pytest.raises(ValueError):
+        parse_hello(json.dumps([1, 2]))

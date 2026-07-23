@@ -29,6 +29,8 @@ def parse_hello(raw: str) -> str:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError("hello frame is not JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("hello frame is not a JSON object")
     token = data.get("token")
     if not isinstance(token, str) or not token:
         raise ValueError("hello frame missing token")
