@@ -139,7 +139,14 @@ async def history(session_id: str, email: str = Depends(require_user)):
         sid = messages.sanitize_session_id(session_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Geçersiz oturum kimliği")
-    return {"messages": _messages.history(user_id=email, session_id=sid)}
+    try:
+        return {"messages": _messages.history(user_id=email, session_id=sid)}
+    except Exception:
+        logging.exception("history: read failed for user_id=%s session_id=%s", email, sid)
+        raise HTTPException(
+            status_code=502,
+            detail="Jarvis şu anda geçmişi getiremiyor (altyapı hatası). Az sonra tekrar dene.",
+        )
 
 
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web")

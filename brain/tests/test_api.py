@@ -159,3 +159,55 @@ def test_chat_rejects_bad_session_id():
     finally:
         main_mod.app.dependency_overrides.clear()
     assert r.status_code == 400
+
+
+def test_history_cross_user_isolation(monkeypatch):
+    """User A must only see their own messages, never user B's, even in the same session."""
+    store = MessageStore(FakeDB())
+    user_a = "owner@example.com"
+    user_b = "other@gmail.com"
+    session_id = "s1"
+
+    # Append messages for both users under the same session_id
+    store.append(user_a, session_id, "user", "A's message")
+    store.append(user_b, session_id, "user", "B's message")
+    store.append(user_a, session_id, "model", "A's reply")
+
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: user_a
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/history", params={"session_id": session_id})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    messages = r.json()["messages"]
+    texts = [m["text"] for m in messages]
+    assert "A's message" in texts
+    assert "A's reply" in texts
+    assert "B's message" not in texts
+
+
+def test_history_response_includes_ts(monkeypatch):
+    """Each message in the history response must include a 'ts' timestamp key."""
+    store = MessageStore(FakeDB())
+    store.append("owner@example.com", "s1", "user", "selam")
+    store.append("owner@example.com", "s1", "model", "merhaba")
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/history", params={"session_id": "s1"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    messages = r.json()["messages"]
+    assert len(messages) == 2
+    for msg in messages:
+        assert "ts" in msg
+        assert "role" in msg
+        assert "text" in msg
