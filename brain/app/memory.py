@@ -164,7 +164,11 @@ class Memory:
             )
             for snap in query.stream():
                 data = snap.to_dict()
-                distance = data.get(distance_field)
+                # inf fallback: a doc missing its server-computed distance ranks
+                # last instead of crashing the sort (source-verified as unlikely)
+                distance = data.get(distance_field, float("inf"))
+                if distance is None:
+                    distance = float("inf")
                 text = " ".join(
                     str(v) for k, v in data.items()
                     if k not in ("embedding", distance_field)
