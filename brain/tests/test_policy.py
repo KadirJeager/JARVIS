@@ -40,10 +40,19 @@ def test_red_tool_blocked_with_turkish_message():
     assert audit.entries[0]["decision"] == "block"
 
 
-def test_dry_run_intercepts_all_tools(monkeypatch):
+def test_dry_run_intercepts_green_tool(monkeypatch):
     monkeypatch.setattr(config, "DRY_RUN", True)
     audit = FakeAudit()
     cb = make_policy_callback(audit)
     result = cb(_tool("get_user_profile"), {"x": 2}, None)
     assert result is not None and "DRY-RUN" in result["result"]
     assert audit.entries[0]["decision"] == "dry_run"
+
+
+def test_red_zone_blocked_even_in_dry_run(monkeypatch):
+    monkeypatch.setattr(config, "DRY_RUN", True)
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    result = cb(_tool("unknown_danger"), {}, None)
+    assert result is not None and "POLİTİKA ENGELİ" in result["result"]
+    assert audit.entries[0]["decision"] == "block"  # not "dry_run"

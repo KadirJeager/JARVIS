@@ -7,7 +7,7 @@ ALLOWED_EMAILS = set(
     filter(None, os.environ.get("JARVIS_ALLOWED_EMAILS", "owner@example.com").split(","))
 )
 
-# Eylem Yetki Matrisi (North Star §9) — tool name -> zone
+# Action authorization matrix (North Star §9) — tool name -> zone
 ZONE_GREEN = "green"
 ZONE_YELLOW = "yellow"
 ZONE_RED = "red"
