@@ -25,10 +25,10 @@ def _init() -> None:
     from google.cloud import firestore
 
     from .agent import build_agent
-    from .memory import FirestoreAudit, Memory
+    from .memory import FirestoreAudit, Memory, make_embed_fn
 
     db = firestore.Client()
-    _memory = Memory(db)
+    _memory = Memory(db, embed_fn=make_embed_fn())
     _runner = Runner(
         app_name=APP_NAME,
         agent=build_agent(_memory, FirestoreAudit(db)),

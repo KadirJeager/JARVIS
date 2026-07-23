@@ -36,3 +36,19 @@ def test_firestore_audit_writes_to_audit_log():
     db = FakeDB()
     FirestoreAudit(db).write({"tool": "x", "decision": "allow"})
     assert list(db.collection("audit_log").docs.values())[0]["decision"] == "allow"
+
+
+def test_search_uses_embed_fn_when_available():
+    calls = []
+
+    def fake_embed(text):
+        calls.append(text)
+        return [1.0, 0.0] if "kahve" in text else [0.0, 1.0]
+
+    db = FakeDB()
+    m = Memory(db, embed_fn=fake_embed)
+    m.remember_fact("kahveyi X'ten söyler")
+    m.remember_fact("salı akşamı arama")
+    hits = m.search_memory("kahve nereden")
+    assert calls  # embedding gerçekten çağrıldı
+    assert "kahve" in hits[0]["text"]
