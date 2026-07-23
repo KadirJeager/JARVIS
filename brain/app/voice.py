@@ -1,7 +1,7 @@
 """Voice gateway: bridges a WebSocket to an ADK live session (North Star §4.2).
 
 Contract: see voice_protocol.py (frozen). Same agent/policy/audit as text chat —
-the bridge is handed the Katman 1 runner via main.get_runner_and_sessions(),
+the bridge is handed the Katman 1 runner via main.get_runner_sessions_memory(),
 it never builds a second agent.
 
 ADK's run_live is EXPERIMENTAL (google-adk 1.36.2). Field names below were
@@ -37,9 +37,11 @@ router = APIRouter()
 
 
 class VoiceBridge:
-    def __init__(self, runner, session_service):
+    def __init__(self, runner, session_service, memory=None):
         self.runner = runner
         self.session_service = session_service
+        self.memory = memory
+        self.transcript: list[dict] = []
 
     async def _pump_mic_once(self, ws, queue) -> bool:
         """Read one client message and forward mic audio to the live queue.
@@ -65,6 +67,7 @@ class VoiceBridge:
                 tr = getattr(event, tr_attr, None)
                 if tr and getattr(tr, "text", None):
                     await ws.send_text(json.dumps(vp.evt_transcript(role, tr.text)))
+                    self.transcript.append({"role": role, "text": tr.text})
             content = getattr(event, "content", None)
             for part in (getattr(content, "parts", None) or []):
                 blob = getattr(part, "inline_data", None)
@@ -94,26 +97,41 @@ class VoiceBridge:
         )
         pump_out = asyncio.create_task(self._pump_events(events, ws))
         try:
-            # LiveRequestQueue.close() (verified in live_request_queue.py) just
-            # enqueues a close sentinel on an unbounded asyncio.Queue -- it does
-            # NOT reject further send_realtime() puts. So a dead _pump_events
-            # task cannot be detected via "send raises"; instead re-check
-            # pump_out.done() every iteration so the mic loop stops pumping
-            # into a session whose event stream already ended/failed.
-            while not pump_out.done() and await self._pump_mic_once(ws, queue):
-                pass
-        finally:
-            pump_out.cancel()
             try:
-                # If pump_out died with its OWN exception (not cancellation),
-                # awaiting it re-raises that exception here — the nested
-                # finally guarantees events.aclose() still runs, so the live
-                # Gemini session is torn down on every exit path.
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pump_out
+                # LiveRequestQueue.close() (verified in live_request_queue.py) just
+                # enqueues a close sentinel on an unbounded asyncio.Queue -- it does
+                # NOT reject further send_realtime() puts. So a dead _pump_events
+                # task cannot be detected via "send raises"; instead re-check
+                # pump_out.done() every iteration so the mic loop stops pumping
+                # into a session whose event stream already ended/failed.
+                while not pump_out.done() and await self._pump_mic_once(ws, queue):
+                    pass
             finally:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await events.aclose()
+                pump_out.cancel()
+                try:
+                    # If pump_out died with its OWN exception (not cancellation),
+                    # awaiting it re-raises that exception here — the nested
+                    # finally guarantees events.aclose() still runs, so the live
+                    # Gemini session is torn down on every exit path.
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pump_out
+                finally:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await events.aclose()
+        finally:
+            # Outermost teardown: persist the transcript snapshot on every exit
+            # path (happy path, client disconnect, or exception propagating out
+            # of the block above). Wrapped in try/except so a Firestore hiccup
+            # can never mask the original exception.
+            if self.memory is not None and self.transcript:
+                try:
+                    self.memory.snapshot_session(
+                        session_id, user_id, {"transcript": self.transcript[-50:]}
+                    )
+                except Exception:
+                    logging.exception(
+                        "voice bridge: failed to snapshot transcript for %s", user_id
+                    )
 
 
 async def _handshake(ws: WebSocket) -> str | None:
@@ -140,9 +158,9 @@ async def ws_voice(ws: WebSocket) -> None:
         return
     from . import main
 
-    runner, sessions = main.get_runner_and_sessions()
+    runner, sessions, memory = main.get_runner_sessions_memory()
     try:
-        await VoiceBridge(runner, sessions).run(ws, user_id=email)
+        await VoiceBridge(runner, sessions, memory=memory).run(ws, user_id=email)
     except Exception:
         logging.exception("voice bridge failed for %s", email)
         await ws.send_text(json.dumps(vp.evt_error("Sesli oturum düştü, tekrar bağlan")))

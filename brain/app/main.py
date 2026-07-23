@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -10,6 +11,9 @@ from pydantic import BaseModel
 
 from . import voice
 from .auth import require_user
+
+if TYPE_CHECKING:
+    from .memory import Memory
 
 APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
@@ -39,10 +43,16 @@ def _init() -> None:
     )
 
 
-def get_runner_and_sessions() -> tuple[Runner, InMemorySessionService]:
-    """Accessor for voice.py: same Katman 1 runner/session_service, no privates touched."""
+def get_runner_sessions_memory() -> "tuple[Runner, InMemorySessionService, Memory | None]":
+    """Accessor for voice.py: same Katman 1 runner/session_service/memory, no privates touched."""
     _init()
-    return _runner, _session_service
+    return _runner, _session_service, _memory
+
+
+def get_runner_and_sessions() -> tuple[Runner, InMemorySessionService]:
+    """Thin back-compat delegate: same Katman 1 runner/session_service, no memory."""
+    runner, sessions, _ = get_runner_sessions_memory()
+    return runner, sessions
 
 
 async def run_turn(user_id: str, session_id: str, message: str) -> str:

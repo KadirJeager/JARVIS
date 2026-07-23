@@ -125,6 +125,229 @@ async def test_bridge_emits_transcript_events_for_input_and_output():
     assert ("text", json.dumps({"type": "transcript", "role": "jarvis", "text": "selam"})) in ws.sent
 
 
+class YieldingFakeWS(FakeWS):
+    """Like FakeWS, but yields to the event loop on every receive(), the way a
+    real ASGI socket read always would -- this lets the concurrently running
+    _pump_events task actually get scheduled before the mic loop exits."""
+
+    async def receive(self):
+        await asyncio.sleep(0)
+        return await super().receive()
+
+    async def close(self, code=1000):
+        self.sent.append(("close", code))
+
+
+class FakeMemory:
+    """Fake Memory: records snapshot_session calls without touching Firestore."""
+
+    def __init__(self):
+        self.calls = []
+
+    def snapshot_session(self, session_id, user_id, summary):
+        self.calls.append((session_id, user_id, summary))
+
+
+@pytest.mark.asyncio
+async def test_pump_events_accumulates_transcript():
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("merhaba"))
+        yield _make_event(output_transcription=FakeTranscription("selam"))
+
+    ws = FakeWS([])
+    bridge = VoiceBridge(runner=None, session_service=None)
+    await bridge._pump_events(fake_events(), ws)
+    assert bridge.transcript == [
+        {"role": "user", "text": "merhaba"},
+        {"role": "jarvis", "text": "selam"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_snapshots_transcript_on_teardown():
+    class OneShotRunner:
+        def run_live(self, **kwargs):
+            async def events():
+                yield _make_event(output_transcription=FakeTranscription("selam"))
+
+            return events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    ws = YieldingFakeWS(
+        [
+            {"type": "websocket.receive", "bytes": b"\x00"},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    memory = FakeMemory()
+    bridge = VoiceBridge(
+        runner=OneShotRunner(), session_service=FakeSessionService(), memory=memory
+    )
+    await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+
+    assert len(memory.calls) == 1
+    session_id, user_id, summary = memory.calls[0]
+    assert session_id == "voice-user@example.com"
+    assert user_id == "user@example.com"
+    assert summary == {"transcript": [{"role": "jarvis", "text": "selam"}]}
+
+
+@pytest.mark.asyncio
+async def test_run_snapshots_last_50_transcript_lines():
+    class ManyLinesRunner:
+        def run_live(self, **kwargs):
+            async def events():
+                for i in range(60):
+                    yield _make_event(output_transcription=FakeTranscription(f"line-{i}"))
+
+            return events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    memory = FakeMemory()
+    bridge = VoiceBridge(
+        runner=ManyLinesRunner(), session_service=FakeSessionService(), memory=memory
+    )
+    await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+
+    assert len(memory.calls) == 1
+    _, _, summary = memory.calls[0]
+    assert len(summary["transcript"]) == 50
+    assert summary["transcript"][0] == {"role": "jarvis", "text": "line-10"}
+    assert summary["transcript"][-1] == {"role": "jarvis", "text": "line-59"}
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_snapshot_when_transcript_empty():
+    class NoTranscriptRunner:
+        def run_live(self, **kwargs):
+            async def events():
+                yield _make_event(data=b"\x01")
+
+            return events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    ws = FakeWS([{"type": "websocket.disconnect"}])
+    memory = FakeMemory()
+    bridge = VoiceBridge(
+        runner=NoTranscriptRunner(), session_service=FakeSessionService(), memory=memory
+    )
+    await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+
+    assert memory.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_without_memory_does_not_crash():
+    """memory defaults to None -- teardown must skip the snapshot silently."""
+
+    class OneShotRunner:
+        def run_live(self, **kwargs):
+            async def events():
+                yield _make_event(output_transcription=FakeTranscription("selam"))
+
+            return events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    bridge = VoiceBridge(runner=OneShotRunner(), session_service=FakeSessionService())
+    await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+    assert bridge.transcript == [{"role": "jarvis", "text": "selam"}]
+
+
+@pytest.mark.asyncio
+async def test_run_snapshots_even_when_run_exits_via_exception():
+    """Snapshot must survive an exception path -- outermost finally, not
+    just the happy path -- and a memory hiccup must not mask the original
+    exception."""
+
+    class FailingRunner:
+        def run_live(self, **kwargs):
+            async def failing_events():
+                yield _make_event(output_transcription=FakeTranscription("merhaba"))
+                raise RuntimeError("live stream died")
+
+            return failing_events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    ws = YieldingFakeWS(
+        [
+            {"type": "websocket.receive", "bytes": b"\x00"},
+            {"type": "websocket.receive", "bytes": b"\x00"},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    memory = FakeMemory()
+    bridge = VoiceBridge(runner=FailingRunner(), session_service=FakeSessionService(), memory=memory)
+    with pytest.raises(RuntimeError, match="live stream died"):
+        await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+
+    assert len(memory.calls) == 1
+    assert memory.calls[0][2] == {"transcript": [{"role": "jarvis", "text": "merhaba"}]}
+
+
+@pytest.mark.asyncio
+async def test_run_swallows_memory_exception_without_masking_original(monkeypatch, caplog):
+    """A Firestore hiccup during snapshot must be logged, not raised, so the
+    original exception (or the happy path) is never masked."""
+
+    class OneShotRunner:
+        def run_live(self, **kwargs):
+            async def events():
+                yield _make_event(output_transcription=FakeTranscription("selam"))
+
+            return events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    class ExplodingMemory:
+        def snapshot_session(self, session_id, user_id, summary):
+            raise RuntimeError("firestore hiccup")
+
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    bridge = VoiceBridge(
+        runner=OneShotRunner(), session_service=FakeSessionService(), memory=ExplodingMemory()
+    )
+    with caplog.at_level("ERROR"):
+        await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+    assert "firestore hiccup" in caplog.text or "snapshot" in caplog.text.lower()
+
+
 class FakeHandshakeWS:
     """Duck-type of the subset of fastapi.WebSocket used by _handshake."""
 
