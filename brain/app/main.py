@@ -61,6 +61,10 @@ class ChatRequest(BaseModel):
     message: str
 
 
+# /healthz is intercepted by Google Frontend on run.app (returns Google's own
+# 404 before reaching the container) — the canonical health path is /api/health;
+# /healthz is kept for local convenience only.
+@app.get("/api/health")
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}

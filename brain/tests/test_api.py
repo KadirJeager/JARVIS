@@ -19,6 +19,7 @@ def client(monkeypatch):
 
 def test_healthz(client):
     assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/api/health").json() == {"status": "ok"}
 
 
 def test_chat_roundtrip(client):
