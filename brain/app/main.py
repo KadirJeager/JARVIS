@@ -1,6 +1,7 @@
+import logging
 import os
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -72,7 +73,14 @@ async def healthz():
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, email: str = Depends(require_user)):
-    reply = await run_turn(user_id=email, session_id=req.session_id, message=req.message)
+    try:
+        reply = await run_turn(user_id=email, session_id=req.session_id, message=req.message)
+    except Exception:
+        logging.exception("chat: run_turn failed for user_id=%s session_id=%s", email, req.session_id)
+        raise HTTPException(
+            status_code=502,
+            detail="Jarvis şu anda cevap veremiyor (altyapı hatası). Az sonra tekrar dene.",
+        )
     return {"reply": reply}
 
 

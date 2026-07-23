@@ -30,7 +30,11 @@ def make_embed_fn() -> Callable[[str], list[float]]:
     (matches the Firestore vector index; see task-10-brief.md Step 4 note)."""
     from google import genai
 
-    client = genai.Client()  # GOOGLE_API_KEY env'den
+    # http_options={"timeout": ...} verified against installed google-genai
+    # 2.14.0 source (google/genai/types.py HttpOptions): `timeout` is an
+    # Optional[int] in milliseconds, and genai.Client() converts a dict via
+    # HttpOptions(**http_options) -- so 30_000 == 30s.
+    client = genai.Client(http_options={"timeout": 30_000})  # GOOGLE_API_KEY env'den
 
     def embed(text: str) -> list[float]:
         res = client.models.embed_content(

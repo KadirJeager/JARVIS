@@ -17,4 +17,6 @@ def require_user(authorization: str = Header(default="")) -> str:
     email = info.get("email", "")
     if email not in config.ALLOWED_EMAILS:
         raise HTTPException(status_code=403, detail="Bu hesap yetkili değil")
+    if info.get("email_verified") is not True:
+        raise HTTPException(status_code=403, detail="Bu hesap yetkili değil")
     return email
