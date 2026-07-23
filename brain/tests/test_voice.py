@@ -2,8 +2,10 @@ import asyncio
 import json
 
 import pytest
+from fastapi import WebSocketDisconnect
 
-from app.voice import VoiceBridge
+import app.voice as voice_mod
+from app.voice import VoiceBridge, _handshake
 
 
 class FakeWS:
@@ -121,3 +123,114 @@ async def test_bridge_emits_transcript_events_for_input_and_output():
     await bridge._pump_events(fake_events(), ws)
     assert ("text", json.dumps({"type": "transcript", "role": "user", "text": "merhaba"})) in ws.sent
     assert ("text", json.dumps({"type": "transcript", "role": "jarvis", "text": "selam"})) in ws.sent
+
+
+class FakeHandshakeWS:
+    """Duck-type of the subset of fastapi.WebSocket used by _handshake."""
+
+    def __init__(self, text=None, raise_disconnect=False):
+        self._text = text
+        self._raise_disconnect = raise_disconnect
+        self.sent = []
+        self.closed_with = None
+
+    async def receive_text(self):
+        if self._raise_disconnect:
+            raise WebSocketDisconnect(code=1000)
+        return self._text
+
+    async def send_text(self, t):
+        self.sent.append(t)
+
+    async def close(self, code=1000):
+        self.closed_with = code
+
+
+@pytest.mark.asyncio
+async def test_handshake_valid_hello_returns_email(monkeypatch):
+    monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
+    ws = FakeHandshakeWS(text=json.dumps({"token": "good-token"}))
+    email = await _handshake(ws)
+    assert email == "user@example.com"
+    assert ws.sent == []
+    assert ws.closed_with is None
+
+
+@pytest.mark.asyncio
+async def test_handshake_bad_hello_sends_error_and_closes_4401():
+    ws = FakeHandshakeWS(text="not json")
+    email = await _handshake(ws)
+    assert email is None
+    assert len(ws.sent) == 1
+    assert json.loads(ws.sent[0]) == {"type": "error", "message": "Giriş doğrulanamadı"}
+    assert ws.closed_with == 4401
+
+
+@pytest.mark.asyncio
+async def test_handshake_disconnect_returns_none_without_raising():
+    ws = FakeHandshakeWS(raise_disconnect=True)
+    email = await _handshake(ws)
+    assert email is None
+    assert ws.sent == []
+    assert ws.closed_with is None
+
+
+@pytest.mark.asyncio
+async def test_run_stops_and_propagates_when_pump_events_dies_without_hanging():
+    """If _pump_events raises after yielding once, run() must: (1) not hang
+    (bounded by wait_for), (2) not keep pumping mic audio into a dead
+    session past the point _pump_events died, and (3) have its exception
+    actually retrieved (no 'Task exception was never retrieved' warning from
+    asyncio's default handler, verified via a custom exception_handler)."""
+
+    class FailingRunner:
+        def run_live(self, **kwargs):
+            async def failing_events():
+                yield _make_event(data=b"\x01")
+                raise RuntimeError("live stream died")
+
+            return failing_events()
+
+    class FakeSessionService:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    class YieldingFakeWS(FakeWS):
+        """Like FakeWS, but yields to the event loop on every receive(), the
+        way a real ASGI socket read always would -- this lets the concurrently
+        running _pump_events task actually get scheduled and fail."""
+
+        async def receive(self):
+            await asyncio.sleep(0)
+            return await super().receive()
+
+        async def close(self, code=1000):
+            self.sent.append(("close", code))
+
+    ws = YieldingFakeWS(
+        [
+            {"type": "websocket.receive", "bytes": b"\x00"},
+            {"type": "websocket.receive", "bytes": b"\x00"},
+            {"type": "websocket.receive", "bytes": b"\x00"},
+            {"type": "websocket.disconnect"},
+        ]
+    )
+    bridge = VoiceBridge(runner=FailingRunner(), session_service=FakeSessionService())
+
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda loop, context: unhandled.append(context))
+    try:
+        with pytest.raises(RuntimeError, match="live stream died"):
+            await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert unhandled == []
+    # The dead session must not have absorbed every queued mic message --
+    # the pump_out.done() check should have cut the loop short.
+    assert ws.incoming, "run() kept draining mic input after the live stream died"

@@ -21,10 +21,11 @@ verified by reading the installed source (see task-2a2-report.md):
     Transcription(text=Optional[str], ...); Part.inline_data: Optional[Blob]
 """
 import asyncio
+import contextlib
 import json
 import logging
 
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.adk.agents.run_config import RunConfig
 from google.genai import types
@@ -93,21 +94,43 @@ class VoiceBridge:
         )
         pump_out = asyncio.create_task(self._pump_events(events, ws))
         try:
-            while await self._pump_mic_once(ws, queue):
+            # LiveRequestQueue.close() (verified in live_request_queue.py) just
+            # enqueues a close sentinel on an unbounded asyncio.Queue -- it does
+            # NOT reject further send_realtime() puts. So a dead _pump_events
+            # task cannot be detected via "send raises"; instead re-check
+            # pump_out.done() every iteration so the mic loop stops pumping
+            # into a session whose event stream already ended/failed.
+            while not pump_out.done() and await self._pump_mic_once(ws, queue):
                 pass
         finally:
             pump_out.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump_out
+            with contextlib.suppress(asyncio.CancelledError):
+                await events.aclose()
+
+
+async def _handshake(ws: WebSocket) -> str | None:
+    """Read + verify the hello frame. Returns the verified email, or None if
+    the handshake did not complete (bad hello -> evt_error + close(4401)
+    already sent; client disconnect -> nothing sent, the peer is gone)."""
+    try:
+        hello = await ws.receive_text()
+    except WebSocketDisconnect:
+        return None
+    try:
+        return verify_token_email(vp.parse_hello(hello))
+    except (ValueError, PermissionError):
+        await ws.send_text(json.dumps(vp.evt_error("Giriş doğrulanamadı")))
+        await ws.close(code=4401)
+        return None
 
 
 @router.websocket("/ws/voice")
 async def ws_voice(ws: WebSocket) -> None:
     await ws.accept()
-    try:
-        hello = await ws.receive_text()
-        email = verify_token_email(vp.parse_hello(hello))
-    except (ValueError, PermissionError):
-        await ws.send_text(json.dumps(vp.evt_error("Giriş doğrulanamadı")))
-        await ws.close(code=4401)
+    email = await _handshake(ws)
+    if email is None:
         return
     from . import main
 
