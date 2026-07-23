@@ -27,7 +27,7 @@ def test_green_tool_allowed_and_audited():
     audit = FakeAudit()
     cb = make_policy_callback(audit)
     result = cb(_tool("get_user_profile"), {"a": 1}, None)
-    assert result is None  # None => ADK aracı gerçekten çalıştırır
+    assert result is None  # None => ADK actually executes the tool
     assert audit.entries[0]["decision"] == "allow"
     assert audit.entries[0]["zone"] == config.ZONE_GREEN
 
