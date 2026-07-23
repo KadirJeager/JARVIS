@@ -1,9 +1,11 @@
 import pytest
 from fastapi.testclient import TestClient
+from google.adk.flows.llm_flows.contents import _is_other_agent_reply
 from google.adk.sessions import InMemorySessionService
 
 import app.auth as auth_mod
 import app.main as main_mod
+from app.agent import AGENT_NAME
 from app.auth import require_user
 from app.messages import MessageStore
 from tests.fakes import FakeDB, FakeRunner
@@ -247,6 +249,32 @@ async def test_ensure_session_rehydrates_from_history(monkeypatch):
     assert texts == ["adim Kadir", "memnun oldum Kadir"]
     roles = [ev.content.role for ev in session.events]
     assert roles == ["user", "model"]
+
+    # Event.author drives ADK's context-builder attribution and must be the
+    # agent's own name for model turns (not the raw Gemini role "model"), or
+    # ADK reframes the reply as a different agent's message on cold start --
+    # see main._ensure_session for the full explanation.
+    authors = [ev.author for ev in session.events]
+    assert authors == ["user", AGENT_NAME]
+
+    # Prove ADK itself won't reframe the rehydrated model event as a "for
+    # context" third-party quote (the actual bug this fix closes).
+    model_event = session.events[1]
+    assert _is_other_agent_reply(AGENT_NAME, model_event) is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_cold_start_with_no_prior_messages(monkeypatch):
+    """First-ever turn for a session: history() is empty, so the rehydration
+    loop runs zero times. Must still return a freshly created session with no
+    events, and must not raise."""
+    store = MessageStore(FakeDB())
+    svc = InMemorySessionService()
+    monkeypatch.setattr(main_mod, "_session_service", svc)
+    monkeypatch.setattr(main_mod, "_messages", store)
+
+    session = await main_mod._ensure_session("u@x.com", "brand-new-session")
+    assert session.events == []
 
 
 @pytest.mark.asyncio

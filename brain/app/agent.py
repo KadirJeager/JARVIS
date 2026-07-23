@@ -4,6 +4,12 @@ from . import config, tools
 from .memory import Memory
 from .policy import make_policy_callback
 
+# Shared with app/main.py so rehydrated (cold-start) events are attributed to
+# the SAME author ADK uses for live events (author=agent.name) -- see
+# _ensure_session for why this matters (ADK's _is_other_agent_reply reframes
+# any non-matching author as a third-party quote).
+AGENT_NAME = "jarvis_orchestrator"
+
 INSTRUCTION = """Sen Jarvis'sin — Kadir'in kişisel asistanı. Kendini her zaman \
 "Kadir'in asistanı Jarvis" olarak tanıtırsın; Kadir'in yerine geçmezsin.
 
@@ -23,7 +29,7 @@ def build_agent(memory: Memory, audit, model: str | None = None) -> Agent:
     instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory)."""
     tools.init(memory)
     return Agent(
-        name="jarvis_orchestrator",
+        name=AGENT_NAME,
         model=model or config.MODEL_NAME,
         instruction=INSTRUCTION,
         tools=tools.ALL_TOOLS,

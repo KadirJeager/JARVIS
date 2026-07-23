@@ -11,6 +11,7 @@ from google.genai import types
 from pydantic import BaseModel
 
 from . import config, messages, voice
+from .agent import AGENT_NAME
 from .auth import require_user
 
 if TYPE_CHECKING:
@@ -94,8 +95,16 @@ async def _ensure_session(user_id: str, session_id: str):
         app_name=APP_NAME, user_id=user_id, session_id=session_id
     )
     for msg in _messages.history(user_id, session_id):
+        # Event.author must match the agent's own name for model turns (and
+        # "user" for user turns) -- NOT the raw Gemini content role ("model").
+        # ADK's context builder (_is_other_agent_reply) treats any event whose
+        # author isn't the current agent's name (or "user") as a different
+        # agent's reply and rewrites it into a synthetic "For context: [model]
+        # said: ..." user turn, which would defeat rehydration on cold start.
+        # Live events don't hit this because ADK sets author=agent.name itself.
+        author = AGENT_NAME if msg["role"] == "model" else "user"
         event = Event(
-            author=msg["role"],  # "user" | "model"
+            author=author,
             content=types.Content(
                 role=msg["role"], parts=[types.Part(text=msg["text"])]
             ),
