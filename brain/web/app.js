@@ -55,6 +55,11 @@ let micCtx = null;
 let micWorklet = null;
 let playCtx = null;
 let playNextStartTime = 0;
+// Bumped on every start attempt and every stop, so an in-flight startVoice()
+// can tell -- after each await -- whether it was superseded by a later
+// stop/start (rapid toggling) and must discard whatever it just acquired
+// instead of committing it to the module-level state above.
+let voiceGen = 0;
 
 micBtn.addEventListener("click", () => {
   if (voiceActive || voiceStarting) {
@@ -66,43 +71,72 @@ micBtn.addEventListener("click", () => {
 
 async function startVoice() {
   voiceStarting = true;
+  micBtn.disabled = true;
+  const gen = ++voiceGen;
+
+  let stream;
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({
+    stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     });
   } catch (err) {
+    if (gen !== voiceGen) return; // superseded while awaiting permission
     voiceStarting = false;
+    micBtn.disabled = false;
     addMsg("Mikrofon erişimi alınamadı: " + err.message, "jarvis");
     return;
   }
-
-  try {
-    micCtx = new AudioContext();
-    await micCtx.audioWorklet.addModule("/audio-worklet.js");
-    const source = micCtx.createMediaStreamSource(micStream);
-    micWorklet = new AudioWorkletNode(micCtx, "pcm-downsampler");
-    source.connect(micWorklet);
-
-    playCtx = new AudioContext({ sampleRate: 24000 });
-    playNextStartTime = 0;
-
-    const voiceUrl = window.JARVIS_VOICE_URL;
-    voiceWs = new WebSocket(voiceUrl);
-    voiceWs.binaryType = "arraybuffer";
-    voiceWs.onopen = onVoiceOpen;
-    voiceWs.onmessage = onVoiceMessage;
-    voiceWs.onclose = onVoiceDrop;
-    voiceWs.onerror = onVoiceDrop;
-  } catch (err) {
-    voiceStarting = false;
-    cleanupVoice();
-    addMsg("Sesli mod başlatılamadı: " + err.message, "jarvis");
+  if (gen !== voiceGen) {
+    // A stop (or a newer start) happened while we were awaiting the
+    // permission prompt -- release the mic we just acquired and bail out
+    // without touching module state, which now belongs to a different
+    // generation.
+    stream.getTracks().forEach((t) => t.stop());
+    return;
   }
+
+  let ctx = null;
+  try {
+    ctx = new AudioContext();
+    await ctx.audioWorklet.addModule("/audio-worklet.js");
+  } catch (err) {
+    stream.getTracks().forEach((t) => t.stop());
+    if (ctx) ctx.close().catch(() => {});
+    if (gen !== voiceGen) return;
+    voiceStarting = false;
+    micBtn.disabled = false;
+    addMsg("Sesli mod başlatılamadı: " + err.message, "jarvis");
+    return;
+  }
+  if (gen !== voiceGen) {
+    stream.getTracks().forEach((t) => t.stop());
+    ctx.close().catch(() => {});
+    return;
+  }
+
+  // No more awaits from here on -- safe to commit to module-level state.
+  micStream = stream;
+  micCtx = ctx;
+  const source = micCtx.createMediaStreamSource(micStream);
+  micWorklet = new AudioWorkletNode(micCtx, "pcm-downsampler");
+  source.connect(micWorklet);
+
+  playCtx = new AudioContext({ sampleRate: 24000 });
+  playNextStartTime = 0;
+
+  const voiceUrl = window.JARVIS_VOICE_URL;
+  voiceWs = new WebSocket(voiceUrl);
+  voiceWs.binaryType = "arraybuffer";
+  voiceWs.onopen = onVoiceOpen;
+  voiceWs.onmessage = onVoiceMessage;
+  voiceWs.onclose = onVoiceDrop;
+  voiceWs.onerror = onVoiceDrop;
 }
 
 function onVoiceOpen() {
   voiceStarting = false;
   voiceActive = true;
+  micBtn.disabled = false;
   micBtn.classList.add("active");
   voiceWs.send(JSON.stringify({ token: idToken }));
   micWorklet.port.onmessage = (e) => {
@@ -151,18 +185,26 @@ function onVoiceDrop() {
 }
 
 function stopVoice() {
+  voiceGen++; // invalidate any in-flight startVoice() awaiting mic/worklet setup
   cleanupVoice();
 }
 
 function cleanupVoice() {
   voiceActive = false;
   voiceStarting = false;
+  micBtn.disabled = false;
   micBtn.classList.remove("active");
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
     micStream = null;
   }
   if (micWorklet) {
+    // TODO(debt): we don't flush the worklet's trailing <20ms partial PCM
+    // chunk before disconnecting -- that would need an async postMessage
+    // round-trip (main -> worklet -> main) coordinated with WS teardown,
+    // which risks races/hangs during cleanup for a transitional client
+    // whose replacement is the future Android app. Up to ~20ms of audio
+    // right before stop is intentionally dropped.
     micWorklet.port.onmessage = null;
     micWorklet.disconnect();
     micWorklet = null;
