@@ -18,14 +18,18 @@
     input { flex: 1; padding: 12px; border-radius: 24px; border: 1px solid #2a2f36;
             background: #181c22; color: inherit; font-size: 16px; }
     button { padding: 12px 18px; border-radius: 24px; border: 0; background: #2b4c7e; color: #fff; }
+    #mic { padding: 12px 16px; font-size: 18px; background: #3a3f47; }
+    #mic.active { background: #b3261e; }
     #signin { display: grid; place-items: center; flex: 1; }
   </style>
 </head>
 <body>
   <script>window.JARVIS_CLIENT_ID = "000000000000-tmu4im1mba53dmqj1gbhgba55v3i6hmb.apps.googleusercontent.com";</script>
+  <script>window.JARVIS_VOICE_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/voice";</script>
   <div id="signin"><div id="gbtn"></div></div>
   <div id="log" hidden></div>
   <form id="f" hidden>
+    <button type="button" id="mic" title="Sesli mod">🎤</button>
     <input id="inp" placeholder="Jarvis'e yaz..." autocomplete="off">
     <button>Gönder</button>
   </form>
