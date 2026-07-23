@@ -27,6 +27,44 @@ class FakeDoc:
             self.store[self.key] = dict(data)
 
 
+class FakeQuery:
+    """Minimal Firestore query surface: where(filter=FieldFilter)/order_by/limit/stream."""
+    def __init__(self, rows):
+        self._rows = list(rows)          # list[dict]
+        self._filters = []               # list[(field_path, op_string, value)]
+        self._order = None               # (field, direction)
+        self._limit = None
+
+    def where(self, filter=None):
+        self._filters.append((filter.field_path, filter.op_string, filter.value))
+        return self
+
+    def order_by(self, field, direction="ASCENDING"):
+        self._order = (field, direction)
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def stream(self):
+        rows = [d for d in self._rows if self._match(d)]
+        if self._order:
+            field, direction = self._order
+            rows.sort(key=lambda d: d.get(field), reverse=(direction == "DESCENDING"))
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        return [FakeSnap(d) for d in rows]
+
+    def _match(self, d):
+        for field_path, op_string, value in self._filters:
+            if op_string != "==":
+                raise NotImplementedError(f"FakeQuery op {op_string}")
+            if d.get(field_path) != value:
+                return False
+        return True
+
+
 class FakeCollection:
     _ids = itertools.count()
 
@@ -46,6 +84,15 @@ class FakeCollection:
         """Yield FakeSnap objects for each document, mimicking Firestore's stream()."""
         for data in self.docs.values():
             yield FakeSnap(data)
+
+    def where(self, filter=None):
+        return FakeQuery(self.docs.values()).where(filter=filter)
+
+    def order_by(self, field, direction="ASCENDING"):
+        return FakeQuery(self.docs.values()).order_by(field, direction)
+
+    def limit(self, n):
+        return FakeQuery(self.docs.values()).limit(n)
 
 
 class FakeDB:
