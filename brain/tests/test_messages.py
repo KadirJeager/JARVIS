@@ -37,7 +37,7 @@ def test_history_returns_newest_within_limit_chronological():
     for i in range(5):
         store.append("u@x.com", "s1", "user", f"m{i}")
     hist = store.history("u@x.com", "s1", limit=3)
-    assert [h["text"] for h in hist] == ["m2", "m3", "m4"]  # newest 3, eski→yeni
+    assert [h["text"] for h in hist] == ["m2", "m3", "m4"]  # newest 3, oldest→newest
 
 
 def test_sanitize_session_id_accepts_uuid_like():

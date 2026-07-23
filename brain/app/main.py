@@ -95,6 +95,13 @@ async def _ensure_session(user_id: str, session_id: str):
         app_name=APP_NAME, user_id=user_id, session_id=session_id
     )
     for msg in _messages.history(user_id, session_id):
+        if not msg["text"]:
+            # Defensively skip any stored message with empty text (e.g. a
+            # pre-existing empty-reply row) -- Gemini rejects empty text
+            # parts (INVALID_ARGUMENT), which would brick every turn in
+            # this session on replay. run_turn no longer persists these,
+            # but old rows may already exist.
+            continue
         # Event.author must match the agent's own name for model turns (and
         # "user" for user turns) -- NOT the raw Gemini content role ("model").
         # ADK's context builder (_is_other_agent_reply) treats any event whose
@@ -128,7 +135,8 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
     ):
         if event.is_final_response() and event.content and event.content.parts:
             reply = event.content.parts[0].text or ""
-    _messages.append(user_id, session_id, "model", reply)
+    if reply:
+        _messages.append(user_id, session_id, "model", reply)
     return reply
 
 
@@ -165,15 +173,15 @@ async def chat(req: ChatRequest, email: str = Depends(require_user)):
 
 @app.get("/api/history")
 async def history(session_id: str, email: str = Depends(require_user)):
-    _init()
     try:
         sid = messages.sanitize_session_id(session_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Geçersiz oturum kimliği")
     try:
+        _init()
         return {"messages": _messages.history(user_id=email, session_id=sid)}
     except Exception:
-        logging.exception("history: read failed for user_id=%s session_id=%s", email, sid)
+        logging.exception("history: init or read failed for user_id=%s session_id=%s", email, sid)
         raise HTTPException(
             status_code=502,
             detail="Jarvis şu anda geçmişi getiremiyor (altyapı hatası). Az sonra tekrar dene.",

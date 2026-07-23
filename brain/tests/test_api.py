@@ -11,6 +11,12 @@ from app.messages import MessageStore
 from tests.fakes import FakeDB, FakeRunner
 
 
+def _store():
+    # Monotonic ISO-ish timestamps so ordering is deterministic (no sleep).
+    counter = iter(f"2026-01-01T00:00:{i:02d}.000000+00:00" for i in range(60))
+    return MessageStore(FakeDB(), now_fn=lambda: next(counter))
+
+
 @pytest.fixture()
 def client(monkeypatch):
     async def fake_reply(user_id, session_id, message):
@@ -119,7 +125,7 @@ def test_chat_allowlisted_verified_email_returns_200(monkeypatch):
 
 
 def test_history_returns_user_session_messages(monkeypatch):
-    store = MessageStore(FakeDB())
+    store = _store()
     store.append("owner@example.com", "s1", "user", "selam")
     store.append("owner@example.com", "s1", "model", "merhaba")
     monkeypatch.setattr(main_mod, "_messages", store)
@@ -143,7 +149,7 @@ def test_history_requires_auth():
 
 
 def test_history_rejects_bad_session_id(monkeypatch):
-    monkeypatch.setattr(main_mod, "_messages", MessageStore(FakeDB()))
+    monkeypatch.setattr(main_mod, "_messages", _store())
     monkeypatch.setattr(main_mod, "_init", lambda: None)
     main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
     try:
@@ -152,6 +158,26 @@ def test_history_rejects_bad_session_id(monkeypatch):
     finally:
         main_mod.app.dependency_overrides.clear()
     assert r.status_code == 400
+
+
+def test_history_returns_502_on_init_failure(monkeypatch):
+    """A cold-start Firestore/Runner init failure in /api/history must yield
+    the same graceful Turkish 502 as a history-read failure, not a raw
+    unhandled 500 (_init() used to run outside any try/except here)."""
+    def boom():
+        raise RuntimeError("firestore init blew up")
+
+    monkeypatch.setattr(main_mod, "_init", boom)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/history", params={"session_id": "s1"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 502
+    assert r.json()["detail"] == (
+        "Jarvis şu anda geçmişi getiremiyor (altyapı hatası). Az sonra tekrar dene."
+    )
 
 
 def test_chat_rejects_bad_session_id():
@@ -166,7 +192,7 @@ def test_chat_rejects_bad_session_id():
 
 def test_history_cross_user_isolation(monkeypatch):
     """User A must only see their own messages, never user B's, even in the same session."""
-    store = MessageStore(FakeDB())
+    store = _store()
     user_a = "owner@example.com"
     user_b = "other@gmail.com"
     session_id = "s1"
@@ -195,7 +221,7 @@ def test_history_cross_user_isolation(monkeypatch):
 
 def test_history_response_includes_ts(monkeypatch):
     """Each message in the history response must include a 'ts' timestamp key."""
-    store = MessageStore(FakeDB())
+    store = _store()
     store.append("owner@example.com", "s1", "user", "selam")
     store.append("owner@example.com", "s1", "model", "merhaba")
     monkeypatch.setattr(main_mod, "_messages", store)
@@ -219,7 +245,7 @@ def test_history_response_includes_ts(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_turn_persists_user_and_model_messages(monkeypatch):
     """run_turn must append user message and model reply to _messages."""
-    store = MessageStore(FakeDB())
+    store = _store()
     monkeypatch.setattr(main_mod, "_messages", store)
     monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply="merhaba"))
     monkeypatch.setattr(main_mod, "_init", lambda: None)
@@ -236,8 +262,30 @@ async def test_run_turn_persists_user_and_model_messages(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_turn_does_not_persist_empty_model_reply(monkeypatch):
+    """If run_async yields no final response, reply == "". That empty string
+    must NOT be persisted as a "model" row: Gemini rejects empty text parts
+    (INVALID_ARGUMENT) on replay, which would brick every turn in the
+    session after a cold start (see _ensure_session rehydration)."""
+    store = _store()
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply=""))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    async def fake_ensure(user_id, session_id):
+        return None  # session object unused by FakeRunner
+
+    monkeypatch.setattr(main_mod, "_ensure_session", fake_ensure)
+
+    reply = await main_mod.run_turn("u@x.com", "s1", "selam")
+    assert reply == ""
+    hist = store.history("u@x.com", "s1")
+    assert [(h["role"], h["text"]) for h in hist] == [("user", "selam")]
+
+
+@pytest.mark.asyncio
 async def test_ensure_session_rehydrates_from_history(monkeypatch):
-    store = MessageStore(FakeDB())
+    store = _store()
     store.append("u@x.com", "s1", "user", "adim Kadir")
     store.append("u@x.com", "s1", "model", "memnun oldum Kadir")
     svc = InMemorySessionService()
@@ -268,7 +316,7 @@ async def test_ensure_session_cold_start_with_no_prior_messages(monkeypatch):
     """First-ever turn for a session: history() is empty, so the rehydration
     loop runs zero times. Must still return a freshly created session with no
     events, and must not raise."""
-    store = MessageStore(FakeDB())
+    store = _store()
     svc = InMemorySessionService()
     monkeypatch.setattr(main_mod, "_session_service", svc)
     monkeypatch.setattr(main_mod, "_messages", store)
@@ -279,7 +327,7 @@ async def test_ensure_session_cold_start_with_no_prior_messages(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ensure_session_existing_is_not_rehydrated(monkeypatch):
-    store = MessageStore(FakeDB())
+    store = _store()
     store.append("u@x.com", "s1", "user", "eski")
     svc = InMemorySessionService()
     await svc.create_session(app_name=main_mod.APP_NAME, user_id="u@x.com", session_id="s1")
@@ -287,4 +335,4 @@ async def test_ensure_session_existing_is_not_rehydrated(monkeypatch):
     monkeypatch.setattr(main_mod, "_messages", store)
 
     session = await main_mod._ensure_session("u@x.com", "s1")
-    assert session.events == []  # zaten vardı → geçmişten doldurulmaz
+    assert session.events == []  # already existed -> not rehydrated from history

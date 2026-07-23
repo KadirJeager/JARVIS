@@ -51,6 +51,7 @@ class FakeQuery:
         rows = [d for d in self._rows if self._match(d)]
         if self._order:
             field, direction = self._order
+            # Sorts only by `field`; does not model Firestore's implicit `__name__` (doc id) secondary tiebreak.
             rows.sort(key=lambda d: d.get(field), reverse=(direction == "DESCENDING"))
         if self._limit is not None:
             rows = rows[: self._limit]
