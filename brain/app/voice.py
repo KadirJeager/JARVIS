@@ -104,10 +104,16 @@ class VoiceBridge:
                 pass
         finally:
             pump_out.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pump_out
-            with contextlib.suppress(asyncio.CancelledError):
-                await events.aclose()
+            try:
+                # If pump_out died with its OWN exception (not cancellation),
+                # awaiting it re-raises that exception here — the nested
+                # finally guarantees events.aclose() still runs, so the live
+                # Gemini session is torn down on every exit path.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump_out
+            finally:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await events.aclose()
 
 
 async def _handshake(ws: WebSocket) -> str | None:

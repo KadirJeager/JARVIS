@@ -234,3 +234,52 @@ async def test_run_stops_and_propagates_when_pump_events_dies_without_hanging():
     # The dead session must not have absorbed every queued mic message --
     # the pump_out.done() check should have cut the loop short.
     assert ws.incoming, "run() kept draining mic input after the live stream died"
+
+
+async def test_events_generator_closed_even_when_pump_dies_of_send_failure():
+    """Regression for the mid-finally control-flow bug: when _pump_events dies
+    of its OWN exception (ws send failure) while the events generator is still
+    suspended, awaiting pump_out re-raises inside finally -- the nested
+    finally must STILL aclose() the generator (proven via its finally flag)."""
+    closed = {"v": False}
+
+    class InfiniteRunner:
+        def run_live(self, **kwargs):
+            async def events():
+                try:
+                    while True:
+                        yield _make_event(data=b"\x01")
+                        await asyncio.sleep(0)
+                finally:
+                    closed["v"] = True
+
+            return events()
+
+    class SessionSvc:
+        async def get_session(self, **kwargs):
+            return object()
+
+        async def create_session(self, **kwargs):
+            return object()
+
+    class SendFailingWS(FakeWS):
+        async def receive(self):
+            await asyncio.sleep(0)
+            return await super().receive()
+
+        async def send_bytes(self, b):
+            raise RuntimeError("send failed")
+
+        async def close(self, code=1000):
+            self.sent.append(("close", code))
+
+    ws = SendFailingWS([
+        {"type": "websocket.receive", "bytes": b"\x00"},
+        {"type": "websocket.receive", "bytes": b"\x00"},
+        {"type": "websocket.receive", "bytes": b"\x00"},
+        {"type": "websocket.disconnect"},
+    ])
+    bridge = VoiceBridge(runner=InfiniteRunner(), session_service=SessionSvc())
+    with pytest.raises(RuntimeError, match="send failed"):
+        await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
+    assert closed["v"], "events generator was not aclosed on pump failure"
