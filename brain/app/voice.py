@@ -1,8 +1,10 @@
 """Voice gateway: bridges a WebSocket to an ADK live session (North Star §4.2).
 
-Contract: see voice_protocol.py (frozen). Same agent/policy/audit as text chat —
-the bridge is handed the Katman 1 runner via main.get_runner_sessions_memory(),
-it never builds a second agent.
+Contract: see voice_protocol.py (frozen). Same policy/audit/tools/memory as text
+chat, but a DEDICATED live runner: the bridge is handed a runner built on
+config.LIVE_MODEL via main.get_voice_runner_sessions_memory(), sharing the text
+path's session_service and memory instances (see main._init_voice for why the
+live model differs — an ADK 1.36.2 tool-call deadlock on non-3.x live models).
 
 ADK's run_live is EXPERIMENTAL (google-adk 1.36.2). Field names below were
 verified by reading the installed source (see task-2a2-report.md):
