@@ -2,9 +2,11 @@
 
 Contract: see voice_protocol.py (frozen). Same policy/audit/tools/memory as text
 chat, but a DEDICATED live runner: the bridge is handed a runner built on
-config.LIVE_MODEL via main.get_voice_runner_sessions_memory(), sharing the text
-path's session_service and memory instances (see main._init_voice for why the
-live model differs — an ADK 1.36.2 tool-call deadlock on non-3.x live models).
+config.resolve_live_model() via main.get_voice_runner_sessions_memory(), sharing
+the text path's session_service and memory instances (see main._init_voice for
+why the live model differs — an ADK 1.36.2 tool-call deadlock on non-3.x live
+models — and app/live_model.py for how it's auto-resolved to the newest usable
+one).
 
 ADK's run_live is EXPERIMENTAL (google-adk 1.36.2). Field names below were
 verified by reading the installed source (see task-2a2-report.md):

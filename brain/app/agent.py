@@ -19,7 +19,7 @@ engellendiğini açıkça söyle (hata = gözlem ilkesi).
 
 def build_agent(memory: Memory, audit, model: str | None = None) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
-    (text chat); voice sessions pass config.LIVE_MODEL instead -- same
+    (text chat); voice sessions pass config.resolve_live_model() instead -- same
     instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory)."""
     tools.init(memory)
     return Agent(

@@ -14,16 +14,18 @@ def test_rates_fixed_by_contract():
     assert AUDIO_MIME_IN == "audio/pcm;rate=16000"
 
 
-def test_live_model_default_is_gemini_3_x_live():
-    """Must be a Gemini 3.x Live model, NOT a "-latest" native-audio alias:
-    confirmed via live smoke test (task-2a4-report.md) that ADK 1.36.2 buffers
-    tool_call messages until turn_complete for any model where
+def test_live_model_fallback_is_gemini_3_x_live():
+    """The last-resort fallback (used when auto-resolution fails or
+    JARVIS_LIVE_MODEL is unset) must itself be a Gemini 3.x Live model, NOT a
+    "-latest" native-audio alias: confirmed via live smoke test
+    (task-2a4-report.md) that ADK 1.36.2 buffers tool_call messages until
+    turn_complete for any model where
     google.adk.utils.model_name_utils._is_gemini_3_x_live() is False -- which
     deadlocks forever, since turn_complete never arrives until the buffered
     (never-yielded) tool call gets a response."""
     from google.adk.utils import model_name_utils
 
-    assert model_name_utils._is_gemini_3_x_live(config.LIVE_MODEL)
+    assert model_name_utils._is_gemini_3_x_live(config.LIVE_MODEL_FALLBACK)
 
 
 def test_events_shape():

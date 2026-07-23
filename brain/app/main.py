@@ -58,11 +58,15 @@ def get_runner_and_sessions() -> tuple[Runner, InMemorySessionService]:
 
 def _init_voice() -> None:
     """Lazy init for the voice-mode Runner: a SEPARATE Runner/Agent bound to
-    config.LIVE_MODEL (config.MODEL_NAME is not live-capable), sharing the
-    SAME _session_service and _memory instances as the text-chat runner --
-    same memory, same audit trail, same tools/policy, only the model differs.
-    See app/config.py's LIVE_MODEL comment + task-2a4-report.md for why the
-    live model can't just be config.MODEL_NAME."""
+    config.resolve_live_model() (config.MODEL_NAME is not live-capable),
+    sharing the SAME _session_service and _memory instances as the text-chat
+    runner -- same memory, same audit trail, same tools/policy, only the
+    model differs. See app/live_model.py + task-2a4-report.md /
+    task-2a6-report.md for why the live model can't just be
+    config.MODEL_NAME and how it's auto-resolved to the newest usable one.
+    Resolution happens once, at first init, for the lifetime of this
+    process -- the `if _voice_runner is not None: return` guard below
+    covers that."""
     global _voice_runner
     if _voice_runner is not None:
         return
@@ -75,7 +79,7 @@ def _init_voice() -> None:
     db = firestore.Client()
     _voice_runner = Runner(
         app_name=APP_NAME,
-        agent=build_agent(_memory, FirestoreAudit(db), model=config.LIVE_MODEL),
+        agent=build_agent(_memory, FirestoreAudit(db), model=config.resolve_live_model()),
         session_service=_session_service,
     )
 
