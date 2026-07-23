@@ -6,7 +6,7 @@
 
 **Architecture:** Tek Cloud Run servisi (`jarvis-brain`): FastAPI, ADK `Runner` + `InMemorySessionService` ile orkestratör ajanı koşar; her turdan sonra oturum özeti Firestore'a snapshot'lanır (Kademe 2). Tüm araç çağrıları `before_tool_callback` üzerinden politika katmanından geçer ve `audit_log`'a yazılır. Web/PWA istemcisi aynı servisten statik sunulur; kimlik Google Sign-In (ID token) + e-posta allowlist.
 
-**Tech Stack:** Python 3.12, google-adk (>=1.16,<2.0), FastAPI, google-cloud-firestore, google-auth, google-genai (embeddings, Task 10), vanilla JS PWA. GCP: Cloud Run, Firestore (Native), Secret Manager. Model: AI Studio üzerinden `gemini-2.5-flash` (kurulumda güncel ad doğrulanır — Task 8).
+**Tech Stack:** Python 3.12, google-adk (>=1.16,<2.0), FastAPI, google-cloud-firestore, google-auth, google-genai (embeddings, Task 10), vanilla JS PWA. GCP: Cloud Run, Firestore (Native), Secret Manager. Model: AI Studio üzerinden `gemini-flash-latest` (kural: daima `-latest` alias'ları — `gemini-flash-latest`/`gemini-pro-latest`; sabit sürüm pinlenmez).
 
 ## Global Constraints
 

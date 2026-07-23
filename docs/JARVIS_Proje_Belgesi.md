@@ -77,7 +77,7 @@ Bu ilkeler tüm mimari kararların üstündedir; bir çözüm bu ilkelerle çeli
 ## 4. Bileşenler
 
 ### 4.1 Beyin (Orkestratör)
-- **Teknoloji:** Cloud Run + Google ADK, Gemini API (ağır analiz için Pro sınıfı, hızlı işler için Flash sınıfı model).
+- **Teknoloji:** Cloud Run + Google ADK, Gemini API (ağır analiz için Pro sınıfı, hızlı işler için Flash sınıfı model). **Model adlandırma kuralı:** tüm yapılandırmalarda `-latest` alias'ları kullanılır (`gemini-flash-latest`, `gemini-pro-latest`); sabit sürüm pinlenmez — pinli sürümler yeni API kullanıcılarına kapatılabiliyor (23 Tem 2026'da `gemini-2.5-flash` ile yaşandı).
 - **Yapı:** Tek orkestratör + derleme anında tanımlı statik uzman ajanlar: Sekreter (takvim/mail/hatırlatma), Operatör (tarayıcı otomasyonu), Ev Sorumlusu (HA), Araştırmacı, Arşivci (hafıza/özetleme/öğrenme). Her ajanın araç listesi sabittir.
 - **Kalıcılık:** State Firestore'da, dosyalar GCS API ile okunur/yazılır. Cloud Run'a disk mount (GCSFuse vb.) yapılmaz — cold start'ı şişirir, tutarlılık sorunu getirir.
 - **API kotası gerçeği:** Google AI Pro (öğrenci) aboneliği **API kotası vermez**; API ayrı dünyadır. Ücretsiz API katmanıyla başlanır, yoğunluk artınca ücretli katmana (Tier 1) geçilir.
