@@ -70,3 +70,11 @@ TOOL_ZONES = {
     "update_user_profile": ZONE_YELLOW,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
+
+# Speaker identity (Katman 2b Dilim 3a) — cosine thresholds are starting
+# estimates, calibrated after enrollment (spec §15).
+SPEAKER_ACCEPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ACCEPT", "0.35"))
+SPEAKER_ADAPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ADAPT", "0.60"))
+SPEAKER_TOPK = int(os.environ.get("JARVIS_SPEAKER_TOPK", "3"))
+SPEAKER_ADAPTIVE_CAP = int(os.environ.get("JARVIS_SPEAKER_ADAPTIVE_CAP", "20"))
+TRUST_STATE_KEY = "trust_level"   # session.state key the voice bridge writes
