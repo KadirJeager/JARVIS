@@ -6,7 +6,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 import app.voice as voice_mod
-from app import config, trust, voice_protocol as vp, voice_trust
+from app import config, speaker as speaker_mod, trust, voice_protocol as vp, voice_trust
 from app.voice import APP_NAME, VoiceBridge, _handshake
 
 USER = "kadir@example.com"
@@ -550,15 +550,24 @@ async def test_events_generator_closed_even_when_pump_dies_of_send_failure():
 
 
 class FakeSpeaker:
-    """Fake SpeakerService: canned (verified, score) result, records calls."""
+    """Fake SpeakerService: canned IdentifyOutcome, records identify AND
+    record_history calls."""
 
     def __init__(self, result):  # (verified, score)
-        self.result = result
+        verified, score = result
+        self.result = speaker_mod.IdentifyOutcome(
+            verified=verified, score=score, vec=[0.5, 0.5],
+            adapted_sample_id=None)
         self.calls = []
+        self.history = []
 
     def identify(self, user_id, pcm, device_hint, auth_is_kadir):
         self.calls.append((user_id, pcm, device_hint, auth_is_kadir))
         return self.result
+
+    def record_history(self, user_id, **entry):
+        self.history.append((user_id, entry))
+        return "h1"
 
 
 @pytest.mark.asyncio
@@ -648,6 +657,92 @@ async def test_verify_utterance_treats_identify_exception_as_unverified_and_fail
         {"type": "speaker", "role": "user", "verified": False, "score": 0.0})) in ws.sent
     assert voice_trust.peek(_trust_key()).trust_level == trust.LOW
     assert "speaker.identify failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bridge_records_verification_history_after_the_speaker_event():
+    speaker = FakeSpeaker((True, 0.9))
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+
+    ws = FakeWS([])
+    bridge = _armed(VoiceBridge(runner=None, session_service=None, speaker_service=speaker,
+                                device_hint="headset", presence="locked"))
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    await bridge._pump_events(fake_events(), ws)
+
+    assert len(speaker.history) == 1
+    user_id, entry = speaker.history[0]
+    assert entry == {"score": 0.9, "verified": True, "vec": [0.5, 0.5],
+                     "device_hint": "headset", "presence": "locked",
+                     "trust_level": trust.MEDIUM, "adapted_sample_id": None}
+
+
+class HistoryExplodingSpeaker(FakeSpeaker):
+    """identify works, the history write blows up -- observability must never
+    break the safety-relevant outputs (trust publish + client event).
+
+    record_history also snapshots whether the client already had the speaker
+    event in hand by the time it fired: a try/except around the history call
+    would swallow the RuntimeError either way (that alone doesn't pin
+    ordering -- proven empirically: moving the history block before the
+    publish/send left the other three asserts below green). This snapshot is
+    what actually catches a reordering."""
+
+    def __init__(self, result, ws):
+        super().__init__(result)
+        self._ws = ws
+        self.event_already_sent_when_called = None
+
+    def record_history(self, user_id, **entry):
+        self.event_already_sent_when_called = any(
+            isinstance(t, str) and '"speaker"' in t for _, t in self._ws.sent)
+        raise RuntimeError("history write blew up")
+
+
+@pytest.mark.asyncio
+async def test_history_write_failure_is_logged_and_does_not_break_the_stream(caplog):
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+
+    ws = FakeWS([])
+    speaker = HistoryExplodingSpeaker((True, 0.9), ws)
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker,
+                                device_hint="phone", presence="locked"))
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    with caplog.at_level("ERROR"):
+        await bridge._pump_events(fake_events(), ws)          # must not raise
+
+    assert ("text", json.dumps(
+        {"type": "speaker", "role": "user", "verified": True, "score": 0.9})) in ws.sent
+    assert voice_trust.peek(_trust_key()).trust_level == trust.MEDIUM
+    assert "history record failed" in caplog.text
+    assert speaker.event_already_sent_when_called is True
+
+
+@pytest.mark.asyncio
+async def test_no_history_row_when_identify_itself_failed():
+    """The failure path has no embedding, so there is nothing a correction
+    could later feed to the gallery -- no row is written (design decision,
+    logged via the existing identify-failure log line)."""
+    recorded = []
+
+    class Exploding(ExplodingSpeaker):
+        def record_history(self, user_id, **entry):
+            recorded.append(entry)
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+
+    ws = FakeWS([])
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=Exploding(),
+                                device_hint="phone", presence="locked"))
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    await bridge._pump_events(fake_events(), ws)
+    assert recorded == []
 
 
 class _NoEvents:

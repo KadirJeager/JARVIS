@@ -26,6 +26,9 @@ class FakeDoc:
         else:
             self.store[self.key] = dict(data)
 
+    def delete(self):
+        self.store.pop(self.key, None)
+
 
 class FakeQuery:
     """Minimal Firestore query surface: where(filter=FieldFilter)/order_by/limit/stream."""

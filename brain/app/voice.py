@@ -184,13 +184,14 @@ class VoiceBridge:
             # every other WS connection this instance serves. speaker._get_model
             # is lock-guarded precisely because this makes concurrent first
             # calls possible.
-            verified, score = await asyncio.to_thread(
+            outcome = await asyncio.to_thread(
                 self.speaker_service.identify,
                 self._user_id, pcm, self.device_hint, auth_is_kadir=True,
             )
+            verified, score = outcome.verified, outcome.score
         except Exception:
             logging.exception("voice bridge: speaker.identify failed for %s", self._user_id)
-            verified, score = False, 0.0
+            outcome, verified, score = None, False, 0.0
         level = trust.assess(
             trust.TrustContext(
                 auth_verified=True, presence=self.presence,
@@ -206,6 +207,23 @@ class VoiceBridge:
         # what makes a past decision reconstructable.
         self._publish_trust(level, score)
         await ws.send_text(json.dumps(vp.evt_speaker("user", verified, score)))
+        # History AFTER the trust publish and the client event: those two are
+        # the turn's safety-relevant outputs, the history row is observability
+        # (spec §4.2) -- it must neither delay nor break them. No row on the
+        # identify-failure path: there is no embedding a correction could feed
+        # back, and the failure is already logged above.
+        if outcome is not None:
+            try:
+                await asyncio.to_thread(
+                    self.speaker_service.record_history, self._user_id,
+                    score=outcome.score, verified=outcome.verified,
+                    vec=outcome.vec, device_hint=self.device_hint,
+                    presence=self.presence, trust_level=level,
+                    adapted_sample_id=outcome.adapted_sample_id,
+                )
+            except Exception:
+                logging.exception(
+                    "voice bridge: history record failed for %s", self._user_id)
         logging.info(
             "voice trust: user=%s verified=%s score=%.4f presence=%s device=%s level=%s",
             self._user_id, verified, score, self.presence, self.device_hint, level,

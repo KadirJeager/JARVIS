@@ -1,7 +1,7 @@
 # Katman 2b — Dilim 3d: Ses Kimliği Yönetimi (görünürlük, düzeltme, silme) — Tasarım / Spec
 
 **Tarih:** 24 Temmuz 2026
-**Durum:** tasarım onaylandı, plan yazılacak
+**Durum:** plan yazıldı (docs/superpowers/plans/2026-07-24-katman-2b-dilim3d-ses-kimligi-yonetimi-server.md), sunucu implementasyonu tamam, nihai review bekliyor. 3d-3 (Android tarafı) ayrı, ileriye dönük bir plan.
 **Öncül:** Dilim 3a (sunucu çekirdeği) main'e merge edildi (`6c7b177`). Bu spec 3a'nın
 üstüne biner ve onun veri modelini genişletir.
 **İlgili:** `2026-07-24-katman-2b-dilim3a-ses-kimligi-design.md` (§5 galeri modeli,

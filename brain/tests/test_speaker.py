@@ -21,7 +21,9 @@ def test_adapt_appends_adaptive_sample():
     p = SpeakerProfile(anchors=[A], adaptive=[])
     p.adapt(B, "headset", cap=5, now_fn=lambda: "t1")
     assert len(p.adaptive) == 1
-    assert p.adaptive[0] == {"vec": B, "device_hint": "headset", "ts": "t1"}
+    assert p.adaptive[0]["vec"] == B
+    assert p.adaptive[0]["device_hint"] == "headset" and p.adaptive[0]["ts"] == "t1"
+    assert p.adaptive[0]["source"] == "auto" and p.adaptive[0]["id"]
 
 def test_adapt_evicts_oldest_over_cap_but_keeps_anchors():
     p = SpeakerProfile(anchors=[A], adaptive=[])
@@ -29,7 +31,7 @@ def test_adapt_evicts_oldest_over_cap_but_keeps_anchors():
     for _ in range(4):
         p.adapt(B, "phone", cap=2, now_fn=clk)
     assert len(p.adaptive) == 2                  # capped
-    assert p.anchors == [A]                       # anchors never touched
+    assert [s["vec"] for s in p.anchors] == [A]   # anchors never touched
     assert p.adaptive[-1]["ts"] == "t3"          # newest kept
     assert p.adaptive[0]["ts"] == "t2"           # oldest two evicted
 
@@ -125,7 +127,7 @@ def test_adapt_never_evicts_anchors_even_when_they_are_the_redundant_ones():
     p = SpeakerProfile(anchors=[PHONE, PHONE], adaptive=[])
     for i in range(6):
         p.adapt(_phone_variant(i), "phone", cap=2, now_fn=lambda: next(clk))
-    assert p.anchors == [PHONE, PHONE]
+    assert [s["vec"] for s in p.anchors] == [PHONE, PHONE]
     assert len(p.adaptive) == 2
 
 

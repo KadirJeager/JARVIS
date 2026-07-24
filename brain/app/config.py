@@ -170,4 +170,19 @@ SPEAKER_MIN_UTTERANCE_BYTES = _utterance_bytes(SPEAKER_MIN_UTTERANCE_SECONDS)
 SPEAKER_BARGE_IN_ONSET_BYTES = min(
     max(1, _utterance_bytes(0.5)), SPEAKER_UTTERANCE_MAX_BYTES
 )
+
+# Speaker identity MANAGEMENT (Katman 2b Dilim 3d). History cap bounds both
+# cost and privacy exposure (spec §4.2); the manual cap is an ACCIDENT guard,
+# not a security boundary -- the token holder can bypass voice entirely
+# anyway (3a spec §12), the real guarantee is revocability (spec §5).
+SPEAKER_HISTORY_CAP = int(os.environ.get("JARVIS_SPEAKER_HISTORY_CAP", "50"))
+SPEAKER_MANUAL_CAP = int(os.environ.get("JARVIS_SPEAKER_MANUAL_CAP", "5"))
+# Closed label set (spec §4.1): a fixed vocabulary is what makes aggregation
+# possible ("gurultulu ortamda ortalama skor 0.41"); the free-text `note`
+# field catches what the set misses. ASCII on purpose: these are API values,
+# not UI copy. Revisited after threshold calibration (spec §12).
+SPEAKER_SAMPLE_LABELS = frozenset(
+    {"saglikli", "hasta", "yorgun", "gurultulu", "kulaklik", "hoparlor", "arac"}
+)
+
 TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to

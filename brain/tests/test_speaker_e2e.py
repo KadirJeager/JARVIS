@@ -159,3 +159,28 @@ def test_ws_voice_emits_speaker_event_and_publishes_locked_trust(wired, monkeypa
     assert published[-1][1].voice_score == 1.0
     assert published[-1][1].device_hint == "tablet"
     assert voice_trust.peek(key) is None               # cleared at teardown
+
+
+def test_e2e_verified_utterance_lands_in_the_verification_history(wired):
+    """Wiring proof at the outermost seam: after the WS-driven utterance the
+    history doc must hold the fused presence/trust_level -- the fields only
+    voice.py knows -- so bridge -> service -> store is pinned end to end."""
+    main, sessions = wired
+    from app import speaker_history, trust
+
+    client = TestClient(main.app)
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_text(json.dumps({"token": "t", "device_hint": "tablet", "presence": "locked"}))
+        ws.send_bytes(b"\x00\x01\x00\x01")            # mic audio -> buffered
+        for _ in range(5):
+            msg = _receive_with_timeout(ws)
+            if "text" in msg and '"speaker"' in msg["text"]:
+                break
+
+    svc = main.get_speaker_service()
+    entries = speaker_history.load_history(svc.db, "kadir@example.com")
+    assert len(entries) == 1
+    assert entries[0]["verified"] is True
+    assert entries[0]["presence"] == "locked"
+    assert entries[0]["trust_level"] == trust.MEDIUM
+    assert entries[0]["vec"] == [1.0, 0.0, 0.0]

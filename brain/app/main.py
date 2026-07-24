@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, speaker, voice, voice_trust
+from . import config, messages, speaker, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
 app.include_router(voice.router)
+app.include_router(voice_manage.router)
 
 _runner: Runner | None = None
 _session_service = InMemorySessionService()
@@ -72,6 +73,9 @@ def get_speaker_service() -> "speaker.SpeakerService":
             adapt=config.SPEAKER_ADAPT_THRESHOLD,
             top_k=config.SPEAKER_TOPK,
             cap=config.SPEAKER_ADAPTIVE_CAP,
+            history_cap=config.SPEAKER_HISTORY_CAP,
+            labels=config.SPEAKER_SAMPLE_LABELS,
+            manual_cap=config.SPEAKER_MANUAL_CAP,
         )
     return _speaker_service
 
@@ -181,6 +185,7 @@ class ChatRequest(BaseModel):
 
 class EnrollRequest(BaseModel):
     clips: list[str]  # base64-encoded PCM16 mono 16kHz utterances
+    device_hint: str = "unknown"
 
 
 # /healthz is intercepted by Google Frontend on run.app (returns Google's own
@@ -254,7 +259,9 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         # get_speaker_service() is INSIDE the thread too: on the first call it
         # builds the Firestore client (credential discovery, possibly a metadata
         # server round-trip), which is not something to do on the loop either.
-        total = await asyncio.to_thread(lambda: get_speaker_service().enroll(email, vecs))
+        total = await asyncio.to_thread(
+            lambda: get_speaker_service().enroll(email, vecs, device_hint=req.device_hint)
+        )
     except Exception:
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
