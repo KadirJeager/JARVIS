@@ -211,8 +211,8 @@ async def test_locked_nonmatching_voice_makes_yellow_tool_confirm():
     assert ("text", json.dumps(
         {"type": "speaker", "role": "user", "verified": False, "score": 0.0})) in ws.sent
     entry = audit.entries[-1]
-    assert entry["trust"] == trust.LOW, (
-        f"policy saw trust={entry['trust']}, but the bridge computed LOW for this "
+    assert entry["trust_level"] == trust.LOW, (
+        f"policy saw trust_level={entry['trust_level']}, but the bridge computed LOW for this "
         "locked + non-matching-voice utterance"
     )
     assert entry["decision"] == "confirm"
@@ -243,7 +243,7 @@ async def test_locked_matching_voice_still_confirms_but_foreground_does_not():
         )
         await _drive(sessions, agent, bridge, decisions)
         entry = audit.entries[-1]
-        assert entry["trust"] == expected_trust, f"{presence}: {entry}"
+        assert entry["trust_level"] == expected_trust, f"{presence}: {entry}"
         assert (decisions[0] is not None) is expect_blocked, f"{presence}: {decisions}"
 
 
@@ -285,10 +285,10 @@ async def test_text_runner_agent_never_sees_voice_signals():
         result = text_agent.before_tool_callback(
             _Tool("update_user_profile"), {"patch": {}}, tool_context)
         assert result is None                        # allowed, exactly as before
-        assert audit.entries[-1]["trust"] == trust.HIGH
+        assert audit.entries[-1]["trust_level"] == trust.HIGH
         assert audit.entries[-1]["voice_score"] is None
     finally:
-        voice_trust.clear(key)
+        voice_trust.clear(key, "")      # published above with the default owner
 
 
 # --- voice_trust.lookup: the ADK-shape resolution it owns -------------------
@@ -351,3 +351,127 @@ def test_lookup_logs_when_a_session_object_is_malformed(caplog):
     with caplog.at_level("ERROR"):
         assert voice_trust.lookup(ctx) is None
     assert "unexpected tool_context shape" in caplog.text
+
+
+# --- the PRODUCTION wiring itself, not just the mechanism -------------------
+#
+# Everything above proves the mechanism works: it builds its own agent with
+# `trust_provider=voice_trust.lookup` (see _voice_agent). tests/test_speaker_e2e.py
+# monkeypatches main.get_voice_runner_sessions_memory away entirely. So deleting
+# `trust_provider=voice_trust.lookup` from main._init_voice -- i.e. restoring the
+# exact C1 Critical defect, trust never reaching policy -- left the whole suite
+# green. The two tests below close that last mile by calling the real
+# main._init() / main._init_voice() and inspecting what they actually wired.
+
+
+class _CapturingBuildAgent:
+    """Wraps the real app.agent.build_agent and records every call verbatim."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self._real(*args, **kwargs)
+
+
+def _bound_args(call):
+    """Resolve one recorded call against build_agent's real signature (defaults
+    applied), so the assertions hold whether an argument was passed positionally
+    or by keyword."""
+    import inspect
+
+    args, kwargs = call
+    bound = inspect.signature(build_agent).bind(*args, **kwargs)
+    bound.apply_defaults()
+    return bound.arguments
+
+
+@pytest.fixture
+def production_init(monkeypatch):
+    """Runs main._init()/main._init_voice() FOR REAL -- nothing about the code
+    under test is stubbed. Only their external dependencies are faked: Firestore
+    (ONE shared FakeDB, as in production both clients point at the same
+    project), the genai embedding client, and live-model resolution (a network
+    call at voice-runner init). The module's process-lifetime singletons are
+    reset through monkeypatch so the init really runs cold and is restored for
+    every other test."""
+    import app.agent as agent_mod
+    import app.main as main_mod
+    import app.memory as memory_mod
+    from google.cloud import firestore
+
+    db = FakeDB()
+    monkeypatch.setattr(firestore, "Client", lambda *a, **k: db)
+    monkeypatch.setattr(memory_mod, "make_embed_fn", lambda: (lambda text: [0.0]))
+    monkeypatch.setattr(main_mod.config, "resolve_live_model", lambda: "fake-live-model")
+    capturing = _CapturingBuildAgent(agent_mod.build_agent)
+    monkeypatch.setattr(agent_mod, "build_agent", capturing)
+    for name in ("_runner", "_voice_runner", "_memory", "_messages", "_speaker_service"):
+        monkeypatch.setattr(main_mod, name, None)
+    monkeypatch.setattr(main_mod, "_session_service", InMemorySessionService())
+    return main_mod, capturing, db
+
+
+def test_init_voice_passes_the_trust_provider_and_init_passes_none(production_init):
+    """THE last-mile guard: main._init_voice() must hand the voice agent
+    `trust_provider=voice_trust.lookup`, and main._init() must hand the TEXT
+    agent none at all. Deleting that keyword from app/main.py's _init_voice
+    fails this test (and only this test plus its behavioural twin below)."""
+    main_mod, capturing, _db = production_init
+
+    main_mod._init_voice()          # calls _init() first, then builds the voice runner
+
+    assert len(capturing.calls) == 2, (
+        "expected two build_agent calls -- the text runner (via _init) then the "
+        f"voice runner -- got {len(capturing.calls)}")
+    text_call, voice_call = (_bound_args(c) for c in capturing.calls)
+
+    assert voice_call["trust_provider"] is voice_trust.lookup, (
+        "main._init_voice() built the production VOICE agent without "
+        "trust_provider=voice_trust.lookup: the trust level the bridge computes "
+        "can never reach policy_callback. This IS the C1 Critical defect.")
+    assert voice_call["model"] == "fake-live-model"      # the live runner, not text
+    assert text_call["trust_provider"] is None, (
+        "main._init() gave the TEXT agent a trust provider: /api/chat's policy "
+        "callback must be structurally incapable of seeing voice signals")
+    assert text_call["model"] is None                    # defaults to config.MODEL_NAME
+
+
+def test_production_runners_behave_as_wired(production_init):
+    """The same guarantee observed through BEHAVIOUR rather than call kwargs, so
+    the guard survives a refactor that passes the provider some other way: with
+    LOW voice signals live for this session key, the agent main._init_voice()
+    actually built must escalate a YELLOW tool to "confirm", while the agent
+    main._init() built must still allow it -- and both must audit under the
+    same `trust_level` key."""
+    from google.adk.sessions.session import Session
+
+    main_mod, _capturing, db = production_init
+    main_mod._init_voice()
+
+    voice_trust.publish(
+        voice_trust.key_for(main_mod.APP_NAME, USER, SESSION_ID),
+        voice_trust.VoiceSignals(trust_level=trust.LOW, voice_score=0.0,
+                                 presence="locked", device_hint="phone"),
+    )
+    session = Session(id=SESSION_ID, app_name=main_mod.APP_NAME, user_id=USER)
+
+    def decide(runner):
+        tool_context = ToolContext(InvocationContext(
+            session_service=main_mod._session_service, invocation_id="prod-invocation",
+            agent=runner.agent, session=session,
+        ))
+        return runner.agent.before_tool_callback(
+            _Tool("update_user_profile"), {"patch": {}}, tool_context)
+
+    voice_decision = decide(main_mod._voice_runner)
+    text_decision = decide(main_mod._runner)
+
+    assert voice_decision is not None and "onay" in voice_decision["result"].lower(), (
+        "the production voice runner allowed a YELLOW tool under LOW trust")
+    assert text_decision is None, "the production text runner's behaviour changed"
+
+    levels = [s.to_dict()["trust_level"] for s in db.collection("audit_log").stream()]
+    assert levels == [trust.LOW, trust.HIGH]

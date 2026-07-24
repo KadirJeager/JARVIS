@@ -71,7 +71,7 @@ def test_yellow_tool_blocked_when_trust_medium():
     # distinct "confirm" decision (not "block"): YELLOW zone + non-HIGH trust
     # escalates to a confirmation request, RED-zone "block" stays untouched.
     assert audit.entries[0]["decision"] == "confirm"
-    assert audit.entries[0]["trust"] == trust.MEDIUM
+    assert audit.entries[0]["trust_level"] == trust.MEDIUM
 
 
 def test_yellow_tool_allowed_when_trust_high():
@@ -88,7 +88,7 @@ def test_missing_tool_context_defaults_high():
     # green tool, tool_context None (text path / existing tests) -> allow, HIGH
     result = cb(_tool("get_user_profile"), {}, None)
     assert result is None
-    assert audit.entries[0]["trust"] == trust.HIGH
+    assert audit.entries[0]["trust_level"] == trust.HIGH
 
 
 def test_yellow_tool_blocked_when_trust_low():
@@ -97,7 +97,7 @@ def test_yellow_tool_blocked_when_trust_low():
     result = cb(_tool("update_user_profile"), {}, _ctx(trust.LOW))
     assert result is not None
     assert audit.entries[0]["decision"] == "confirm"
-    assert audit.entries[0]["trust"] == trust.LOW
+    assert audit.entries[0]["trust_level"] == trust.LOW
 
 
 def test_read_trust_empty_state_defaults_high():
@@ -107,7 +107,7 @@ def test_read_trust_empty_state_defaults_high():
     cb = make_policy_callback(audit)
     result = cb(_tool("get_user_profile"), {}, SimpleNamespace(state={}))
     assert result is None
-    assert audit.entries[0]["trust"] == trust.HIGH
+    assert audit.entries[0]["trust_level"] == trust.HIGH
 
 
 def test_read_trust_state_get_raising_defaults_high():
@@ -122,7 +122,7 @@ def test_read_trust_state_get_raising_defaults_high():
     cb = make_policy_callback(audit)
     result = cb(_tool("get_user_profile"), {}, SimpleNamespace(state=RaisingState()))
     assert result is None
-    assert audit.entries[0]["trust"] == trust.HIGH
+    assert audit.entries[0]["trust_level"] == trust.HIGH
 
 
 def test_green_zone_medium_trust_is_allowed():
@@ -163,7 +163,7 @@ def test_trust_provider_supplies_the_level_when_session_state_cannot():
     cb = make_policy_callback(audit, trust_provider=lambda ctx: _signals())
     result = cb(_tool("update_user_profile"), {}, SimpleNamespace(state={}))
     assert result is not None and "onay" in result["result"].lower()
-    assert audit.entries[0]["trust"] == trust.MEDIUM
+    assert audit.entries[0]["trust_level"] == trust.MEDIUM
     assert audit.entries[0]["decision"] == "confirm"
 
 
@@ -175,7 +175,7 @@ def test_audit_records_the_full_signal_set_spec_requires():
     cb = make_policy_callback(audit, trust_provider=lambda ctx: _signals())
     cb(_tool("get_user_profile"), {}, None)
     entry = audit.entries[0]
-    assert (entry["trust"], entry["voice_score"], entry["presence"], entry["device_hint"]) == (
+    assert (entry["trust_level"], entry["voice_score"], entry["presence"], entry["device_hint"]) == (
         trust.MEDIUM, 0.42, "locked", "headset")
 
 
@@ -186,7 +186,7 @@ def test_audit_signal_fields_are_none_without_voice_evidence():
     cb = make_policy_callback(audit)
     assert cb(_tool("update_user_profile"), {}, None) is None
     entry = audit.entries[0]
-    assert entry["trust"] == trust.HIGH
+    assert entry["trust_level"] == trust.HIGH
     assert (entry["voice_score"], entry["presence"], entry["device_hint"]) == (None, None, None)
 
 
@@ -196,7 +196,7 @@ def test_provider_returning_none_falls_back_to_state_default_high():
     audit = FakeAudit()
     cb = make_policy_callback(audit, trust_provider=lambda ctx: None)
     assert cb(_tool("update_user_profile"), {}, None) is None
-    assert audit.entries[0]["trust"] == trust.HIGH
+    assert audit.entries[0]["trust_level"] == trust.HIGH
 
 
 def test_provider_raising_is_logged_and_fails_open_to_high(caplog):
@@ -211,7 +211,7 @@ def test_provider_raising_is_logged_and_fails_open_to_high(caplog):
     cb = make_policy_callback(audit, trust_provider=boom)
     with caplog.at_level("ERROR"):
         assert cb(_tool("update_user_profile"), {}, None) is None
-    assert audit.entries[0]["trust"] == trust.HIGH
+    assert audit.entries[0]["trust_level"] == trust.HIGH
     assert "trust provider failed" in caplog.text
 
 

@@ -88,7 +88,11 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
             "tool": tool.name,
             "args": {k: str(v)[:500] for k, v in (args or {}).items()},
             "zone": zone,
-            "trust": trust_level,
+            # "trust_level", NOT "trust": one concept, one name end to end --
+            # spec §7, config.TRUST_STATE_KEY and VoiceSignals.trust_level all
+            # use this spelling, and the audit is what a past decision is
+            # reconstructed from.
+            "trust_level": trust_level,
             "voice_score": signals.voice_score if signals else None,
             "presence": signals.presence if signals else None,
             "device_hint": signals.device_hint if signals else None,
