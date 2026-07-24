@@ -37,4 +37,4 @@ class SpeakerProfile:
         for the ADAPT-threshold + auth gating (see SpeakerService)."""
         self.adaptive.append({"vec": vec, "device_hint": device_hint, "ts": now_fn()})
         if len(self.adaptive) > cap:
-            self.adaptive = self.adaptive[-cap:]
+            self.adaptive = self.adaptive[max(0, len(self.adaptive) - cap):]
