@@ -73,3 +73,49 @@ def embed(pcm: bytes) -> list[float]:
     """192-dim ECAPA speaker embedding for one utterance's PCM16 16kHz audio."""
     emb = _get_model().encode_batch(pcm16_to_tensor(pcm))  # [1, 1, 192]
     return emb.squeeze().tolist()
+
+
+from datetime import datetime, timezone
+
+from . import speaker_store
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class SpeakerService:
+    """Orchestrates one utterance's identity check: embed -> score against the
+    user's gallery -> verified?(>=accept) -> conditionally self-feed (>=adapt AND
+    authed as Kadir) -> persist. embed_fn is injectable so the logic is testable
+    without torch. Two thresholds create a poisoning-guard band: accept <= score
+    < adapt means "trust it but don't learn from it" (spec §5)."""
+
+    def __init__(self, db, embed_fn=embed, now_fn=_utc_now,
+                 accept: float = 0.35, adapt: float = 0.6, cap: int = 20, top_k: int = 3):
+        self.db = db
+        self.embed_fn = embed_fn
+        self.now_fn = now_fn
+        self.accept = accept
+        self.adapt = adapt
+        self.cap = cap
+        self.top_k = top_k
+
+    def identify(self, user_id: str, pcm: bytes, device_hint: str,
+                 auth_is_kadir: bool) -> tuple[bool, float]:
+        vec = self.embed_fn(pcm)
+        profile = speaker_store.load_profile(self.db, user_id)
+        score = profile.score(vec, self.top_k)
+        verified = score >= self.accept
+        adapted = score >= self.adapt and auth_is_kadir
+        if adapted:
+            profile.adapt(vec, device_hint, self.cap, self.now_fn)
+            speaker_store.save_profile(self.db, user_id, profile)
+        import logging
+        logging.info(
+            "speaker.identify: user=%s score=%.4f verified=%s adapted=%s "
+            "device=%s anchors=%d adaptive=%d accept=%.2f adapt=%.2f",
+            user_id, score, verified, adapted, device_hint,
+            len(profile.anchors), len(profile.adaptive), self.accept, self.adapt,
+        )
+        return verified, score
