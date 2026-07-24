@@ -57,7 +57,15 @@ class EndToEndTest {
             }
         }
 
-        // Starts on the sign-in screen.
+        // Starts on the BOOT SPLASH, not the sign-in screen: silent re-auth has not
+        // resolved yet, and offering "Google ile giriş" here is what made every warm
+        // start look like the app had forgotten the session.
+        rule.onNodeWithTag("boot_splash").assertIsDisplayed()
+        rule.onNodeWithTag("signin_button").assertDoesNotExist()
+
+        // Silent re-auth found nothing -> now the sign-in screen is correct.
+        vm.onSilentSignInFailed()
+        rule.waitForIdle()
         rule.onNodeWithTag("signin_button").assertIsDisplayed()
 
         // Sign in -> chat with loaded history.

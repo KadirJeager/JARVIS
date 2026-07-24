@@ -26,8 +26,35 @@ class ChatViewModel(private val repo: ChatRepository) : ViewModel() {
 
     /** Called by the host once sign-in succeeds; loads persisted history. */
     fun onSignedIn() {
-        _state.update { it.copy(signedIn = true) }
+        _state.update { it.copy(authPhase = AuthPhase.SIGNED_IN, error = null) }
         refreshHistory()
+    }
+
+    /**
+     * Silent re-auth found no usable credential. This is the NORMAL first-run path, not
+     * a failure, so it carries no error message — it just ends [AuthPhase.CHECKING] and
+     * lets the sign-in screen appear for the first time.
+     */
+    fun onSilentSignInFailed() {
+        _state.update { it.copy(authPhase = AuthPhase.SIGNED_OUT) }
+    }
+
+    /** The interactive credential flow has started; clears any previous failure. */
+    fun onSignInStarted() {
+        _state.update { it.copy(authPhase = AuthPhase.SIGNING_IN, error = null) }
+    }
+
+    /**
+     * The interactive flow failed or was cancelled. Previously this was swallowed at the
+     * Activity layer, so tapping the button appeared to do nothing at all.
+     */
+    fun onSignInFailed(reason: String?) {
+        _state.update {
+            it.copy(
+                authPhase = AuthPhase.SIGNED_OUT,
+                error = "Giriş yapılamadı: ${reason ?: "bilinmeyen hata"}",
+            )
+        }
     }
 
     fun refreshHistory() {

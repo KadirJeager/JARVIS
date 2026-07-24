@@ -19,6 +19,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -121,6 +122,62 @@ class ChatViewModelTest {
         vm.onSignedIn()
         advanceUntilIdle()
         assertTrue(vm.state.value.signedIn)
+        assertEquals(AuthPhase.SIGNED_IN, vm.state.value.authPhase)
         assertEquals(1, vm.state.value.messages.size)
+    }
+
+    /**
+     * The launch state is CHECKING, not signed-out. Nav shows the sign-in screen for
+     * signed-out, and silentSignIn() is an async call that resolves after first
+     * composition -- so a single boolean made every warm start flash "Google ile giriş"
+     * at a user who was already authorized, which reads as "it forgot my session".
+     */
+    @Test
+    fun startsInChecking_soAWarmStartNeverFlashesTheSignInScreen() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi())
+        assertEquals(AuthPhase.CHECKING, vm.state.value.authPhase)
+        assertFalse(vm.state.value.signedIn)
+    }
+
+    @Test
+    fun silentSignInFailure_movesToSignedOut() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi())
+        vm.onSilentSignInFailed()
+        assertEquals(AuthPhase.SIGNED_OUT, vm.state.value.authPhase)
+        assertNull(vm.state.value.error)      // not an error: nobody has signed in yet
+    }
+
+    @Test
+    fun interactiveSignIn_reportsProgress_thenSignsIn() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi())
+        vm.onSilentSignInFailed()
+        vm.onSignInStarted()
+        assertEquals(AuthPhase.SIGNING_IN, vm.state.value.authPhase)
+        vm.onSignedIn()
+        advanceUntilIdle()
+        assertEquals(AuthPhase.SIGNED_IN, vm.state.value.authPhase)
+    }
+
+    /** A failed or cancelled credential flow used to be swallowed: the button simply
+     *  did nothing. It must land back on the sign-in screen WITH a reason. */
+    @Test
+    fun interactiveSignInFailure_returnsToSignedOut_withATurkishMessage() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi())
+        vm.onSignInStarted()
+        vm.onSignInFailed("no credential")
+        assertEquals(AuthPhase.SIGNED_OUT, vm.state.value.authPhase)
+        val error = vm.state.value.error
+        assertNotNull(error)
+        assertTrue(error!!.contains("Giriş yapılamadı"))
+        assertTrue(error.contains("no credential"))
+    }
+
+    @Test
+    fun retryingSignInClearsThePreviousFailure() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi())
+        vm.onSignInFailed("boom")
+        assertNotNull(vm.state.value.error)
+        vm.onSignInStarted()
+        assertNull(vm.state.value.error)
     }
 }
