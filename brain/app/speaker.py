@@ -44,6 +44,19 @@ def _normalize_sample(raw, default_source: str) -> dict:
     return make_sample(raw, default_source, "unknown", None, new_sample_id())
 
 
+class SampleNotFound(KeyError):
+    """Requested sample/history id does not exist (endpoint maps to 404 --
+    it may have been deleted, evicted, or dropped off the ring buffer)."""
+
+
+class RuleViolation(ValueError):
+    """A management rule refused the operation (endpoint maps to 400).
+    Carries the Turkish user-facing message (spec §10)."""
+
+
+_UNSET = object()
+
+
 @dataclass
 class IdentifyOutcome:
     """One utterance's identity verdict plus what the verification history
@@ -190,7 +203,7 @@ class SpeakerService:
 
     def __init__(self, db, embed_fn=embed, now_fn=_utc_now, id_fn=new_sample_id,
                  accept: float = 0.35, adapt: float = 0.6, cap: int = 20, top_k: int = 3,
-                 history_cap: int = 50):
+                 history_cap: int = 50, labels: frozenset = frozenset()):
         self.db = db
         self.embed_fn = embed_fn
         self.now_fn = now_fn
@@ -200,6 +213,7 @@ class SpeakerService:
         self.cap = cap
         self.top_k = top_k
         self.history_cap = history_cap
+        self.labels = labels
         # identify() now runs in a worker thread (voice.py's asyncio.to_thread),
         # so two live connections for the same user can reach the gallery's
         # load -> adapt -> save read-modify-write at once and silently drop one
@@ -273,6 +287,46 @@ class SpeakerService:
         with self._gallery_lock:
             return (speaker_store.load_profile(self.db, user_id),
                     speaker_history.load_history(self.db, user_id))
+
+    def _find_sample(self, profile: SpeakerProfile, sample_id: str) -> dict:
+        for s in profile.anchors + profile.adaptive:
+            if s["id"] == sample_id:
+                return s
+        raise SampleNotFound(sample_id)
+
+    def update_sample(self, user_id: str, sample_id: str, *,
+                      label=_UNSET, note=_UNSET) -> dict:
+        """PATCH semantics: only the fields the caller actually sent change
+        (label=None is a deliberate clear, absent means untouched)."""
+        with self._gallery_lock:
+            profile = speaker_store.load_profile(self.db, user_id)
+            sample = self._find_sample(profile, sample_id)
+            if label is not _UNSET:
+                if label is not None and label not in self.labels:
+                    raise RuleViolation(
+                        f"Geçersiz etiket: {label}. Geçerli etiketler: "
+                        + ", ".join(sorted(self.labels)))
+                sample["label"] = label
+            if note is not _UNSET:
+                sample["note"] = note
+            speaker_store.save_profile(self.db, user_id, profile)
+            return dict(sample)
+
+    def delete_sample(self, user_id: str, sample_id: str) -> None:
+        """Single-sample deletion, anchors included -- EXCEPT the last anchor
+        (spec §8): an anchorless profile cannot score and ADAPT refereeing
+        loses its reference; whole-profile deletion is the endpoint for that."""
+        with self._gallery_lock:
+            profile = speaker_store.load_profile(self.db, user_id)
+            self._find_sample(profile, sample_id)          # 404 wins over 400
+            is_anchor = any(s["id"] == sample_id for s in profile.anchors)
+            if is_anchor and len(profile.anchors) == 1:
+                raise RuleViolation(
+                    "Son çapa silinemez: çapasız profil ses doğrulayamaz. "
+                    "Profili tamamen kaldırmak için profil silmeyi kullan.")
+            profile.anchors = [s for s in profile.anchors if s["id"] != sample_id]
+            profile.adaptive = [s for s in profile.adaptive if s["id"] != sample_id]
+            speaker_store.save_profile(self.db, user_id, profile)
 
     def record_history(self, user_id: str, *, score: float, verified: bool,
                        vec: list[float], device_hint: str, presence: str,

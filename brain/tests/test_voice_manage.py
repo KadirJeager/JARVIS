@@ -135,3 +135,109 @@ def test_quality_of_empty_history_is_all_none():
     assert q["mean_verified_score"] is None and q["fail_rate"] is None
     assert q["by_device"] == {} and q["by_label"] == {}
     assert q["trend"] == {"last10": None, "previous10": None}
+
+
+# --- PATCH/DELETE /api/voice/sample/{id} (spec §6, §8) ----------------------
+
+
+def _seed_profile(db):
+    """2 anchors + 1 auto sample with known ids."""
+    ids = iter(["a1", "a2"])
+    enroll_anchors(db, USER, [A, B], device_hint="phone",
+                   now_fn=lambda: "t0", id_fn=lambda: next(ids))
+    profile = load_profile(db, USER)
+    profile.adaptive.append(make_sample(B, "auto", "headset", "t1", "s1"))
+    save_profile(db, USER, profile)
+
+
+def test_patch_sample_updates_label_and_note(manage_client):
+    c, db = manage_client
+    _auth()
+    _seed_profile(db)
+    r = c.patch("/api/voice/sample/s1", json={"label": "gurultulu", "note": "metroda"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["label"] == "gurultulu" and body["note"] == "metroda"
+    _assert_no_vec(body)
+    stored = load_profile(db, USER).adaptive[0]
+    assert stored["label"] == "gurultulu" and stored["note"] == "metroda"
+
+
+def test_patch_note_only_preserves_the_label(manage_client):
+    c, db = manage_client
+    _auth()
+    _seed_profile(db)
+    c.patch("/api/voice/sample/s1", json={"label": "hasta"})
+    r = c.patch("/api/voice/sample/s1", json={"note": "sadece not"})
+    assert r.status_code == 200
+    assert r.json()["label"] == "hasta"          # omitted field untouched
+
+
+def test_patch_label_null_clears_it(manage_client):
+    c, db = manage_client
+    _auth()
+    _seed_profile(db)
+    c.patch("/api/voice/sample/s1", json={"label": "hasta"})
+    r = c.patch("/api/voice/sample/s1", json={"label": None})
+    assert r.status_code == 200 and r.json()["label"] is None
+
+
+def test_patch_rejects_a_label_outside_the_fixed_set(manage_client):
+    c, db = manage_client
+    _auth()
+    _seed_profile(db)
+    r = c.patch("/api/voice/sample/s1", json={"label": "nezleli"})
+    assert r.status_code == 400
+    assert "Geçersiz etiket" in r.json()["detail"]
+    assert load_profile(db, USER).adaptive[0]["label"] is None
+
+
+def test_patch_unknown_sample_is_404(manage_client):
+    c, _db = manage_client
+    _auth()
+    r = c.patch("/api/voice/sample/yok", json={"label": "hasta"})
+    assert r.status_code == 404
+
+
+def test_delete_adaptive_sample(manage_client):
+    c, db = manage_client
+    _auth()
+    _seed_profile(db)
+    r = c.delete("/api/voice/sample/s1")
+    assert r.status_code == 200 and r.json() == {"deleted": "s1"}
+    assert load_profile(db, USER).adaptive == []
+
+
+def test_delete_an_anchor_when_others_remain(manage_client):
+    c, db = manage_client
+    _auth()
+    _seed_profile(db)
+    r = c.delete("/api/voice/sample/a1")
+    assert r.status_code == 200
+    assert [s["id"] for s in load_profile(db, USER).anchors] == ["a2"]
+
+
+def test_the_last_anchor_cannot_be_deleted(manage_client):
+    """spec §8: an anchorless profile cannot score ACCEPT and leaves ADAPT
+    refereeing without a reference -- an explicit 400 beats a silently
+    non-functional profile."""
+    c, db = manage_client
+    _auth()
+    enroll_anchors(db, USER, [A], device_hint="phone",
+                   now_fn=lambda: "t0", id_fn=lambda: "a1")
+    r = c.delete("/api/voice/sample/a1")
+    assert r.status_code == 400
+    assert "Son çapa" in r.json()["detail"]
+    assert len(load_profile(db, USER).anchors) == 1
+
+
+def test_delete_unknown_sample_is_404(manage_client):
+    c, _db = manage_client
+    _auth()
+    assert c.delete("/api/voice/sample/yok").status_code == 404
+
+
+def test_sample_endpoints_require_auth(manage_client):
+    c, _db = manage_client
+    assert c.patch("/api/voice/sample/s1", json={"label": "hasta"}).status_code in (401, 403)
+    assert c.delete("/api/voice/sample/s1").status_code in (401, 403)

@@ -199,3 +199,21 @@ def test_gallery_read_modify_write_is_serialized_but_embedding_is_not(monkeypatc
 
     assert observed["locked_during_embed"] is False
     assert observed["locked_during_save"] is True
+
+
+def test_update_sample_holds_the_gallery_lock_across_its_save(monkeypatch):
+    from app import speaker as speaker_mod
+    db = FakeDB(); enroll_anchors(db, "k", [A], id_fn=lambda: "a1")
+    svc = SpeakerService(db, embed_fn=lambda pcm: A, now_fn=lambda: "t",
+                         accept=0.9, adapt=0.97, cap=5, top_k=1,
+                         labels=frozenset({"hasta"}))
+    observed = {}
+    real_save = speaker_mod.speaker_store.save_profile
+
+    def watching_save(db_, user_id, profile):
+        observed["locked"] = svc._gallery_lock.locked()
+        return real_save(db_, user_id, profile)
+
+    monkeypatch.setattr(speaker_mod.speaker_store, "save_profile", watching_save)
+    svc.update_sample("k", "a1", label="hasta")
+    assert observed["locked"] is True

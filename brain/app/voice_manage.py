@@ -13,7 +13,9 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
+from . import speaker
 from .auth import require_user
 
 router = APIRouter()
@@ -83,3 +85,45 @@ async def get_profile(email: str = Depends(require_user)):
         "history": [_project(e, _HISTORY_FIELDS) for e in history],
         "quality": quality_indicators(history, samples_by_id),
     }
+
+
+class SamplePatch(BaseModel):
+    label: str | None = None
+    note: str | None = None
+
+
+@router.patch("/api/voice/sample/{sample_id}")
+async def patch_sample(sample_id: str, req: SamplePatch,
+                       email: str = Depends(require_user)):
+    # model_fields_set distinguishes "absent" from an explicit null: label=None
+    # must CLEAR the label, an omitted label must not touch it.
+    kwargs = {}
+    if "label" in req.model_fields_set:
+        kwargs["label"] = req.label
+    if "note" in req.model_fields_set:
+        kwargs["note"] = req.note
+    try:
+        sample = await asyncio.to_thread(
+            lambda: _service().update_sample(email, sample_id, **kwargs))
+    except speaker.SampleNotFound:
+        raise HTTPException(status_code=404, detail="Örnek bulunamadı")
+    except speaker.RuleViolation as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logging.exception("voice_manage: patch failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail=_INFRA_502)
+    return _project(sample, _SAMPLE_FIELDS)
+
+
+@router.delete("/api/voice/sample/{sample_id}")
+async def delete_sample(sample_id: str, email: str = Depends(require_user)):
+    try:
+        await asyncio.to_thread(lambda: _service().delete_sample(email, sample_id))
+    except speaker.SampleNotFound:
+        raise HTTPException(status_code=404, detail="Örnek bulunamadı")
+    except speaker.RuleViolation as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logging.exception("voice_manage: sample delete failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail=_INFRA_502)
+    return {"deleted": sample_id}
