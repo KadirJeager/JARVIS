@@ -275,3 +275,49 @@ server-verifiable presence/attestation signal, which this slice does not have.
   scores 0, which is harmless under `foreground` (HIGH regardless) but means
   `locked`/`ambient` sit at MEDIUM/LOW. `jarvis-voice` still needs its own
   deploy with `--min-instances 1`.
+
+### Ses kimliği yönetimi (Dilim 3d)
+
+`app/voice_manage.py` adds six `require_user`-gated endpoints (mounted under
+`app.main`) so Kadir can see, correct and delete his own voiceprint gallery
+and verification history. Every one runs off the event loop via
+`asyncio.to_thread` and goes through `SpeakerService` — the same gallery lock
+`identify()`/`enroll()` use — so a management call can never interleave with
+a live verification and drop one side's write.
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/voice/profile` | Anchors + adaptive samples + verification history + `quality_indicators` (mean score, fail rate, per-device/per-label breakdown, last-10 vs previous-10 trend), no vectors |
+| `PATCH /api/voice/sample/{id}` | Sets `label`/`note` on one sample; `label` must be in the fixed set or absent field leaves it untouched, `label: null` clears it |
+| `DELETE /api/voice/sample/{id}` | Deletes one anchor or adaptive sample; refuses (400) to delete the last anchor — an anchorless profile cannot score or referee ADAPT |
+| `POST /api/voice/history/{id}/confirm` | "Bu bendim": promotes the entry's stored embedding into a MANUAL adaptive sample (votes in ACCEPT, never referees ADAPT); idempotent, capped by `JARVIS_SPEAKER_MANUAL_CAP` |
+| `POST /api/voice/history/{id}/reject` | "Bu ben değildim": marks the entry and removes the sample it fed the gallery with, if any; idempotent |
+| `DELETE /api/voice/profile` | Deletes the gallery AND the verification history together — no half-deletion |
+
+**History model.** Verification history is a per-user ring buffer
+(`speaker_history/{user_id}`, oldest-first): every identify call appends one
+entry and `record()` trims to the newest `JARVIS_SPEAKER_HISTORY_CAP` (default
+50). Entries carry the utterance's **embedding, not audio** — the vector is
+what lets a later confirm/reject correction feed or prune the gallery, and it
+cannot be inverted back into listenable audio; storing audio would be a
+categorically different privacy liability and is out of scope. A confirm/reject
+sets the entry's `correction` field (`"confirmed"` / `"rejected"`), which is
+also what makes both endpoints idempotent — a repeat call returns
+`already: true` instead of double-applying.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JARVIS_SPEAKER_HISTORY_CAP` | `50` | Verification history ring-buffer size per user |
+| `JARVIS_SPEAKER_MANUAL_CAP` | `5` | Max manually-confirmed samples in the adaptive gallery; an accident guard, not a security boundary — the real guarantee is revocability |
+
+**Label set** (`app/config.py: SPEAKER_SAMPLE_LABELS`, fixed vocabulary so
+scores aggregate meaningfully): `saglikli`, `hasta`, `yorgun`, `gurultulu`,
+`kulaklik`, `hoparlor`, `arac`. The free-text `note` field on a sample catches
+whatever the fixed set misses.
+
+**Privacy (spec §6, §7).** Two claims, load-bearing enough to state exactly:
+vectors never leave the server (every response is built by explicit allowlist
+projection, and tests pin the absence of `vec` anywhere in any response body);
+and no "biyometri yaptım" header exists — the client biometric gate is
+Android-side UX, the server never trusts it (spec §7). The Android biometric
+prompt is tracked as a separate future plan (3d-3), not part of this slice.

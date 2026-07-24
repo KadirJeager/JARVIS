@@ -352,3 +352,55 @@ def test_profile_deletion_failure_is_a_turkish_502(manage_client, monkeypatch):
     monkeypatch.setattr(store_mod, "delete_profile", boom)
     r = c.delete("/api/voice/profile")
     assert r.status_code == 502 and "altyapı" in r.json()["detail"]
+
+
+# --- spec §11: correction vs live identify, no lost writes ------------------
+
+
+def test_concurrent_confirm_and_identify_do_not_lose_a_write():
+    """The race the shared lock exists for, at the two mutation entry points
+    Dilim 3d adds: a live identify() that adapts and a confirm_history() from
+    the management surface interleave from two threads -- BOTH new samples
+    must survive (same barrier pattern as test_enroll.py's enroll/identify
+    race)."""
+    import threading
+
+    from app.speaker import SpeakerService
+
+    db = FakeDB()
+    ids = iter(f"id{i}" for i in range(10))
+    svc = SpeakerService(db, embed_fn=lambda pcm: A, now_fn=lambda: "t",
+                         accept=0.35, adapt=0.6, cap=20, top_k=3,
+                         id_fn=lambda: next(ids), manual_cap=5, history_cap=50)
+    svc.enroll(USER, [A])
+    _seed_history(db)
+
+    start = threading.Barrier(2)
+    errors = []
+
+    def do_confirm():
+        try:
+            start.wait(timeout=5)
+            svc.confirm_history(USER, "e1")
+        except Exception as exc:            # pragma: no cover - reported below
+            errors.append(exc)
+
+    def do_identify():
+        try:
+            start.wait(timeout=5)
+            svc.identify(USER, b"\x00\x01", "phone", auth_is_kadir=True)
+        except Exception as exc:            # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=do_confirm), threading.Thread(target=do_identify)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not errors, errors
+    profile = load_profile(db, USER)
+    assert sum(1 for s in profile.adaptive if s["source"] == "manual") == 1, \
+        "the confirmed manual sample was lost to the adapt write"
+    assert sum(1 for s in profile.adaptive if s["source"] == "auto") == 1, \
+        "the adaptive sample was lost to the confirm write"
