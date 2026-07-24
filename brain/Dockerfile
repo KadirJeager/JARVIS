@@ -47,6 +47,15 @@ RUN python -c "from speechbrain.inference.speaker import EncoderClassifier; Enco
     && mv "${SPEAKER_MODEL_DIR}.real" "${SPEAKER_MODEL_DIR}" \
     && chown -R appuser:appuser "${SPEAKER_MODEL_DIR}"
 
+# Re-point HF_HOME for RUNTIME. The build-time value above is a root-owned path
+# that the RUN above deleted, and ENV persists into the running container: if
+# anything ever did reach for the hub at runtime (a missing savedir file, a
+# speechbrain upgrade), `appuser` would hit EACCES on /opt rather than degrade.
+# /tmp is the one path Cloud Run guarantees writable. Nothing is expected to
+# use this -- the model is baked and SPEAKER_MODEL_DIR points at it -- so this
+# is purely about failing softly instead of on a permissions error.
+ENV HF_HOME=/tmp/hf-cache
+
 USER appuser
 ENV PORT=8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

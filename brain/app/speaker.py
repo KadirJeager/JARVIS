@@ -169,7 +169,11 @@ class SpeakerService:
         structurally impossible and the store needed no lock. asyncio.to_thread
         made the race real -- an enroll landing between identify()'s load and
         save (or vice versa) silently loses one side's write. Sharing this lock
-        restores the invariant.
+        restores the invariant WITHIN THIS PROCESS. It is not a distributed
+        lock: speaker_store.save_profile is a blind .set(), so two Cloud Run
+        instances writing the same gallery still lose one side's write. That is
+        acceptable only because this is a single-user deployment pinned to
+        --min-instances 1; it is not a general guarantee.
 
         The count is re-read from storage inside the lock rather than derived
         from the vectors we just sent, so the number returned to the client is
