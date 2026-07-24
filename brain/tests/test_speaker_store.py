@@ -55,3 +55,11 @@ def test_profiles_are_user_keyed():
     db = FakeDB()
     enroll_anchors(db, "kadir@example.com", [A])
     assert load_profile(db, "someone@else.com").anchors == []
+
+def test_delete_profile_removes_the_document():
+    db = FakeDB()
+    enroll_anchors(db, "kadir@example.com", [A])
+    from app.speaker_store import delete_profile
+    delete_profile(db, "kadir@example.com")
+    snap = db.collection("speaker_profiles").document("kadir@example.com").get()
+    assert snap.exists is False

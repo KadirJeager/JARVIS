@@ -37,3 +37,7 @@ def enroll_anchors(db, user_id: str, vecs: list[list[float]],
         make_sample(v, "enroll", device_hint, ts, id_fn()) for v in vecs
     )
     save_profile(db, user_id, profile)
+
+
+def delete_profile(db, user_id: str) -> None:
+    db.collection(_COLLECTION).document(user_id).delete()
