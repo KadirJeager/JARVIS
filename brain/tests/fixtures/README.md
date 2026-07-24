@@ -140,3 +140,64 @@ Notlar:
 - HF Hub indirmesi kimliksiz (`HF_TOKEN` yok) yapıldı; script "unauthenticated
   requests" uyarısı verdi ama rate-limit'e takılmadan tamamlandı (~8 saniye,
   model + torch toplamda önceden ısıtılmamış önbellekten).
+
+## Ses fixture'ları — Task 4 (`spk_a_1.pcm`, `spk_a_2.pcm`, `spk_b_1.pcm`)
+
+`embed()` konuşmacı-ayrımı testi (`test_same_speaker_scores_higher_than_different`)
+gerçek konuşma gerektirir — sentetik ton/gürültü ECAPA'da anlamlı ayrışmaz. Kaynak:
+
+**Dataset:** [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr)
+(Hugging Face Hub), config `clean`, split `validation` (= LibriSpeech'in `dev-clean`
+alt kümesi). Revision (sha): `71cacbfb7e2354c4226d01e70d77d5fca3d04ba1`.
+
+**Lisans:** CC BY 4.0 (HF dataset kartı: `license:cc-by-4.0`). LibriSpeech,
+LibriVox'un kamu malı (public-domain) sesli kitap kayıtlarından türetilmiştir;
+orijinal yayın: Panayotov et al., *"Librispeech: An ASR corpus based on public
+domain audio books"*, ICASSP 2015 — http://www.openslr.org/12.
+
+**Erişim yöntemi:** `datasets` Python paketi kurmadan, HF'nin herkese açık
+*datasets-server* REST API'si ile (`https://datasets-server.huggingface.co/rows`)
+belirli satırlar sorgulandı; her satır kararlı bir imzalı `audio.flac` URL'i
+döndürüyor. `speaker_id` alanı sayesinde aynı/farklı konuşmacı seçimi doğrudan
+yapılabildi (rastgele değil, veri setinin kendi etiketiyle):
+
+| Dosya | Kaynak utterance ID | speaker_id | chapter_id | Not |
+|---|---|---|---|---|
+| `spk_a_1.pcm` | `2277-149896-0000` | 2277 | 149896 | Konuşmacı A, 1. utterance |
+| `spk_a_2.pcm` | `2277-149896-0001` | 2277 | 149896 | Konuşmacı A, **aynı konuşmacı**, farklı utterance |
+| `spk_b_1.pcm` | `2035-147961-0019` | 2035 | 147961 | Konuşmacı B, **farklı konuşmacı** |
+
+Sorgu: `GET /rows?dataset=openslr%2Flibrispeech_asr&config=clean&split=validation&offset=<N>&length=<K>`
+(offset 0 → speaker 2277; offset 150 → speaker 2035; ilk 10 satır taranıp farklı
+`speaker_id`'ye rastlanana kadar örneklendi).
+
+**Dönüştürme** (`.venv-speaker`, `soundfile` ile — bkz. not aşağıda):
+1. Her `audio.flac` URL'i indirildi (LibriSpeech native formatı zaten 16-bit
+   mono 16kHz FLAC; `file` çıktısıyla doğrulandı, yeniden örnekleme gerekmedi).
+2. `soundfile.read(path, dtype="int16")` ile PCM16 örnekler decode edildi.
+3. İlk 3.0 saniye (48000 örnek) kesildi (brief hedefi: ~2-3sn).
+4. `.astype('<i2').tobytes()` ile header'sız ham little-endian PCM16 mono
+   16kHz bayt dizisi olarak `tests/fixtures/*.pcm`'e yazıldı.
+5. İndirilen ara `.flac` dosyaları repo dışı scratch dizininde kaldı, commit
+   edilmedi — sadece nihai `.pcm` dosyaları commit'e girdi.
+
+**Not — `torchaudio.load()` yerine `soundfile` kullanıldı:** kurulu
+`torchaudio` (2.11.0+cpu) artık `.load()` için `torchcodec` bekliyor
+(`ModuleNotFoundError: No module named 'torchcodec'`); `torchcodec` `.venv-speaker`
+kurulumunun parçası değil. `soundfile` (0.14.0, speechbrain'in transitive
+bağımlılığı olarak zaten kurulu, `libsndfile` ile statik geliyor) FLAC'ı
+doğrudan decode edebildiği için ek paket kurmadan onu kullanmak tercih edildi.
+`embed()`'in kendisi (`app/speaker.py`) bu ayrımdan etkilenmiyor — o zaten ham
+PCM16 bayt alıyor, dosya decode'una hiç girmiyor.
+
+**Doğrulama — `embed()` ile ölçülen cosine benzerlik** (bkz. `task-4-report.md`
+TDD kanıtı için):
+
+```
+cosine(spk_a_1, spk_a_2)  [AYNI konuşmacı]     = 0.725060
+cosine(spk_a_1, spk_b_1)  [FARKLI konuşmacı]   = 0.160283
+margin                                          = 0.564778
+```
+
+Güçlü ayrışma (~0.56 marj) fixture'ların gerçekten farklı konuşmacılar
+olduğunu ve ECAPA modelinin bunları doğru ayırdığını doğruluyor.

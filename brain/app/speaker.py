@@ -38,3 +38,38 @@ class SpeakerProfile:
         self.adaptive.append({"vec": vec, "device_hint": device_hint, "ts": now_fn()})
         if len(self.adaptive) > cap:
             self.adaptive = self.adaptive[max(0, len(self.adaptive) - cap):]
+
+
+import os
+
+_model = None
+
+
+def _get_model():
+    """Lazy singleton ECAPA-TDNN. Loaded once per process, on first embed()
+    call, on CPU. Import path + embedding dim confirmed in Task 1."""
+    global _model
+    if _model is None:
+        from speechbrain.inference.speaker import EncoderClassifier
+
+        _model = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            savedir=os.environ.get("SPEAKER_MODEL_DIR", "/tmp/spkrec-ecapa"),
+            run_opts={"device": "cpu"},
+        )
+    return _model
+
+
+def pcm16_to_tensor(pcm: bytes):
+    """Raw PCM16 mono 16kHz bytes -> float32 tensor [1, samples] in [-1, 1].
+    bytearray() makes the buffer writable so torch.frombuffer is happy."""
+    import torch
+
+    ints = torch.frombuffer(bytearray(pcm), dtype=torch.int16)
+    return (ints.float() / 32768.0).unsqueeze(0)
+
+
+def embed(pcm: bytes) -> list[float]:
+    """192-dim ECAPA speaker embedding for one utterance's PCM16 16kHz audio."""
+    emb = _get_model().encode_batch(pcm16_to_tensor(pcm))  # [1, 1, 192]
+    return emb.squeeze().tolist()
