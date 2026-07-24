@@ -127,3 +127,33 @@ async def delete_sample(sample_id: str, email: str = Depends(require_user)):
         logging.exception("voice_manage: sample delete failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail=_INFRA_502)
     return {"deleted": sample_id}
+
+
+@router.post("/api/voice/history/{entry_id}/confirm")
+async def confirm_history(entry_id: str, email: str = Depends(require_user)):
+    try:
+        return await asyncio.to_thread(
+            lambda: _service().confirm_history(email, entry_id))
+    except speaker.SampleNotFound:
+        raise HTTPException(status_code=404,
+                            detail="Geçmiş kaydı artık yok (silinmiş ya da tampondan düşmüş olabilir)")
+    except speaker.RuleViolation as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logging.exception("voice_manage: confirm failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail=_INFRA_502)
+
+
+@router.post("/api/voice/history/{entry_id}/reject")
+async def reject_history(entry_id: str, email: str = Depends(require_user)):
+    try:
+        return await asyncio.to_thread(
+            lambda: _service().reject_history(email, entry_id))
+    except speaker.SampleNotFound:
+        raise HTTPException(status_code=404,
+                            detail="Geçmiş kaydı artık yok (silinmiş ya da tampondan düşmüş olabilir)")
+    except speaker.RuleViolation as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logging.exception("voice_manage: reject failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail=_INFRA_502)

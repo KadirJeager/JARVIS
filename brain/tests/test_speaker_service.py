@@ -217,3 +217,145 @@ def test_update_sample_holds_the_gallery_lock_across_its_save(monkeypatch):
     monkeypatch.setattr(speaker_mod.speaker_store, "save_profile", watching_save)
     svc.update_sample("k", "a1", label="hasta")
     assert observed["locked"] is True
+
+
+# --- Dilim 3d spec §5+§6: corrections --------------------------------------
+
+from app import speaker_history
+
+
+def _hist_entry(i, vec, *, adapted=None, correction=None):
+    return {"id": f"e{i}", "ts": f"t{i}", "score": 0.5, "verified": True,
+            "device_hint": "phone", "presence": "locked", "trust_level": "MEDIUM",
+            "adapted_sample_id": adapted, "correction": correction, "vec": vec}
+
+
+def _mgmt_svc(db, manual_cap=5):
+    ids = iter(f"id{i}" for i in range(100))
+    return SpeakerService(db, embed_fn=lambda pcm: A, now_fn=lambda: "now",
+                         accept=0.9, adapt=0.97, cap=5, top_k=1,
+                         id_fn=lambda: next(ids), manual_cap=manual_cap)
+
+
+def test_confirm_adds_a_manual_sample_and_marks_the_entry():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    result = svc.confirm_history("k", "e1")
+    assert result["already"] is False
+    profile = load_profile(db, "k")
+    manuals = [s for s in profile.adaptive if s["source"] == "manual"]
+    assert len(manuals) == 1 and manuals[0]["vec"] == FAR
+    assert manuals[0]["id"] == result["added_sample_id"]
+    assert profile.anchors[0]["source"] == "enroll", "manual must NEVER become an anchor"
+    entry = speaker_history.load_history(db, "k")[0]
+    assert entry["correction"] == "confirmed"
+    assert entry["adapted_sample_id"] == result["added_sample_id"]
+
+
+def test_confirm_is_idempotent_and_does_not_burn_the_cap():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    first = svc.confirm_history("k", "e1")
+    second = svc.confirm_history("k", "e1")
+    assert second["already"] is True
+    assert second["added_sample_id"] == first["added_sample_id"]
+    profile = load_profile(db, "k")
+    assert sum(1 for s in profile.adaptive if s["source"] == "manual") == 1
+
+
+def test_the_sixth_manual_sample_is_refused_with_the_count():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    from app.speaker import make_sample
+    profile = load_profile(db, "k")
+    for i in range(5):
+        profile.adaptive.append(make_sample(FAR, "manual", "phone", "t", f"m{i}"))
+    from app.speaker_store import save_profile
+    save_profile(db, "k", profile)
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    import pytest as _pytest
+    from app.speaker import RuleViolation
+    with _pytest.raises(RuleViolation, match="5/5"):
+        svc.confirm_history("k", "e1")
+    entry = speaker_history.load_history(db, "k")[0]
+    assert entry["correction"] is None, "a refused confirm must not mark the entry"
+
+
+def test_reject_removes_the_adapted_sample_and_marks_the_entry():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    svc = _mgmt_svc(db)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)   # adapts (score 1.0)
+    assert out.adapted_sample_id is not None
+    # identify() recorded nothing (that is voice.py's job) -- seed the entry:
+    speaker_history.record(db, "k", _hist_entry(1, A, adapted=out.adapted_sample_id), cap=50)
+    result = svc.reject_history("k", "e1")
+    assert result["removed_sample_id"] == out.adapted_sample_id
+    assert load_profile(db, "k").adaptive == []
+    entry = speaker_history.load_history(db, "k")[0]
+    assert entry["correction"] == "rejected" and entry["adapted_sample_id"] is None
+
+
+def test_reject_of_a_never_adapted_entry_just_marks_it():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    result = svc.reject_history("k", "e1")
+    assert result == {"removed_sample_id": None, "already": False}
+    assert speaker_history.load_history(db, "k")[0]["correction"] == "rejected"
+
+
+def test_reject_is_idempotent():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    svc.reject_history("k", "e1")
+    assert svc.reject_history("k", "e1")["already"] is True
+
+
+def test_mind_can_be_changed_in_both_directions():
+    """spec §6: reversing is legitimate use. confirm -> reject removes the
+    manual sample; reject -> confirm adds a fresh one."""
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    added = svc.confirm_history("k", "e1")["added_sample_id"]
+    removed = svc.reject_history("k", "e1")["removed_sample_id"]
+    assert removed == added
+    assert [s for s in load_profile(db, "k").adaptive if s["source"] == "manual"] == []
+    re_added = svc.confirm_history("k", "e1")["added_sample_id"]
+    assert re_added is not None and re_added != added
+    manuals = [s for s in load_profile(db, "k").adaptive if s["source"] == "manual"]
+    assert [s["id"] for s in manuals] == [re_added]
+
+
+def test_unknown_history_entry_raises_not_found():
+    import pytest as _pytest
+    from app.speaker import SampleNotFound
+    db = FakeDB()
+    svc = _mgmt_svc(db)
+    with _pytest.raises(SampleNotFound):
+        svc.confirm_history("k", "yok")
+    with _pytest.raises(SampleNotFound):
+        svc.reject_history("k", "yok")
+
+
+def test_manual_sample_votes_in_accept_but_never_referees_adapt():
+    """spec §5's core split, mutation-verified by construction: the probe F is
+    FAR from the anchor A but IDENTICAL to the manual sample, so
+    - ACCEPT (full gallery, top_k=1) scores 1.0 -> verified: manual VOTES;
+    - ADAPT (anchors only) scores 0.0 -> no self-feed: manual cannot REFEREE.
+    If anchor_score ever read the full gallery, the auto sample added here
+    would prove it (adaptive would grow)."""
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    speaker_history.record(db, "k", _hist_entry(1, FAR), cap=50)
+    svc = _mgmt_svc(db)
+    svc.confirm_history("k", "e1")                    # manual sample = FAR
+    svc2 = SpeakerService(db, embed_fn=lambda pcm: FAR, now_fn=lambda: "t",
+                          accept=0.9, adapt=0.9, cap=5, top_k=1)
+    out = svc2.identify("k", b"F", "phone", auth_is_kadir=True)
+    assert out.verified is True and out.score == 1.0          # manual voted
+    assert out.adapted_sample_id is None                       # ...but did not referee
+    profile = load_profile(db, "k")
+    assert sum(1 for s in profile.adaptive if s["source"] == "auto") == 0

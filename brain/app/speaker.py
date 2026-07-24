@@ -203,7 +203,8 @@ class SpeakerService:
 
     def __init__(self, db, embed_fn=embed, now_fn=_utc_now, id_fn=new_sample_id,
                  accept: float = 0.35, adapt: float = 0.6, cap: int = 20, top_k: int = 3,
-                 history_cap: int = 50, labels: frozenset = frozenset()):
+                 history_cap: int = 50, labels: frozenset = frozenset(),
+                 manual_cap: int = 5):
         self.db = db
         self.embed_fn = embed_fn
         self.now_fn = now_fn
@@ -214,6 +215,7 @@ class SpeakerService:
         self.top_k = top_k
         self.history_cap = history_cap
         self.labels = labels
+        self.manual_cap = manual_cap
         # identify() now runs in a worker thread (voice.py's asyncio.to_thread),
         # so two live connections for the same user can reach the gallery's
         # load -> adapt -> save read-modify-write at once and silently drop one
@@ -345,3 +347,64 @@ class SpeakerService:
         with self._gallery_lock:
             speaker_history.record(self.db, user_id, entry, self.history_cap)
         return entry["id"]
+
+    @staticmethod
+    def _find_entry(entries: list[dict], entry_id: str) -> dict:
+        for e in entries:
+            if e["id"] == entry_id:
+                return e
+        raise SampleNotFound(entry_id)
+
+    def confirm_history(self, user_id: str, entry_id: str) -> dict:
+        """"Bu bendim" (spec §6): the stored embedding becomes a MANUAL gallery
+        sample -- it VOTES in ACCEPT but never REFEREES adapt (it lives in the
+        adaptive list, and anchor_score reads anchors only, spec §5).
+        Idempotent via entry.correction; adapted_sample_id doubles as the link
+        for a later reversal."""
+        with self._gallery_lock:
+            entries = speaker_history.load_history(self.db, user_id)
+            entry = self._find_entry(entries, entry_id)
+            if entry.get("correction") == "confirmed":
+                return {"added_sample_id": entry.get("adapted_sample_id"),
+                        "already": True}
+            profile = speaker_store.load_profile(self.db, user_id)
+            manual_count = sum(
+                1 for s in profile.adaptive if s["source"] == "manual")
+            if manual_count >= self.manual_cap:
+                raise RuleViolation(
+                    f"Elle eklenen örnek sınırı dolu ({manual_count}/{self.manual_cap}). "
+                    "Yenisini eklemek için önce elle eklenmiş bir örneği sil.")
+            sample = make_sample(entry["vec"], "manual",
+                                 entry.get("device_hint", "unknown"),
+                                 self.now_fn(), self.id_fn())
+            profile.adaptive.append(sample)
+            entry["correction"] = "confirmed"
+            entry["adapted_sample_id"] = sample["id"]
+            speaker_store.save_profile(self.db, user_id, profile)
+            speaker_history.save_history(self.db, user_id, entries)
+            return {"added_sample_id": sample["id"], "already": False}
+
+    def reject_history(self, user_id: str, entry_id: str) -> dict:
+        """"Bu ben değildim" (spec §6): if the utterance fed the gallery
+        (auto-adapt or an earlier confirm), that sample is removed -- it may
+        already be gone via eviction/deletion, which is fine, the marking is
+        what idempotency rests on. The sample is by construction never an
+        anchor, so the last-anchor rule cannot be tripped from here."""
+        with self._gallery_lock:
+            entries = speaker_history.load_history(self.db, user_id)
+            entry = self._find_entry(entries, entry_id)
+            if entry.get("correction") == "rejected":
+                return {"removed_sample_id": None, "already": True}
+            removed = None
+            target = entry.get("adapted_sample_id")
+            if target:
+                profile = speaker_store.load_profile(self.db, user_id)
+                before = len(profile.adaptive)
+                profile.adaptive = [s for s in profile.adaptive if s["id"] != target]
+                if len(profile.adaptive) != before:
+                    removed = target
+                    speaker_store.save_profile(self.db, user_id, profile)
+            entry["correction"] = "rejected"
+            entry["adapted_sample_id"] = None
+            speaker_history.save_history(self.db, user_id, entries)
+            return {"removed_sample_id": removed, "already": False}

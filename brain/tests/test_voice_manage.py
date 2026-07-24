@@ -241,3 +241,73 @@ def test_sample_endpoints_require_auth(manage_client):
     c, _db = manage_client
     assert c.patch("/api/voice/sample/s1", json={"label": "hasta"}).status_code in (401, 403)
     assert c.delete("/api/voice/sample/s1").status_code in (401, 403)
+
+
+# --- POST /api/voice/history/{id}/confirm + /reject (spec §6) ---------------
+
+
+def _seed_history(db, *, adapted=None, correction=None):
+    speaker_history.record(db, USER, {
+        "id": "e1", "ts": "t1", "score": 0.5, "verified": True,
+        "device_hint": "phone", "presence": "locked", "trust_level": "MEDIUM",
+        "adapted_sample_id": adapted, "correction": correction, "vec": B,
+    }, cap=50)
+
+
+def test_confirm_endpoint_adds_a_manual_sample(manage_client):
+    c, db = manage_client
+    _auth()
+    enroll_anchors(db, USER, [A], id_fn=lambda: "a1")
+    _seed_history(db)
+    r = c.post("/api/voice/history/e1/confirm")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["already"] is False and body["added_sample_id"]
+    _assert_no_vec(body)
+    manuals = [s for s in load_profile(db, USER).adaptive if s["source"] == "manual"]
+    assert len(manuals) == 1
+
+
+def test_reject_endpoint_marks_the_entry(manage_client):
+    c, db = manage_client
+    _auth()
+    enroll_anchors(db, USER, [A], id_fn=lambda: "a1")
+    _seed_history(db)
+    r = c.post("/api/voice/history/e1/reject")
+    assert r.status_code == 200 and r.json()["already"] is False
+    assert speaker_history.load_history(db, USER)[0]["correction"] == "rejected"
+
+
+def test_correction_of_a_missing_entry_is_404(manage_client):
+    c, _db = manage_client
+    _auth()
+    r = c.post("/api/voice/history/yok/confirm")
+    assert r.status_code == 404
+    assert "artık yok" in r.json()["detail"]
+
+
+def test_manual_cap_surfaces_as_a_400_with_the_count(manage_client):
+    c, db = manage_client
+    _auth()
+    enroll_anchors(db, USER, [A], id_fn=lambda: "a1")
+    profile = load_profile(db, USER)
+    for i in range(5):
+        profile.adaptive.append(make_sample(B, "manual", "phone", "t", f"m{i}"))
+    save_profile(db, USER, profile)
+    _seed_history(db)
+    r = c.post("/api/voice/history/e1/confirm")
+    assert r.status_code == 400 and "5/5" in r.json()["detail"]
+
+
+def test_correction_endpoints_require_auth(manage_client):
+    c, _db = manage_client
+    assert c.post("/api/voice/history/e1/confirm").status_code in (401, 403)
+    assert c.post("/api/voice/history/e1/reject").status_code in (401, 403)
+
+
+def test_production_service_carries_the_config_manual_cap_and_labels(manage_client, monkeypatch):
+    """Same wiring-guard class as Task 3's history_cap test."""
+    from app import config
+    svc = main_mod.get_speaker_service()
+    assert svc.manual_cap == config.SPEAKER_MANUAL_CAP
+    assert svc.labels == config.SPEAKER_SAMPLE_LABELS
