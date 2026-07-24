@@ -1010,9 +1010,133 @@ async def test_a_barge_in_turn_does_not_run_the_fallback(shape):
     assert len(speaker.calls) == 1, (
         f"the barge-in turn verified twice ({shape}) -- the second call scored "
         f"{speaker.calls[1][1][:16]!r}..., audio buffered while the model spoke")
-    assert bytes(bridge._utterance) == barge_in_audio, (
-        "the barge-in utterance was dropped instead of left for its own boundary")
+    assert bytes(bridge._utterance) == barge_in_audio[-config.SPEAKER_MIN_UTTERANCE_BYTES:], (
+        "the barge-in utterance was dropped instead of left, trimmed to its "
+        "onset window, for its own boundary")
     assert bridge._verified_this_turn is False, "the next turn must still verify"
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_without_turn_complete_does_not_disarm_the_next_turn():
+    """A barge-in turn can end with NO turn_complete at all -- that is the whole
+    reason `interrupted` is handled. So nothing about "this turn was barged
+    into" may be carried on a flag that only turn_complete resets: the next
+    turn's turn_complete would then read the PREVIOUS turn's barge-in and skip
+    both its drain and its fallback.
+
+    Both halves of that are asserted: turn N+1 still drains (else inter-turn
+    audio prefixes N+2), and a turn N+1 that never gets a finished transcription
+    still runs the fallback (else it passes unverified -- fail-open).
+    """
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+
+    # Turn N: verified, then barged into, and NO turn_complete ever arrives.
+    bridge._utterance = bytearray(b"turn-n-audio")
+
+    async def turn_n():
+        yield _make_event(input_transcription=FakeTranscription("n", finished=True))
+        bridge._utterance.extend(b"\x05\x06" * config.SPEAKER_MIN_UTTERANCE_BYTES)
+        yield _make_event(interrupted=True)
+
+    await bridge._pump_events(turn_n(), FakeWS([]))
+    assert len(speaker.calls) == 1
+
+    # Turn N+1: the barge-in utterance reaches its own boundary and is scored,
+    # then the turn ends normally -- which must drain.
+    async def turn_n_plus_1():
+        yield _make_event(input_transcription=FakeTranscription("n+1", finished=True))
+        bridge._utterance.extend(b"\x00\x01" * config.SPEAKER_MIN_UTTERANCE_BYTES)
+        yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(turn_n_plus_1(), FakeWS([]))
+    assert len(speaker.calls) == 2
+    assert bytes(bridge._utterance) == b"", (
+        "turn N's barge-in suppressed turn N+1's drain -- inter-turn audio will "
+        "prefix turn N+2's utterance")
+
+
+@pytest.mark.asyncio
+async def test_the_pending_claim_survives_a_turn_with_no_transcription_at_all():
+    """PINS A KNOWN, BOUNDED RESIDUAL rather than leaving it to be rediscovered.
+
+    A pending claim is settled only by a verification consuming the buffer. So
+    if a barge-in is followed by a turn in which Gemini sends NO input
+    transcription whatsoever, that turn's turn_complete also declines to run the
+    fallback, and the level published for the previous utterance stands.
+
+    That combination needs two independently uncommon things at once (a barge-in,
+    then a turn with zero transcriptions, while input transcription is enabled
+    and Gemini 3.x Live sends whole-utterance ones). The alternative -- adding a
+    signal that expires the claim -- was rejected: every previous fix to this
+    state machine added a flag whose reset depended on an event that is not
+    guaranteed, and that is precisely how the last three defects were built.
+
+    It fails to a level MEASURED from real audio, never to a fabricated HIGH:
+    the connection baseline is already MEDIUM under locked/ambient. If this ever
+    shows up in practice, the fix is a real VAD/energy gate, not another flag.
+    """
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"turn-n-audio")
+
+    async def barge_in_only():
+        yield _make_event(input_transcription=FakeTranscription("n", finished=True))
+        yield _make_event(interrupted=True)
+
+    await bridge._pump_events(barge_in_only(), FakeWS([]))
+    assert len(speaker.calls) == 1
+    assert bridge._buffer_holds_pending_utterance is True
+
+    async def silent_next_turn():
+        bridge._utterance.extend(b"\x02\x03" * config.SPEAKER_MIN_UTTERANCE_BYTES)
+        yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(silent_next_turn(), FakeWS([]))
+    assert len(speaker.calls) == 1, (
+        "documented residual changed: the fallback now fires while a pending "
+        "utterance is outstanding -- re-read the docstring before accepting this")
+
+    # ...and it settles as soon as any utterance boundary actually arrives.
+    async def next_real_boundary():
+        yield _make_event(input_transcription=FakeTranscription("sonunda", finished=True))
+
+    await bridge._pump_events(next_real_boundary(), FakeWS([]))
+    assert len(speaker.calls) == 2
+    assert bridge._buffer_holds_pending_utterance is False
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_keeps_only_the_onset_not_the_model_s_speaking_time():
+    """At a barge-in the buffer is [audio collected while the model spoke] +
+    [the barge-in speech so far] -- the mic never stopped. Keeping all of it
+    means the barge-in utterance is scored with up to a full window of
+    non-utterance audio in front of it, and speaker.embed averages the whole
+    PCM into one embedding. Keep only the onset window."""
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"turn-one-audio")
+
+    model_time_noise = b"\x00" * (config.SPEAKER_MIN_UTTERANCE_BYTES * 4)
+    onset = b"\x11\x22" * config.SPEAKER_MIN_UTTERANCE_BYTES
+
+    async def turn():
+        yield _make_event(input_transcription=FakeTranscription("bir", finished=True))
+        bridge._utterance.extend(model_time_noise + onset)
+        yield _make_event(interrupted=True)
+
+    await bridge._pump_events(turn(), FakeWS([]))
+
+    kept = bytes(bridge._utterance)
+    assert len(kept) == config.SPEAKER_MIN_UTTERANCE_BYTES, (
+        f"kept {len(kept)} bytes of the {len(model_time_noise + onset)} buffered "
+        "at the barge-in -- the model's speaking time is still in front of the "
+        "barge-in utterance")
+    assert kept == onset[-config.SPEAKER_MIN_UTTERANCE_BYTES:], (
+        "the kept window is not the most recent audio")
 
 
 @pytest.mark.asyncio

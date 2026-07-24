@@ -121,13 +121,25 @@ stands, which is never HIGH for those presence modes. The transcription path
 deliberately has no floor, so short commands ("evet", "kapat") are still
 verified.
 
-`turn_complete` also **drains** the mic buffer, so a turn is only ever scored
-on its own audio. Without that, everything the open mic collected while the
-model was speaking — including the assistant's own TTS echo when no headset is
-used — survived as a prefix of the next utterance, and `speaker.embed` averages
-the whole buffer into one embedding with no VAD or trimming. The one exception
-is a barge-in (`interrupted`): there the buffer already holds the next
-utterance, so it is neither scored nor dropped.
+`turn_complete` also **drains** the mic buffer. Without that, everything the
+open mic collected while the model was speaking — room noise and silence; the
+PWA requests `echoCancellation`, so the assistant's own output is mostly but
+not wholly suppressed — survived as a prefix of the next utterance, and
+`speaker.embed` averages the whole buffer into one embedding with no VAD or
+trimming. On a barge-in (`interrupted`) the buffer instead holds an utterance
+that has *started but not ended*, so it is neither scored nor dropped; it is
+trimmed to its onset window (the same `MIN_UTTERANCE` length) to strip the
+model's speaking time from in front of it, and verified at its own boundary.
+
+That "pending utterance" claim is settled only by the verification that
+consumes the buffer — never by a later event. Every earlier version of this
+logic keyed a per-turn flag on an event that is not guaranteed to arrive, and
+each time the flag leaked into the following turn. The bounded cost of the
+current rule is documented in
+`test_the_pending_claim_survives_a_turn_with_no_transcription_at_all`: a
+barge-in followed by a turn with *no* transcription at all leaves that turn
+unverified, with the previously measured level standing (never a fabricated
+HIGH). The real fix for that class is an energy/VAD gate, not another flag.
 
 Empirically measured separation on the committed fixtures (`tests/fixtures/`,
 real LibriSpeech clips, see `tests/fixtures/README.md`): same-speaker cosine

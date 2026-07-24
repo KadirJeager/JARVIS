@@ -68,9 +68,20 @@ class VoiceBridge:
         self._user_id = ""
         self._trust_key: voice_trust.SessionKey | None = None
         self._verified_this_turn = False
-        # Set when this turn ended in a barge-in. Then the mic buffer holds the
-        # NEXT utterance, so turn_complete must neither score it nor drop it.
-        self._interrupted_this_turn = False
+        # What the buffer MEANS, not which event last fired. True from a
+        # barge-in until a verification consumes the buffer: the audio in it
+        # belongs to an utterance that has started but not reached its boundary,
+        # so a turn ending must neither score it nor drop it.
+        #
+        # This is deliberately keyed on the buffer's meaning rather than on
+        # "the previous turn was interrupted". A per-turn barge-in flag has to
+        # be reset by some later event, and the one event that would do it --
+        # turn_complete -- is exactly the one a barged-into turn may never get
+        # (that is why `interrupted` is handled at all). Such a flag therefore
+        # leaks into the next turn and disarms ITS drain and fallback. Only a
+        # verification clears this one, and a verification is the only thing
+        # that can prove the utterance ended.
+        self._buffer_holds_pending_utterance = False
         # Identifies THIS connection in the shared trust registry. The registry
         # key is per-user, so two concurrent sockets collide on it; this token
         # is what lets voice_trust.clear() compare-and-delete instead of wiping
@@ -149,6 +160,11 @@ class VoiceBridge:
             )
             return
         self._utterance.clear()
+        # The buffer has been consumed, so whatever it held has now reached a
+        # boundary: any pending-utterance claim from a barge-in is settled here
+        # and nowhere else. Tying it to consumption rather than to a later event
+        # is what keeps it from leaking into the next turn.
+        self._buffer_holds_pending_utterance = False
         if not pcm:
             return
         try:
@@ -215,7 +231,14 @@ class VoiceBridge:
                 # produce; if it ever happens the latch sticks for one turn
                 # (fail-open to the last published level, never to a false LOW).
                 self._verified_this_turn = False
-                self._interrupted_this_turn = True
+                self._buffer_holds_pending_utterance = True
+                # Keep only the onset. The mic never stopped, so the buffer is
+                # [audio collected while the model was speaking][the barge-in
+                # speech so far]. Gemini reports the interrupt within a few
+                # hundred ms of speech onset, so the tail is the utterance and
+                # everything before it is model-time room noise -- which
+                # speaker.embed would average straight into the embedding.
+                del self._utterance[:-config.SPEAKER_MIN_UTTERANCE_BYTES]
             if getattr(event, "turn_complete", False):
                 await ws.send_text(json.dumps(vp.evt_turn_complete()))
                 # Fallback: the model never sent a finished input transcription
@@ -225,23 +248,23 @@ class VoiceBridge:
                 # transcription finished signal" --
                 # models/gemini_llm_connection.py:349-367). Verify what we
                 # buffered rather than silently skipping the turn.
-                if self.speaker_service is not None and not self._interrupted_this_turn:
+                if (self.speaker_service is not None
+                        and not self._buffer_holds_pending_utterance):
                     if not self._verified_this_turn:
                         await self._verify_utterance(
                             ws, min_bytes=config.SPEAKER_MIN_UTTERANCE_BYTES
                         )
                     # The turn is over, so whatever is still buffered is
-                    # inter-turn audio: room noise, and without a headset the
-                    # assistant's own TTS echo. _verify_utterance is the only
-                    # other drain, and a VERIFIED turn skips it -- leaving that
-                    # audio as a prefix of the next utterance. speaker.embed
-                    # averages the whole PCM into one embedding with no VAD or
-                    # trimming, so the prefix drags the next score toward
-                    # different-speaker frames. Not drained on a barge-in: there
-                    # the buffer is the next utterance itself.
+                    # inter-turn audio: room noise and silence collected while
+                    # the model was speaking (browser AEC suppresses most of the
+                    # assistant's own output, but not the room).
+                    # _verify_utterance is the only other drain, and a VERIFIED
+                    # turn skips it -- leaving that audio as a prefix of the next
+                    # utterance. speaker.embed averages the whole PCM into one
+                    # embedding with no VAD or trimming, so the prefix drags the
+                    # next score toward non-speech frames.
                     self._utterance.clear()
                 self._verified_this_turn = False
-                self._interrupted_this_turn = False
             for tr_attr, role in (("input_transcription", "user"), ("output_transcription", "jarvis")):
                 tr = getattr(event, tr_attr, None)
                 if tr and getattr(tr, "text", None):
