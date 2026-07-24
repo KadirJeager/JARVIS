@@ -136,3 +136,58 @@ def test_anchor_score_ignores_adaptive_samples():
     assert p.score(TABLET, top_k=1) == 1.0        # full gallery: matches the adaptive sample
     assert p.anchor_score(TABLET, top_k=1) == 0.0  # anchors only: no match
 
+
+# --- I2 (second half): the lazy model load must be race-free ----------------
+
+
+def test_get_model_loads_exactly_once_under_concurrent_first_calls(monkeypatch):
+    """Speaker identification now runs via asyncio.to_thread (voice.py), so two
+    utterances really can reach a cold _model concurrently. Unguarded, both
+    would download and build the ~89 MB ECAPA model. Loading it twice doubles
+    memory and cold-start latency and leaves the loser's instance referenced by
+    an in-flight embed."""
+    import sys
+    import threading
+    import time
+    import types
+
+    from app import speaker
+
+    loads = []
+
+    class FakeEncoderClassifier:
+        @staticmethod
+        def from_hparams(**kwargs):
+            loads.append(kwargs)
+            time.sleep(0.05)      # widen the window a second loader could enter
+            return object()
+
+    pkg = types.ModuleType("speechbrain")
+    inference = types.ModuleType("speechbrain.inference")
+    speaker_mod = types.ModuleType("speechbrain.inference.speaker")
+    speaker_mod.EncoderClassifier = FakeEncoderClassifier
+    inference.speaker = speaker_mod
+    pkg.inference = inference
+    monkeypatch.setitem(sys.modules, "speechbrain", pkg)
+    monkeypatch.setitem(sys.modules, "speechbrain.inference", inference)
+    monkeypatch.setitem(sys.modules, "speechbrain.inference.speaker", speaker_mod)
+    # monkeypatch restores the real _model afterwards, so the torch venv's
+    # embedding tests still get the real model whatever the test order is.
+    monkeypatch.setattr(speaker, "_model", None)
+
+    n = 8
+    start = threading.Barrier(n)
+    results = []
+
+    def worker():
+        start.wait()              # all threads hit the cold path together
+        results.append(speaker._get_model())
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(loads) == 1, f"ECAPA model built {len(loads)} times"
+    assert len(results) == n and len(set(map(id, results))) == 1

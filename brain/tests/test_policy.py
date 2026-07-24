@@ -142,3 +142,85 @@ def test_red_zone_medium_trust_still_blocks():
     result = cb(_tool("unknown_danger"), {}, _ctx(trust.MEDIUM))
     assert result is not None and "onay" in result["result"].lower()
     assert audit.entries[0]["decision"] == "block"
+
+
+# --- C1 + M3: voice signals reach the matrix, and the audit records WHY -----
+
+from app.voice_trust import VoiceSignals
+
+
+def _signals(level=trust.MEDIUM, score=0.42, presence="locked", device="headset"):
+    return VoiceSignals(trust_level=level, voice_score=score,
+                        presence=presence, device_hint=device)
+
+
+def test_trust_provider_supplies_the_level_when_session_state_cannot():
+    """The whole point of C1: ADK hands the bridge and the runner independent
+    session copies, so the level arrives through the provider, not the state.
+    tool_context here carries an EMPTY state -- exactly what the runner's copy
+    looks like -- and the decision must still tighten."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit, trust_provider=lambda ctx: _signals())
+    result = cb(_tool("update_user_profile"), {}, SimpleNamespace(state={}))
+    assert result is not None and "onay" in result["result"].lower()
+    assert audit.entries[0]["trust"] == trust.MEDIUM
+    assert audit.entries[0]["decision"] == "confirm"
+
+
+def test_audit_records_the_full_signal_set_spec_requires():
+    """Spec §7: trust_level, voice_score, presence and device_hint all go to the
+    persistent audit trail -- a security decision has to be reconstructable
+    later, not only visible in an ephemeral log line."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit, trust_provider=lambda ctx: _signals())
+    cb(_tool("get_user_profile"), {}, None)
+    entry = audit.entries[0]
+    assert (entry["trust"], entry["voice_score"], entry["presence"], entry["device_hint"]) == (
+        trust.MEDIUM, 0.42, "locked", "headset")
+
+
+def test_audit_signal_fields_are_none_without_voice_evidence():
+    """Text path: no provider at all -> the new fields default to None rather
+    than a fabricated "foreground", and the decision is unchanged."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    assert cb(_tool("update_user_profile"), {}, None) is None
+    entry = audit.entries[0]
+    assert entry["trust"] == trust.HIGH
+    assert (entry["voice_score"], entry["presence"], entry["device_hint"]) == (None, None, None)
+
+
+def test_provider_returning_none_falls_back_to_state_default_high():
+    """A voice connection before its first verified utterance (or any call the
+    provider cannot resolve) must behave exactly like the text path."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit, trust_provider=lambda ctx: None)
+    assert cb(_tool("update_user_profile"), {}, None) is None
+    assert audit.entries[0]["trust"] == trust.HIGH
+
+
+def test_provider_raising_is_logged_and_fails_open_to_high(caplog):
+    """Fail-OPEN is deliberate (spec §12: the identity layer must never lock
+    Kadir out). It must be loud, though -- a silent identity outage is how a
+    security control quietly stops working."""
+    audit = FakeAudit()
+
+    def boom(ctx):
+        raise RuntimeError("provider exploded")
+
+    cb = make_policy_callback(audit, trust_provider=boom)
+    with caplog.at_level("ERROR"):
+        assert cb(_tool("update_user_profile"), {}, None) is None
+    assert audit.entries[0]["trust"] == trust.HIGH
+    assert "trust provider failed" in caplog.text
+
+
+def test_red_zone_blocks_regardless_of_voice_signals():
+    """RED is identity-independent (spec §7): even a fully verified HIGH voice
+    cannot unlock it."""
+    audit = FakeAudit()
+    cb = make_policy_callback(
+        audit, trust_provider=lambda ctx: _signals(level=trust.HIGH, presence="foreground"))
+    result = cb(_tool("unknown_danger"), {}, None)
+    assert result is not None and "POLİTİKA ENGELİ" in result["result"]
+    assert audit.entries[0]["decision"] == "block"

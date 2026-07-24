@@ -11,7 +11,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, speaker, speaker_store, voice
+from . import config, messages, speaker, speaker_store, voice, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -98,7 +98,13 @@ def _init_voice() -> None:
     db = firestore.Client()
     _voice_runner = Runner(
         app_name=APP_NAME,
-        agent=build_agent(_memory, FirestoreAudit(db), model=config.resolve_live_model()),
+        agent=build_agent(
+            _memory, FirestoreAudit(db), model=config.resolve_live_model(),
+            # ONLY the voice agent gets a trust provider: identity signals exist
+            # only for live voice connections, and this keeps the text runner
+            # structurally unable to see them (app/voice_trust.py).
+            trust_provider=voice_trust.lookup,
+        ),
         session_service=_session_service,
     )
 

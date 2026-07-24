@@ -56,6 +56,11 @@ class _OneShotRunner:
 
             class T:
                 text = "merhaba"
+                # finished=True marks the whole-utterance boundary -- the only
+                # kind of input transcription the bridge verifies on (ADK yields
+                # partial fragments with finished=False,
+                # models/gemini_llm_connection.py:283-323).
+                finished = True
 
             class E:
                 content = None
@@ -123,8 +128,15 @@ def wired(monkeypatch):
     return main, sessions
 
 
-def test_ws_voice_emits_speaker_event_and_sets_locked_trust(wired):
+def test_ws_voice_emits_speaker_event_and_publishes_locked_trust(wired, monkeypatch):
     main, sessions = wired
+    from app import trust, voice, voice_trust
+
+    published = []
+    original_publish = voice_trust.publish
+    monkeypatch.setattr(voice_trust, "publish", lambda key, signals: (
+        published.append((key, signals)), original_publish(key, signals)))
+
     client = TestClient(main.app)
     with client.websocket_connect("/ws/voice") as ws:
         ws.send_text(json.dumps({"token": "t", "device_hint": "tablet", "presence": "locked"}))
@@ -137,5 +149,13 @@ def test_ws_voice_emits_speaker_event_and_sets_locked_trust(wired):
                 seen = json.loads(msg["text"])
                 break
         assert seen == {"type": "speaker", "role": "user", "verified": True, "score": 1.0}
-    from app import config, trust
-    assert sessions._s.state[config.TRUST_STATE_KEY] == trust.MEDIUM   # locked+match -> MEDIUM
+
+    key = voice_trust.key_for(voice.APP_NAME, "kadir@example.com", "voice-kadir@example.com")
+    # locked + match -> MEDIUM, published under this connection's session key
+    # for the policy layer (voice_trust.py); the initial no-voice-evidence
+    # publish at connection start is the first entry.
+    assert [(k, s.trust_level) for k, s in published] == [
+        (key, trust.MEDIUM), (key, trust.MEDIUM)]
+    assert published[-1][1].voice_score == 1.0
+    assert published[-1][1].device_hint == "tablet"
+    assert voice_trust.peek(key) is None               # cleared at teardown

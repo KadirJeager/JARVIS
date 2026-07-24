@@ -1,12 +1,28 @@
 import asyncio
 import json
+import threading
 
 import pytest
 from fastapi import WebSocketDisconnect
 
 import app.voice as voice_mod
-from app import config, trust
-from app.voice import VoiceBridge, _handshake
+from app import config, trust, voice_trust
+from app.voice import APP_NAME, VoiceBridge, _handshake
+
+USER = "kadir@example.com"
+
+
+def _trust_key(user_id=USER):
+    return voice_trust.key_for(APP_NAME, user_id, f"voice-{user_id}")
+
+
+def _armed(bridge, user_id=USER):
+    """Give a bridge the session key run() would have established, so unit
+    tests that drive _pump_events directly still exercise the real publish
+    path instead of _publish_trust's no-op guard."""
+    bridge._trust_key = _trust_key(user_id)
+    bridge._user_id = user_id
+    return bridge
 
 
 class FakeWS:
@@ -71,10 +87,15 @@ def _make_event(
 
 
 class FakeTranscription:
-    """Mirrors google.genai.types.Transcription (text: Optional[str])."""
+    """Mirrors google.genai.types.Transcription (text: Optional[str], finished:
+    Optional[bool]). `finished` defaults False -- i.e. a PARTIAL fragment, which
+    is what ADK yields while the user is still speaking
+    (models/gemini_llm_connection.py:297-310); only finished=True marks the
+    whole-utterance boundary the speaker check may run on."""
 
-    def __init__(self, text):
+    def __init__(self, text, finished=False):
         self.text = text
+        self.finished = finished
 
 
 @pytest.mark.asyncio
@@ -536,23 +557,26 @@ class FakeSpeaker:
 
 
 @pytest.mark.asyncio
-async def test_bridge_verifies_utterance_and_writes_trust_and_event():
-    session = type("S", (), {"state": {}})()
+async def test_bridge_verifies_utterance_and_publishes_signals_and_event():
     speaker = FakeSpeaker((True, 0.9))
 
     async def fake_events():
         yield _make_event(data=b"\x00\x01")                       # mic-ish (ignored here)
-        yield _make_event(input_transcription=FakeTranscription("merhaba"))
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
 
     ws = FakeWS([])
-    bridge = VoiceBridge(runner=None, session_service=None, speaker_service=speaker,
-                         device_hint="headset", presence="locked", session=session)
+    bridge = _armed(VoiceBridge(runner=None, session_service=None, speaker_service=speaker,
+                                device_hint="headset", presence="locked"))
     bridge._utterance = bytearray(b"\x00\x01\x02\x03")            # buffered mic audio
     await bridge._pump_events(fake_events(), ws)
 
     assert speaker.calls and speaker.calls[0][2] == "headset"     # identify called w/ device
-    # locked + verified -> MEDIUM in session.state
-    assert session.state[config.TRUST_STATE_KEY] == trust.MEDIUM
+    # locked + verified -> MEDIUM, carried to the policy layer with the WHY
+    # fields the audit trail needs (spec §7).
+    signals = voice_trust.peek(_trust_key())
+    assert signals is not None
+    assert (signals.trust_level, signals.voice_score, signals.presence, signals.device_hint) == (
+        trust.MEDIUM, 0.9, "locked", "headset")
     assert ("text", json.dumps(
         {"type": "speaker", "role": "user", "verified": True, "score": 0.9})) in ws.sent
 
@@ -602,14 +626,14 @@ async def test_verify_utterance_treats_identify_exception_as_unverified_and_fail
     logged and fused as verified=False/score=0.0, which under presence=locked
     fails CLOSED to trust.LOW (not silently HIGH/MEDIUM) -- this is the path
     Task 10 makes reachable by real mic traffic, so it must be proven here."""
-    session = type("S", (), {"state": {}})()
 
     async def fake_events():
-        yield _make_event(input_transcription=FakeTranscription("merhaba"))
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
 
     ws = FakeWS([])
-    bridge = VoiceBridge(runner=None, session_service=None, speaker_service=ExplodingSpeaker(),
-                         device_hint="phone", presence="locked", session=session)
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=ExplodingSpeaker(),
+                                device_hint="phone", presence="locked"))
     bridge._utterance = bytearray(b"\x00\x01\x02\x03")             # buffered mic audio
 
     with caplog.at_level("ERROR"):
@@ -617,96 +641,226 @@ async def test_verify_utterance_treats_identify_exception_as_unverified_and_fail
 
     assert ("text", json.dumps(
         {"type": "speaker", "role": "user", "verified": False, "score": 0.0})) in ws.sent
-    assert session.state[config.TRUST_STATE_KEY] == trust.LOW
+    assert voice_trust.peek(_trust_key()).trust_level == trust.LOW
     assert "speaker.identify failed" in caplog.text
 
 
+class _NoEvents:
+    def run_live(self, **kwargs):
+        async def events():
+            return
+            yield  # pragma: no cover
+
+        return events()
+
+
+class _StatelessSessions:
+    """Session service whose sessions are bare objects with no `.state` -- the
+    bridge must never depend on anything but their existence."""
+
+    async def get_session(self, **k):
+        return object()
+
+    async def create_session(self, **k):
+        return object()
+
+
 @pytest.mark.asyncio
-async def test_run_resets_stale_trust_for_new_connection():
-    """A new voice connection must NOT inherit the trust level a previous
-    connection left in the process-lifetime session state."""
-    session = type("S", (), {"state": {config.TRUST_STATE_KEY: trust.HIGH}})()  # stale HIGH
-
-    class Sessions:
-        async def get_session(self, **k):
-            return session
-
-        async def create_session(self, **k):
-            return session
-
-    class NoEvents:
-        def run_live(self, **kwargs):
-            async def events():
-                return
-                yield  # pragma: no cover
-
-            return events()
-
+async def test_run_publishes_connection_initial_trust_before_any_utterance(monkeypatch):
+    """A tool call can land before the first utterance is verified (ADK does not
+    order transcription ahead of tool_call). The connection's own context must
+    therefore already be published at connection start -- locked + no voice
+    evidence yet -> MEDIUM, never the HIGH default. Sampled at teardown, which
+    is the last moment the entry still exists."""
     ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    published = []
+    original_clear = voice_trust.clear
+    monkeypatch.setattr(voice_trust, "clear", lambda key: (
+        published.append((key, voice_trust.peek(key))), original_clear(key)))
+
     bridge = VoiceBridge(
-        runner=NoEvents(), session_service=Sessions(),
+        runner=_NoEvents(), session_service=_StatelessSessions(),
         speaker_service=FakeSpeaker((True, 0.9)),
         presence="locked", device_hint="tablet",
     )
-    await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)
-    # locked + no voice evidence yet -> MEDIUM, NOT the stale HIGH
-    assert session.state[config.TRUST_STATE_KEY] == trust.MEDIUM
+    await asyncio.wait_for(bridge.run(ws, user_id=USER), timeout=2)
+
+    assert published and published[0][0] == _trust_key()
+    assert published[0][1].trust_level == trust.MEDIUM
+    assert published[0][1].voice_score is None      # no voice evidence yet
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_touch_session_state_without_speaker_service():
-    """No speaker_service -> identity is off -> run() must not write trust
-    (the existing FakeSessionService returns a bare object() with no .state)."""
-
-    class Sessions:
-        async def get_session(self, **k):
-            return object()
-
-        async def create_session(self, **k):
-            return object()
-
-    class NoEvents:
-        def run_live(self, **kwargs):
-            async def events():
-                return
-                yield  # pragma: no cover
-
-            return events()
-
-    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
-    bridge = VoiceBridge(runner=NoEvents(), session_service=Sessions())  # no speaker_service
-    await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_run_with_speaker_service_and_stateless_session_does_not_raise():
-    """The test above proves the trust-init block is skipped when
-    speaker_service is None -- it never actually forces execution INTO the
-    `getattr(self.session, "state", None)` guard. Here speaker_service IS set
-    (forcing entry into that branch) while the session still has no `.state`
-    attribute at all: a bare `self.session.state[...] = level` would raise
-    AttributeError, so this is the combination that makes the getattr guard
-    load-bearing rather than dead defensive code."""
-
-    class Sessions:
-        async def get_session(self, **k):
-            return object()          # no .state attribute
-
-        async def create_session(self, **k):
-            return object()
-
-    class NoEvents:
-        def run_live(self, **kwargs):
-            async def events():
-                return
-                yield  # pragma: no cover
-
-            return events()
-
+async def test_run_clears_trust_on_teardown():
+    """A dead connection must not leak its trust into a later one: the ADK
+    session id is per-USER and outlives any single WS connection."""
     ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
     bridge = VoiceBridge(
-        runner=NoEvents(), session_service=Sessions(),
+        runner=_NoEvents(), session_service=_StatelessSessions(),
         speaker_service=FakeSpeaker((True, 0.9)),
-        presence="locked", device_hint="phone",
+        presence="locked", device_hint="tablet",
     )
-    await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)  # must not raise
+    await asyncio.wait_for(bridge.run(ws, user_id=USER), timeout=2)
+    assert voice_trust.peek(_trust_key()) is None
+
+
+@pytest.mark.asyncio
+async def test_run_publishes_nothing_without_speaker_service(monkeypatch):
+    """No speaker_service -> identity is off -> no signals -> the policy layer
+    keeps defaulting to HIGH, i.e. exactly the pre-feature behaviour."""
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    seen = []
+    monkeypatch.setattr(voice_trust, "publish", lambda key, signals: seen.append(key))
+    bridge = VoiceBridge(runner=_NoEvents(), session_service=_StatelessSessions())
+    await asyncio.wait_for(bridge.run(ws, user_id=USER), timeout=2)
+    assert seen == []
+
+
+# --- I1: the utterance buffer must be bounded -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_utterance_buffer_is_capped_to_the_configured_window(monkeypatch):
+    """The buffer is only drained at a turn boundary, and a turn boundary is not
+    guaranteed to arrive (long silence, model hiccup, transcription misconfig).
+    Unbounded it grows at 32 KB/s in a torch-carrying process. It must keep the
+    most RECENT window, not the oldest -- the newest audio is the utterance the
+    next verification is about."""
+    monkeypatch.setattr(config, "SPEAKER_UTTERANCE_MAX_BYTES", 8)
+    bridge = VoiceBridge(runner=None, session_service=None,
+                         speaker_service=FakeSpeaker((True, 0.9)))
+    q = FakeQueue()
+    for chunk in (b"aaaa", b"bbbb", b"cccc", b"dddd"):
+        ws = FakeWS([{"type": "websocket.receive", "bytes": chunk}])
+        await bridge._pump_mic_once(ws, q)
+
+    assert bytes(bridge._utterance) == b"ccccdddd"        # newest 8 bytes only
+    # every chunk still reached the live model -- capping is buffer-only
+    assert [b.data for b in q.blobs] == [b"aaaa", b"bbbb", b"cccc", b"dddd"]
+
+
+def test_configured_window_is_ten_seconds_of_contract_audio():
+    """Pins the unit: SPEAKER_UTTERANCE_MAX_BYTES is BYTES derived from seconds
+    x the protocol's input rate x 2 bytes/sample, so the seconds knob and the
+    byte cap can never drift apart."""
+    assert config.SPEAKER_UTTERANCE_MAX_BYTES == int(
+        config.SPEAKER_UTTERANCE_SECONDS * voice_mod.vp.AUDIO_IN_RATE * 2)
+    assert config.SPEAKER_UTTERANCE_MAX_BYTES == 320000    # 10 s @ 16 kHz PCM16
+
+
+# --- I2: inference must not block the event loop ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_identify_runs_off_the_event_loop_thread():
+    """Real ECAPA inference (plus the first-call model load) is seconds of
+    blocking CPU: on the loop it would stall this session's audio, its mic pump
+    and every other WS connection on the instance."""
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    class ThreadRecordingSpeaker:
+        def identify(self, user_id, pcm, device_hint, auth_is_kadir):
+            seen["thread"] = threading.get_ident()
+            return True, 0.9
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=ThreadRecordingSpeaker(),
+                                presence="locked"))
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    await bridge._pump_events(fake_events(), FakeWS([]))
+    assert seen["thread"] != loop_thread
+
+
+# --- I3: verify once per turn, at the utterance boundary --------------------
+
+
+@pytest.mark.asyncio
+async def test_partial_transcriptions_do_not_trigger_verification():
+    """ADK yields incremental input transcriptions with finished=False while the
+    user is still speaking (models/gemini_llm_connection.py:297-310). Verifying
+    on those scores an arbitrary sub-second fragment against thresholds
+    calibrated on ~3 s clips."""
+    speaker = FakeSpeaker((True, 0.9))
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("mer"))
+        yield _make_event(input_transcription=FakeTranscription("merhaba nasil"))
+
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    ws = FakeWS([])
+    await bridge._pump_events(fake_events(), ws)
+
+    assert speaker.calls == []                              # never verified
+    assert bytes(bridge._utterance) == b"\x00\x01\x02\x03"  # buffer NOT drained
+    # transcripts still forwarded to the client -- only verification is gated
+    assert sum(1 for _, t in ws.sent if "transcript" in t) == 2
+
+
+@pytest.mark.asyncio
+async def test_verifies_once_at_the_finished_transcription_of_each_turn():
+    """One verification per turn, on the whole-utterance event -- and the next
+    turn verifies again (the per-turn latch must reset at turn_complete)."""
+    speaker = FakeSpeaker((True, 0.9))
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("mer"))
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+        yield _make_event(turn_complete=True)
+        yield _make_event(input_transcription=FakeTranscription("ikinci tur", finished=True))
+
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"turn-one-audio")
+    await bridge._pump_events(fake_events(), FakeWS([]))
+    assert len(speaker.calls) == 1, "a second finished event in the same turn re-verified"
+
+    bridge._utterance = bytearray(b"turn-two-audio")
+    await bridge._pump_events(fake_events(), FakeWS([]))
+    assert len(speaker.calls) == 2
+    assert speaker.calls[-1][1] == b"turn-two-audio"
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_verifies_when_no_finished_transcription_arrived():
+    """ADK itself flushes pending transcriptions on turn_complete because "the
+    Gemini API or Vertex AI might not send a transcription finished signal"
+    (models/gemini_llm_connection.py:349-367). If that flush never produces one
+    either, turn_complete is still a turn boundary -- verify what was buffered
+    instead of silently skipping the turn."""
+    speaker = FakeSpeaker((True, 0.9))
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("yarim"))
+        yield _make_event(turn_complete=True)
+
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    await bridge._pump_events(fake_events(), FakeWS([]))
+    assert len(speaker.calls) == 1
+    assert speaker.calls[0][1] == b"\x00\x01\x02\x03"
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_with_empty_buffer_does_not_verify():
+    """The fallback must not fire on a model-only turn (nothing was spoken):
+    _verify_utterance's empty-buffer early return covers it, so no identify
+    call and no speaker event."""
+    speaker = FakeSpeaker((True, 0.9))
+
+    async def fake_events():
+        yield _make_event(turn_complete=True)
+
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    ws = FakeWS([])
+    await bridge._pump_events(fake_events(), ws)
+    assert speaker.calls == []
+    assert all("speaker" not in t for _, t in ws.sent if isinstance(t, str))

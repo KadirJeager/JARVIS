@@ -79,22 +79,34 @@ class SpeakerProfile:
 
 
 import os
+import threading
 
 _model = None
+_model_lock = threading.Lock()
 
 
 def _get_model():
     """Lazy singleton ECAPA-TDNN. Loaded once per process, on first embed()
-    call, on CPU. Import path + embedding dim confirmed in Task 1."""
-    global _model
-    if _model is None:
-        from speechbrain.inference.speaker import EncoderClassifier
+    call, on CPU. Import path + embedding dim confirmed in Task 1.
 
-        _model = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir=os.environ.get("SPEAKER_MODEL_DIR", "/tmp/spkrec-ecapa"),
-            run_opts={"device": "cpu"},
-        )
+    Double-checked locking, NOT decoration: identification runs via
+    asyncio.to_thread (voice.py), so two utterances really can reach a cold
+    _model concurrently. Unguarded, both would download and build the ~89 MB
+    model, doubling memory and cold-start latency and leaving whichever
+    instance lost the race referenced by an in-flight embed. The unlocked fast
+    path keeps the warm case free of lock traffic."""
+    global _model
+    if _model is not None:
+        return _model
+    with _model_lock:
+        if _model is None:
+            from speechbrain.inference.speaker import EncoderClassifier
+
+            _model = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir=os.environ.get("SPEAKER_MODEL_DIR", "/tmp/spkrec-ecapa"),
+                run_opts={"device": "cpu"},
+            )
     return _model
 
 
@@ -138,22 +150,31 @@ class SpeakerService:
         self.adapt = adapt
         self.cap = cap
         self.top_k = top_k
+        # identify() now runs in a worker thread (voice.py's asyncio.to_thread),
+        # so two live connections for the same user can reach the gallery's
+        # load -> adapt -> save read-modify-write at once and silently drop one
+        # of the two new samples. Serializing just that window costs nothing
+        # (it is pure dict/list work plus one Firestore write); the expensive
+        # part -- embedding -- stays outside it and fully parallel.
+        self._gallery_lock = threading.Lock()
 
     def identify(self, user_id: str, pcm: bytes, device_hint: str,
                  auth_is_kadir: bool) -> tuple[bool, float]:
         vec = self.embed_fn(pcm)
-        profile = speaker_store.load_profile(self.db, user_id)
-        # ACCEPT is scored against the WHOLE gallery (that is the point of the
-        # gallery: it spans days, health, devices). ADAPT is scored against the
-        # anchors ONLY -- see SpeakerProfile.anchor_score for why using the full
-        # gallery here turns one successful poisoning sample into a ratchet.
-        score = profile.score(vec, self.top_k)
-        anchor_score = profile.anchor_score(vec, self.top_k)
-        verified = score >= self.accept
-        adapted = anchor_score >= self.adapt and auth_is_kadir
-        if adapted:
-            profile.adapt(vec, device_hint, self.cap, self.now_fn)
-            speaker_store.save_profile(self.db, user_id, profile)
+        with self._gallery_lock:
+            profile = speaker_store.load_profile(self.db, user_id)
+            # ACCEPT is scored against the WHOLE gallery (that is the point of
+            # the gallery: it spans days, health, devices). ADAPT is scored
+            # against the anchors ONLY -- see SpeakerProfile.anchor_score for
+            # why using the full gallery here turns one successful poisoning
+            # sample into a ratchet.
+            score = profile.score(vec, self.top_k)
+            anchor_score = profile.anchor_score(vec, self.top_k)
+            verified = score >= self.accept
+            adapted = anchor_score >= self.adapt and auth_is_kadir
+            if adapted:
+                profile.adapt(vec, device_hint, self.cap, self.now_fn)
+                speaker_store.save_profile(self.db, user_id, profile)
         import logging
         logging.info(
             "speaker.identify: user=%s score=%.4f anchor_score=%.4f verified=%s "

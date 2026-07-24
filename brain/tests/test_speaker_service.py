@@ -109,3 +109,33 @@ def test_empty_anchor_gallery_never_self_feeds():
     assert (verified, score) == (False, 0.0)
     assert load_profile(db, "k").adaptive == []
 
+
+def test_gallery_read_modify_write_is_serialized_but_embedding_is_not(monkeypatch):
+    """identify() runs in a worker thread now (voice.py's asyncio.to_thread), so
+    two live connections for the same user can hit load -> adapt -> save at the
+    same time and silently drop one of the two new samples. The lock must cover
+    exactly that window -- and NOT the embedding, which is the seconds-long part
+    that must stay parallel."""
+    from app import speaker as speaker_mod
+
+    db = FakeDB()
+    enroll_anchors(db, "k", [A])
+    observed = {}
+
+    def slow_embed(pcm):
+        observed["locked_during_embed"] = svc._gallery_lock.locked()
+        return A
+
+    svc = SpeakerService(db, embed_fn=slow_embed, now_fn=lambda: "t",
+                         accept=0.9, adapt=0.97, cap=5, top_k=1)
+
+    real_save = speaker_mod.speaker_store.save_profile
+    def watching_save(db_, user_id, profile):
+        observed["locked_during_save"] = svc._gallery_lock.locked()
+        return real_save(db_, user_id, profile)
+
+    monkeypatch.setattr(speaker_mod.speaker_store, "save_profile", watching_save)
+    svc.identify("k", b"A", "phone", auth_is_kadir=True)
+
+    assert observed["locked_during_embed"] is False
+    assert observed["locked_during_save"] is True

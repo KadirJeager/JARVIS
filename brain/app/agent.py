@@ -23,15 +23,20 @@ engellendiğini açıkça söyle (hata = gözlem ilkesi).
 - Türkçe konuş; samimi ama profesyonel ol."""
 
 
-def build_agent(memory: Memory, audit, model: str | None = None) -> Agent:
+def build_agent(memory: Memory, audit, model: str | None = None, trust_provider=None) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
     (text chat); voice sessions pass config.resolve_live_model() instead -- same
-    instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory)."""
+    instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory).
+
+    `trust_provider` is passed ONLY by the voice runner (main._init_voice): it
+    is how the voice bridge's identity/trust signals reach the policy matrix
+    (see app/voice_trust.py). Leaving it None -- as the text runner does --
+    keeps /api/chat's policy behaviour byte-identical."""
     tools.init(memory)
     return Agent(
         name=AGENT_NAME,
         model=model or config.MODEL_NAME,
         instruction=INSTRUCTION,
         tools=tools.ALL_TOOLS,
-        before_tool_callback=make_policy_callback(audit),
+        before_tool_callback=make_policy_callback(audit, trust_provider=trust_provider),
     )

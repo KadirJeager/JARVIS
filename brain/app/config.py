@@ -1,7 +1,7 @@
 import logging
 import os
 
-from . import live_model
+from . import live_model, voice_protocol
 
 MODEL_NAME = os.environ.get("JARVIS_MODEL", "gemini-flash-latest")
 # NOT a "-latest" native-audio alias on purpose: confirmed via live smoke test
@@ -77,4 +77,11 @@ SPEAKER_ACCEPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ACCEPT", "0.35")
 SPEAKER_ADAPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ADAPT", "0.60"))
 SPEAKER_TOPK = int(os.environ.get("JARVIS_SPEAKER_TOPK", "3"))
 SPEAKER_ADAPTIVE_CAP = int(os.environ.get("JARVIS_SPEAKER_ADAPTIVE_CAP", "20"))
-TRUST_STATE_KEY = "trust_level"   # session.state key the voice bridge writes
+# Rolling mic-buffer window kept for the next speaker verification. The buffer
+# is drained at a turn boundary, but a turn boundary is NOT guaranteed to
+# arrive, so the window is what bounds memory (and inference time). 10 s is far
+# more audio than ECAPA needs; the thresholds above were calibrated on ~3 s.
+SPEAKER_UTTERANCE_SECONDS = float(os.environ.get("JARVIS_SPEAKER_UTTERANCE_SECONDS", "10"))
+# PCM16 mono at the contract's input rate = 2 bytes per sample.
+SPEAKER_UTTERANCE_MAX_BYTES = int(SPEAKER_UTTERANCE_SECONDS * voice_protocol.AUDIO_IN_RATE * 2)
+TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to
