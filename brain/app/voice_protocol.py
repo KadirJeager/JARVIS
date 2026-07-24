@@ -24,7 +24,14 @@ def evt_error(message: str) -> dict:
     return {"type": "error", "message": message}
 
 
-def parse_hello(raw: str) -> str:
+def evt_speaker(role: str, verified: bool, score: float) -> dict:
+    return {"type": "speaker", "role": role, "verified": verified, "score": score}
+
+
+def parse_hello(raw: str) -> dict:
+    """First TEXT frame: {"token", "device_hint"?, "presence"?}. device_hint and
+    presence are optional (backward compatible with the token-only Katman 2a/2b
+    hello); they feed the risk-based trust fusion (spec §6, §11)."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -34,4 +41,8 @@ def parse_hello(raw: str) -> str:
     token = data.get("token")
     if not isinstance(token, str) or not token:
         raise ValueError("hello frame missing token")
-    return token
+    return {
+        "token": token,
+        "device_hint": data.get("device_hint") or "unknown",
+        "presence": data.get("presence") or "foreground",
+    }
