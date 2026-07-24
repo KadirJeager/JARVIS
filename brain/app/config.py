@@ -122,8 +122,40 @@ SPEAKER_UTTERANCE_MAX_BYTES = _utterance_bytes(SPEAKER_UTTERANCE_SECONDS)
 # locked/ambient. The transcription path deliberately has NO floor -- there
 # Gemini has told us the utterance is complete, and short commands ("evet")
 # must still be verified.
-SPEAKER_MIN_UTTERANCE_SECONDS = float(
-    os.environ.get("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS", "0.5")
+_DEFAULT_MIN_UTTERANCE_SECONDS = 0.5
+
+
+def _effective_min_utterance_seconds(seconds: float) -> float:
+    """Keep the floor inside [0, the rolling window], loudly.
+
+    Its sibling JARVIS_SPEAKER_UTTERANCE_SECONDS is validated at load, and this
+    one needs it for the same reason -- both ends misbehave silently:
+    a negative value is a floor no buffer can be below (the guard is simply
+    gone), and a value ABOVE the mic window is a floor no buffer can ever
+    REACH, which kills the fallback outright: every turn whose finished
+    transcription never arrives then passes unverified. That second one fails
+    OPEN, so it must not be reachable by a typo."""
+    if seconds < 0:
+        logging.warning(
+            "config: JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS=%r is negative, which "
+            "removes the fallback's fragment guard; falling back to %.1f s",
+            seconds, _DEFAULT_MIN_UTTERANCE_SECONDS,
+        )
+        return _DEFAULT_MIN_UTTERANCE_SECONDS
+    if _utterance_bytes(seconds) > SPEAKER_UTTERANCE_MAX_BYTES:
+        logging.warning(
+            "config: JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS=%r exceeds the %.1f s mic "
+            "window, so the turn_complete fallback could never fire; clamping to "
+            "the window",
+            seconds, SPEAKER_UTTERANCE_SECONDS,
+        )
+        return SPEAKER_UTTERANCE_SECONDS
+    return seconds
+
+
+SPEAKER_MIN_UTTERANCE_SECONDS = _effective_min_utterance_seconds(
+    float(os.environ.get("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS",
+                         _DEFAULT_MIN_UTTERANCE_SECONDS))
 )
 SPEAKER_MIN_UTTERANCE_BYTES = _utterance_bytes(SPEAKER_MIN_UTTERANCE_SECONDS)
 TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to

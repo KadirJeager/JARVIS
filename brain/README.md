@@ -104,7 +104,7 @@ and requires the same Google ID token / allowlist auth as `/api/chat`.
 | `JARVIS_SPEAKER_TOPK` | `3` | Number of top gallery similarities averaged into the score |
 | `JARVIS_SPEAKER_ADAPTIVE_CAP` | `20` | Max adaptive samples kept; once over cap the **most redundant** sample is evicted (nearest-neighbour), not the oldest |
 | `JARVIS_SPEAKER_UTTERANCE_SECONDS` | `10` | Rolling mic-buffer window kept for the next verification. A value that rounds down to ≤ 0 bytes is refused with a warning and falls back to the default (it would silently remove the bound, not disable it) |
-| `JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS` | `0.5` | Minimum buffered audio the **turn_complete fallback** will score. Below it the turn is left unverified rather than scored on a fragment — see note below |
+| `JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS` | `0.5` | Minimum buffered audio the **turn_complete fallback** will score. Below it the turn is left unverified rather than scored on a fragment — see note below. Negative values fall back to the default; a value above the mic window is clamped to it (a floor no buffer can reach would silently retire the fallback). An explicit `0` is a deliberate opt-out of the guard |
 | `SPEAKER_MODEL_DIR` | `/tmp/spkrec-ecapa` (code default; the Dockerfile overrides this to `/opt/spkrec-ecapa`, where the model is baked in at build time — see Deploy notes below) | ECAPA model dir |
 
 **Where verification runs, and the one-sided floor.** A turn is verified once,
@@ -120,6 +120,14 @@ Kadir out. Below the floor nothing is published and the per-connection baseline
 stands, which is never HIGH for those presence modes. The transcription path
 deliberately has no floor, so short commands ("evet", "kapat") are still
 verified.
+
+`turn_complete` also **drains** the mic buffer, so a turn is only ever scored
+on its own audio. Without that, everything the open mic collected while the
+model was speaking — including the assistant's own TTS echo when no headset is
+used — survived as a prefix of the next utterance, and `speaker.embed` averages
+the whole buffer into one embedding with no VAD or trimming. The one exception
+is a barge-in (`interrupted`): there the buffer already holds the next
+utterance, so it is neither scored nor dropped.
 
 Empirically measured separation on the committed fixtures (`tests/fixtures/`,
 real LibriSpeech clips, see `tests/fixtures/README.md`): same-speaker cosine

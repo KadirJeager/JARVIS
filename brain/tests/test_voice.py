@@ -810,26 +810,31 @@ async def test_partial_transcriptions_do_not_trigger_verification():
 @pytest.mark.asyncio
 async def test_verifies_once_at_the_finished_transcription_of_each_turn():
     """One verification per turn, on the whole-utterance event -- and the next
-    turn verifies again (the per-turn latch must reset at turn_complete)."""
+    turn verifies again (the per-turn latch must reset at turn_complete).
+
+    Turn two's audio is buffered AFTER turn_complete, which is the only way it
+    happens: turn_complete drains whatever the open mic collected while the
+    model was speaking, so audio buffered BEFORE it belongs to turn one and is
+    deliberately not carried forward (see
+    test_a_verified_turn_drains_the_inter_turn_audio)."""
     speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
 
     async def fake_events():
         yield _make_event(input_transcription=FakeTranscription("mer"))
         yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
         yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
         yield _make_event(turn_complete=True)
+        bridge._utterance.extend(b"turn-two-audio")     # the mic, during turn two
         yield _make_event(input_transcription=FakeTranscription("ikinci tur", finished=True))
 
-    bridge = _armed(VoiceBridge(runner=None, session_service=None,
-                                speaker_service=speaker, presence="locked"))
     bridge._utterance = bytearray(b"turn-one-audio")
     await bridge._pump_events(fake_events(), FakeWS([]))
-    assert len(speaker.calls) == 1, "a second finished event in the same turn re-verified"
 
-    bridge._utterance = bytearray(b"turn-two-audio")
-    await bridge._pump_events(fake_events(), FakeWS([]))
-    assert len(speaker.calls) == 2
-    assert speaker.calls[-1][1] == b"turn-two-audio"
+    assert len(speaker.calls) == 2, "a second finished event in the same turn re-verified"
+    assert speaker.calls[0][1] == b"turn-one-audio"
+    assert speaker.calls[1][1] == b"turn-two-audio"
 
 
 @pytest.mark.asyncio
@@ -963,6 +968,90 @@ async def test_interrupted_rearms_the_latch_for_the_next_turn():
     await bridge._pump_events(turn_two(), FakeWS([]))
     assert len(speaker.calls) == 2
     assert speaker.calls[-1][1] == b"turn-two-audio"
+
+
+@pytest.mark.parametrize("shape", ["one event carrying both flags", "interrupted then turn_complete"])
+@pytest.mark.asyncio
+async def test_a_barge_in_turn_does_not_run_the_fallback(shape):
+    """`interrupted` re-arms the latch -- so the turn_complete in the SAME turn
+    must not then read that re-armed latch as "this turn was never verified".
+
+    ADK produces both flags on ONE response
+    (models/gemini_llm_connection.py:396-398:
+    `LlmResponse(turn_complete=True, interrupted=..., ...)`), and can also emit
+    them as separate events. Either way, clearing the latch and immediately
+    consulting it re-creates C-1 exactly: a second identify() on the audio the
+    open mic buffered while the model was speaking -- which under locked/ambient
+    publishes LOW over the turn's correct level. Barge-in is a routine
+    interaction, not an edge case.
+
+    What is in the buffer at a barge-in belongs to the NEXT utterance, so it is
+    neither scored nor dropped here; it gets verified at its own boundary.
+    """
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"turn-one-audio")
+
+    barge_in_audio = b"\x07\x08" * config.SPEAKER_MIN_UTTERANCE_BYTES
+
+    async def turn():
+        yield _make_event(input_transcription=FakeTranscription("birinci", finished=True))
+        # The model is speaking; the user talks over it and the mic buffers that.
+        bridge._utterance.extend(barge_in_audio)
+        if shape == "one event carrying both flags":
+            yield _make_event(turn_complete=True, interrupted=True)
+        else:
+            yield _make_event(interrupted=True)
+            yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(turn(), FakeWS([]))
+
+    assert len(speaker.calls) == 1, (
+        f"the barge-in turn verified twice ({shape}) -- the second call scored "
+        f"{speaker.calls[1][1][:16]!r}..., audio buffered while the model spoke")
+    assert bytes(bridge._utterance) == barge_in_audio, (
+        "the barge-in utterance was dropped instead of left for its own boundary")
+    assert bridge._verified_this_turn is False, "the next turn must still verify"
+
+
+@pytest.mark.asyncio
+async def test_a_verified_turn_drains_the_inter_turn_audio():
+    """The buffer's lifecycle belongs to the turn, not only to verification.
+
+    When a turn IS verified at its finished transcription, the turn_complete
+    fallback is skipped -- and _verify_utterance, the only thing that drains the
+    buffer, is never called. Everything the open mic collected while the model
+    spoke (up to the whole 10 s window, including the assistant's own TTS echo
+    when no headset is used) then survives as a PREFIX of the next turn's
+    utterance. speaker.embed averages the entire PCM into one embedding with no
+    VAD or trimming, so that prefix drags the next turn's score toward
+    different-speaker frames -- and it silently invalidates threshold
+    calibration measured on clean clips.
+    """
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"turn-one-audio")
+
+    async def turn_one():
+        yield _make_event(input_transcription=FakeTranscription("birinci", finished=True))
+        bridge._utterance.extend(b"\x00\x01" * config.SPEAKER_MIN_UTTERANCE_BYTES)
+        yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(turn_one(), FakeWS([]))
+    assert len(speaker.calls) == 1
+    assert bytes(bridge._utterance) == b"", (
+        "inter-turn audio survived into the next turn's utterance buffer")
+
+    bridge._utterance = bytearray(b"turn-two-audio")
+
+    async def turn_two():
+        yield _make_event(input_transcription=FakeTranscription("ikinci", finished=True))
+
+    await bridge._pump_events(turn_two(), FakeWS([]))
+    assert speaker.calls[-1][1] == b"turn-two-audio", (
+        "the second turn was scored on more than its own utterance")
 
 
 @pytest.mark.asyncio
@@ -1179,3 +1268,55 @@ def test_non_positive_utterance_window_falls_back_to_the_default(caplog):
     assert config._effective_utterance_seconds(3.0) == 3.0
     # ...and the shipped constant is therefore always a real bound.
     assert config.SPEAKER_UTTERANCE_MAX_BYTES > 0
+
+
+def test_the_fallback_floor_is_validated_at_both_ends(caplog):
+    """The floor's sibling is validated at load; this knob needs it for the same
+    reason, and its two failure directions are NOT symmetric.
+
+    Negative: a floor no buffer can be below, i.e. the fragment guard silently
+    gone -- fails CLOSED-ish (back to scoring fragments, which reject).
+    Above the mic window: a floor no buffer can ever REACH, so the turn_complete
+    fallback never fires again and every turn without a finished transcription
+    passes UNVERIFIED -- that one fails OPEN, so a typo must not reach it.
+    """
+    with caplog.at_level("WARNING"):
+        assert (config._effective_min_utterance_seconds(-5.0)
+                == config._DEFAULT_MIN_UTTERANCE_SECONDS)
+    assert "removes the fallback's fragment guard" in caplog.text
+    caplog.clear()
+
+    with caplog.at_level("WARNING"):
+        too_long = config.SPEAKER_UTTERANCE_SECONDS + 1.0
+        assert (config._effective_min_utterance_seconds(too_long)
+                == config.SPEAKER_UTTERANCE_SECONDS)
+    assert "could never fire" in caplog.text
+
+    # Usable values pass through, including an explicit 0 -- that is a
+    # deliberate opt-out of the extra guard, not a silent misconfiguration.
+    assert config._effective_min_utterance_seconds(0.75) == 0.75
+    assert config._effective_min_utterance_seconds(0.0) == 0.0
+
+
+def test_the_shipped_floor_constant_actually_went_through_that_validation(monkeypatch):
+    """Calling the validator directly proves the validator; it does NOT prove
+    the module USES it. Wiring the guard to the shipped constant is a separate
+    claim and gets its own test -- twice on this branch a guard was asserted one
+    function short of the code that runs in production.
+
+    Reload the module under a hostile environment and read the constant."""
+    import importlib
+
+    monkeypatch.setenv("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS",
+                       str(config.SPEAKER_UTTERANCE_SECONDS + 60))
+    try:
+        importlib.reload(config)
+        assert config.SPEAKER_MIN_UTTERANCE_BYTES == config.SPEAKER_UTTERANCE_MAX_BYTES, (
+            "an out-of-range floor reached SPEAKER_MIN_UTTERANCE_BYTES unclamped: "
+            "the turn_complete fallback could never fire and every turn without a "
+            "finished transcription would pass unverified")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+    assert 0 <= config.SPEAKER_MIN_UTTERANCE_BYTES <= config.SPEAKER_UTTERANCE_MAX_BYTES

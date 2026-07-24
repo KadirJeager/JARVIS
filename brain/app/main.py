@@ -251,7 +251,10 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         # Firestore round-trips. Awaited inline, an enrollment landing during a
         # live utterance would freeze the loop -- every WS connection and every
         # /api/chat turn on this instance -- until those RPCs returned.
-        total = await asyncio.to_thread(get_speaker_service().enroll, email, vecs)
+        # get_speaker_service() is INSIDE the thread too: on the first call it
+        # builds the Firestore client (credential discovery, possibly a metadata
+        # server round-trip), which is not something to do on the loop either.
+        total = await asyncio.to_thread(lambda: get_speaker_service().enroll(email, vecs))
     except Exception:
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
