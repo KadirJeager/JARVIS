@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, speaker, voice, voice_trust
+from . import config, messages, speaker, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
 app.include_router(voice.router)
+app.include_router(voice_manage.router)
 
 _runner: Runner | None = None
 _session_service = InMemorySessionService()

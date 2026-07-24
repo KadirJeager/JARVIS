@@ -265,6 +265,15 @@ class SpeakerService:
         return IdentifyOutcome(verified=verified, score=score, vec=vec,
                                adapted_sample_id=adapted_sample_id)
 
+    def overview(self, user_id: str) -> tuple:
+        """One CONSISTENT read of gallery + history for GET /api/voice/profile:
+        under the lock so a concurrent adapt/correction cannot land between the
+        two loads and show a history row pointing at a sample that "does not
+        exist yet" (spec §10)."""
+        with self._gallery_lock:
+            return (speaker_store.load_profile(self.db, user_id),
+                    speaker_history.load_history(self.db, user_id))
+
     def record_history(self, user_id: str, *, score: float, verified: bool,
                        vec: list[float], device_hint: str, presence: str,
                        trust_level: str, adapted_sample_id: str | None) -> str:
