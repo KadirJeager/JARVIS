@@ -408,3 +408,11 @@ class SpeakerService:
             entry["adapted_sample_id"] = None
             speaker_history.save_history(self.db, user_id, entries)
             return {"removed_sample_id": removed, "already": False}
+
+    def delete_profile_and_history(self, user_id: str) -> None:
+        """spec §8: no half-deletion -- the gallery and the verification
+        history go together, under the lock so a concurrent identify cannot
+        resurrect a partial write in between."""
+        with self._gallery_lock:
+            speaker_store.delete_profile(self.db, user_id)
+            speaker_history.delete_history(self.db, user_id)

@@ -311,3 +311,44 @@ def test_production_service_carries_the_config_manual_cap_and_labels(manage_clie
     svc = main_mod.get_speaker_service()
     assert svc.manual_cap == config.SPEAKER_MANUAL_CAP
     assert svc.labels == config.SPEAKER_SAMPLE_LABELS
+
+
+# --- DELETE /api/voice/profile (spec §8: no half-deletion) ------------------
+
+
+def test_profile_deletion_removes_profile_AND_history(manage_client):
+    c, db = manage_client
+    _auth()
+    enroll_anchors(db, USER, [A], id_fn=lambda: "a1")
+    _seed_history(db)
+    r = c.delete("/api/voice/profile")
+    assert r.status_code == 200 and r.json() == {"deleted": True}
+    assert db.collection("speaker_profiles").document(USER).get().exists is False
+    assert db.collection("speaker_history").document(USER).get().exists is False
+
+
+def test_profile_deletion_leaves_other_users_alone(manage_client):
+    c, db = manage_client
+    _auth()
+    enroll_anchors(db, USER, [A])
+    enroll_anchors(db, "baskasi@example.com", [B])
+    c.delete("/api/voice/profile")
+    assert len(load_profile(db, "baskasi@example.com").anchors) == 1
+
+
+def test_profile_deletion_requires_auth(manage_client):
+    c, _db = manage_client
+    assert c.delete("/api/voice/profile").status_code in (401, 403)
+
+
+def test_profile_deletion_failure_is_a_turkish_502(manage_client, monkeypatch):
+    c, db = manage_client
+    _auth()
+    import app.speaker_store as store_mod
+
+    def boom(db_, user_id):
+        raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(store_mod, "delete_profile", boom)
+    r = c.delete("/api/voice/profile")
+    assert r.status_code == 502 and "altyapı" in r.json()["detail"]

@@ -157,3 +157,14 @@ async def reject_history(entry_id: str, email: str = Depends(require_user)):
     except Exception:
         logging.exception("voice_manage: reject failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail=_INFRA_502)
+
+
+@router.delete("/api/voice/profile")
+async def delete_profile(email: str = Depends(require_user)):
+    try:
+        await asyncio.to_thread(lambda: _service().delete_profile_and_history(email))
+    except Exception:
+        logging.exception("voice_manage: profile delete failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail=_INFRA_502)
+    logging.info("voice_manage: profile+history deleted for user_id=%s", email)
+    return {"deleted": True}
