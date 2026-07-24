@@ -552,3 +552,56 @@ async def test_bridge_speaker_none_is_noop():
     await bridge._pump_events(fake_events(), ws)                  # must not raise
     # only the transcript event, no speaker event
     assert all("speaker" not in t for _, t in ws.sent if isinstance(t, str))
+
+
+@pytest.mark.asyncio
+async def test_pump_mic_once_buffers_utterance_only_when_speaker_service_set():
+    """Exercises the buffering guard through the REAL entry point
+    (_pump_mic_once), not by hand-setting bridge._utterance like the tests
+    above -- this is what actually proves the `is not None` check is
+    load-bearing (an inverted `is None` guard would still pass every other
+    test in this file but fail this one)."""
+    speaker = FakeSpeaker((True, 0.9))
+    with_speaker = VoiceBridge(runner=None, session_service=None, speaker_service=speaker)
+    ws = FakeWS([{"type": "websocket.receive", "bytes": b"\x00\x01\x02\x03"}])
+    await with_speaker._pump_mic_once(ws, FakeQueue())
+    assert bytes(with_speaker._utterance) == b"\x00\x01\x02\x03"
+
+    without_speaker = VoiceBridge(runner=None, session_service=None)  # speaker_service=None
+    ws2 = FakeWS([{"type": "websocket.receive", "bytes": b"\x00\x01\x02\x03"}])
+    await without_speaker._pump_mic_once(ws2, FakeQueue())
+    assert bytes(without_speaker._utterance) == b""
+
+
+class ExplodingSpeaker:
+    """Fake SpeakerService whose identify() always raises -- proves a
+    model/embed failure can never break the audio stream (the brief's SAFETY
+    guarantee for _verify_utterance)."""
+
+    def identify(self, user_id, pcm, device_hint, auth_is_kadir):
+        raise RuntimeError("embed blew up")
+
+
+@pytest.mark.asyncio
+async def test_verify_utterance_treats_identify_exception_as_unverified_and_fails_closed(caplog):
+    """identify() raising must never propagate out of _pump_events: it is
+    logged and fused as verified=False/score=0.0, which under presence=locked
+    fails CLOSED to trust.LOW (not silently HIGH/MEDIUM) -- this is the path
+    Task 10 makes reachable by real mic traffic, so it must be proven here."""
+    session = type("S", (), {"state": {}})()
+
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("merhaba"))
+
+    ws = FakeWS([])
+    bridge = VoiceBridge(runner=None, session_service=None, speaker_service=ExplodingSpeaker(),
+                         device_hint="phone", presence="locked", session=session)
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")             # buffered mic audio
+
+    with caplog.at_level("ERROR"):
+        await bridge._pump_events(fake_events(), ws)                # must not raise
+
+    assert ("text", json.dumps(
+        {"type": "speaker", "role": "user", "verified": False, "score": 0.0})) in ws.sent
+    assert session.state[config.TRUST_STATE_KEY] == trust.LOW
+    assert "speaker.identify failed" in caplog.text
