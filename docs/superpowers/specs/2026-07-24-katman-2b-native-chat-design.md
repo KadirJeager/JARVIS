@@ -38,11 +38,13 @@ Başarı ölçütü: Telefonda uygulama açılır, giriş **hatırlanır**, önc
 |---|---|---|
 | **1 (bu MVP)**: tek sohbet + kalıcı oturum | Ana chat yüzeyi + Library (geçmiş) çekirdeği | **şimdi** |
 | 2: çoklu konuşma + arama | Yan çekmece (New Chat, Search chats, Library) | sonra |
-| 3: native ses **+ konuşmacı tanıma** | Gemini Live + **Kadir'in sesini tanıma** (diarization + speaker-ID) — 2a'yı native'e taşır | sonra |
+| 3: native ses **+ ses kişiselleştirme + konuşmacı tanıma** | Gemini Live + **kişiselleştirilebilir asistan sesi (her türlü)** + **Kadir'in sesini tanıma** (diarization + speaker-ID) — 2a'yı native'e taşır | sonra |
 | 4: multimodal giriş | Images / Videos | sonra |
 | JARVIS-özel: ASSIST/güç tuşu, onay merkezi | kısmen "araçlar / bağlı uygulamalar" | sonra |
 
 > **Kesin gereksinim (Kadir, 24 Tem 2026):** Ses diliminde (Dilim 3) asistan Kadir'i **sesinden tanımalı** — konuşmacı diarization (ses akışında kaç kişi konuştuğunu ayırt etme) + Kadir'in sesini doğrulama (speaker verification / voiceprint enrollment). Gemini Live'ın bunu sağlamadığı varsayılıyor → ayrı bir konuşmacı-kimlik pipeline'ı gerekebilir (speaker embedding ya da Cloud STT diarization); ses dilimi spec'inde araştırılıp tasarlanacak. **Bu dilimi (text chat) etkilemez.** Bkz. memory `kadir-ses-kimlik`.
+
+> **Kişiselleştirilebilir asistan sesi (Kadir, 24 Tem 2026):** Ses diliminde asistanın **çıktı sesi kişiselleştirilebilir** olmalı — her türlü ses/ton, sabit tek ses değil. Gemini Live prebuilt sesler (`voiceConfig`/`prebuiltVoiceConfig`) hazır-seçimi karşılar; "her türlü" (özel/klonlanmış ses) ayrı bir TTS / voice-cloning pipeline gerektirebilir — ses dilimi spec'inde araştırılacak. **Bu dilimi (text chat) etkilemez.** Bkz. memory `asistan-ses-kisisellestirme`.
 
 Bu dilimin **kalıcı oturumu**, Gemini'nin "Library/geçmiş" kavramının çekirdeğidir: tek kalıcı `session_id`, Dilim 2'de çoklu konuşmaya doğal olarak genişler (bu yüzden şimdiden `user_id`+`session_id` ile anahtarlanıyor).
 
