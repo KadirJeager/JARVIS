@@ -5,6 +5,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 import app.voice as voice_mod
+from app import config, trust
 from app.voice import VoiceBridge, _handshake
 
 
@@ -506,3 +507,48 @@ async def test_events_generator_closed_even_when_pump_dies_of_send_failure():
     with pytest.raises(RuntimeError, match="send failed"):
         await asyncio.wait_for(bridge.run(ws, user_id="user@example.com"), timeout=2)
     assert closed["v"], "events generator was not aclosed on pump failure"
+
+
+class FakeSpeaker:
+    """Fake SpeakerService: canned (verified, score) result, records calls."""
+
+    def __init__(self, result):  # (verified, score)
+        self.result = result
+        self.calls = []
+
+    def identify(self, user_id, pcm, device_hint, auth_is_kadir):
+        self.calls.append((user_id, pcm, device_hint, auth_is_kadir))
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_bridge_verifies_utterance_and_writes_trust_and_event():
+    session = type("S", (), {"state": {}})()
+    speaker = FakeSpeaker((True, 0.9))
+
+    async def fake_events():
+        yield _make_event(data=b"\x00\x01")                       # mic-ish (ignored here)
+        yield _make_event(input_transcription=FakeTranscription("merhaba"))
+
+    ws = FakeWS([])
+    bridge = VoiceBridge(runner=None, session_service=None, speaker_service=speaker,
+                         device_hint="headset", presence="locked", session=session)
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")            # buffered mic audio
+    await bridge._pump_events(fake_events(), ws)
+
+    assert speaker.calls and speaker.calls[0][2] == "headset"     # identify called w/ device
+    # locked + verified -> MEDIUM in session.state
+    assert session.state[config.TRUST_STATE_KEY] == trust.MEDIUM
+    assert ("text", json.dumps(
+        {"type": "speaker", "role": "user", "verified": True, "score": 0.9})) in ws.sent
+
+
+@pytest.mark.asyncio
+async def test_bridge_speaker_none_is_noop():
+    async def fake_events():
+        yield _make_event(input_transcription=FakeTranscription("selam"))
+    ws = FakeWS([])
+    bridge = VoiceBridge(runner=None, session_service=None)       # no speaker_service
+    await bridge._pump_events(fake_events(), ws)                  # must not raise
+    # only the transcript event, no speaker event
+    assert all("speaker" not in t for _, t in ws.sent if isinstance(t, str))

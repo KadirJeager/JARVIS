@@ -34,6 +34,7 @@ from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.adk.agents.run_config import RunConfig
 from google.genai import types
 
+from . import config, trust
 from . import voice_protocol as vp
 from .auth import verify_token_email
 
@@ -41,11 +42,18 @@ router = APIRouter()
 
 
 class VoiceBridge:
-    def __init__(self, runner, session_service, memory=None):
+    def __init__(self, runner, session_service, memory=None, speaker_service=None,
+                 device_hint="unknown", presence="foreground", session=None):
         self.runner = runner
         self.session_service = session_service
         self.memory = memory
+        self.speaker_service = speaker_service
+        self.device_hint = device_hint
+        self.presence = presence
+        self.session = session          # ADK session; state written here for policy
         self.transcript: list[dict] = []
+        self._utterance = bytearray()   # accumulates this turn's mic PCM
+        self._user_id = ""
 
     async def _pump_mic_once(self, ws, queue) -> bool:
         """Read one client message and forward mic audio to the live queue.
@@ -57,8 +65,41 @@ class VoiceBridge:
             queue.close()
             return False
         if data := msg.get("bytes"):
+            if self.speaker_service is not None:
+                self._utterance.extend(data)
             queue.send_realtime(types.Blob(data=data, mime_type=vp.AUDIO_MIME_IN))
         return True
+
+    async def _verify_utterance(self, ws) -> None:
+        """Called at the user utterance boundary: run speaker identity on the
+        buffered PCM, fuse into a trust level, write it into session.state for
+        the policy layer, and tell the client. Any failure is logged and treated
+        as unverified -- it must never break the audio stream."""
+        pcm = bytes(self._utterance)
+        self._utterance.clear()
+        if not pcm:
+            return
+        try:
+            verified, score = self.speaker_service.identify(
+                self._user_id, pcm, self.device_hint, auth_is_kadir=True
+            )
+        except Exception:
+            logging.exception("voice bridge: speaker.identify failed for %s", self._user_id)
+            verified, score = False, 0.0
+        level = trust.assess(
+            trust.TrustContext(
+                auth_verified=True, presence=self.presence,
+                voice_score=score if verified else 0.0, device_hint=self.device_hint,
+            ),
+            config.SPEAKER_ACCEPT_THRESHOLD,
+        )
+        if self.session is not None:
+            self.session.state[config.TRUST_STATE_KEY] = level
+        await ws.send_text(json.dumps(vp.evt_speaker("user", verified, score)))
+        logging.info(
+            "voice trust: user=%s verified=%s score=%.4f presence=%s device=%s level=%s",
+            self._user_id, verified, score, self.presence, self.device_hint, level,
+        )
 
     async def _pump_events(self, events, ws) -> None:
         """Forward ADK live events to the client: audio bytes, turn_complete,
@@ -72,6 +113,8 @@ class VoiceBridge:
                 if tr and getattr(tr, "text", None):
                     await ws.send_text(json.dumps(vp.evt_transcript(role, tr.text)))
                     self.transcript.append({"role": role, "text": tr.text})
+                    if role == "user" and self.speaker_service is not None:
+                        await self._verify_utterance(ws)
             content = getattr(event, "content", None)
             for part in (getattr(content, "parts", None) or []):
                 blob = getattr(part, "inline_data", None)
@@ -84,9 +127,11 @@ class VoiceBridge:
             app_name="jarvis", user_id=user_id, session_id=session_id
         )
         if session is None:
-            await self.session_service.create_session(
+            session = await self.session_service.create_session(
                 app_name="jarvis", user_id=user_id, session_id=session_id
             )
+        self.session = session
+        self._user_id = user_id
         queue = LiveRequestQueue()
         run_config = RunConfig(
             response_modalities=["AUDIO"],
