@@ -103,7 +103,7 @@ and requires the same Google ID token / allowlist auth as `/api/chat`.
 | `JARVIS_SPEAKER_ADAPT` | `0.60` | Cosine threshold above which a verified utterance also self-feeds the adaptive gallery (only when authed as Kadir) |
 | `JARVIS_SPEAKER_TOPK` | `3` | Number of top gallery similarities averaged into the score |
 | `JARVIS_SPEAKER_ADAPTIVE_CAP` | `20` | Max adaptive samples kept; oldest evicted first once over cap |
-| `SPEAKER_MODEL_DIR` | `/tmp/spkrec-ecapa` | ECAPA model cache dir — see Deploy notes below |
+| `SPEAKER_MODEL_DIR` | `/tmp/spkrec-ecapa` (code default; the Dockerfile overrides this to `/opt/spkrec-ecapa`, where the model is baked in at build time — see Deploy notes below) | ECAPA model dir |
 
 Empirically measured separation on the committed fixtures (`tests/fixtures/`,
 real LibriSpeech clips, see `tests/fixtures/README.md`): same-speaker cosine
@@ -113,9 +113,45 @@ below the observed same-speaker match and above the observed impostor score.
 
 ### Deploy notes (for when the owner approves — not executed by this repo)
 
-- `SPEAKER_MODEL_DIR` should point at a persistent path, not the default
-  `/tmp` (ephemeral on Cloud Run) — otherwise the ~89 MB ECAPA model
-  re-downloads on every cold start.
-- `jarvis-voice` wants `--min-instances 1` (keeps the model warm — a
-  cold-start mid voice-session is bad UX) and a raised `--memory` so torch +
-  the loaded model fit comfortably alongside the rest of the process.
+- **The ECAPA model is baked into the image at build time**
+  (`SPEAKER_MODEL_DIR=/opt/spkrec-ecapa`, set in the Dockerfile), not
+  downloaded on first request. An earlier draft of this section recommended
+  pointing `SPEAKER_MODEL_DIR` at "a persistent path" instead of the default
+  `/tmp` — that was never actionable on Cloud Run without a volume mount
+  (GCS FUSE / Filestore), which this project does not provision, so the
+  advice was misleading. It is now moot: the Dockerfile downloads the model
+  once during `docker build`, dereferences speechbrain's HuggingFace-cache
+  symlinks into real files (kept out of the non-root `appuser`'s reach
+  otherwise — see Dockerfile comments), and ships the ~89 MB of weights
+  inside the image, owned by `appuser`. This removes the runtime
+  HuggingFace fetch entirely: no cold-start download latency, no tmpfs
+  (RAM) charge against instance memory for the weights (Cloud Run's `/tmp`
+  is backed by memory, not disk), and no risk of an unauthenticated HF
+  rate-limit failing a live request.
+- **Both `jarvis-brain` and `jarvis-voice` now carry the ~850 MB
+  torch/speechbrain stack, not just `jarvis-voice`.** Both services deploy
+  from this same `brain/` source and this one Dockerfile. Decision: keep a
+  single shared image rather than splitting it per service. Reasoning —
+  `POST /api/voice/enroll` lives in the same FastAPI app and calls
+  `speaker.embed()` directly; `scripts/enroll_kadir.py` takes an arbitrary
+  `base_url`, and the already-deployed clients (Android app, web/PWA) are
+  wired to `jarvis-brain`'s URL, so enrollment plausibly runs through
+  `jarvis-brain`, not only `jarvis-voice`. Splitting the image (e.g. a
+  build arg that skips the `[speaker]` extra for the text service) would
+  only be safe if `jarvis-brain` could never receive an enroll call, which
+  cannot be guaranteed without an application-code change (moving or
+  conditionally disabling the endpoint per service) — out of scope for this
+  fix wave. **Consequence: raise `--memory` for BOTH services**, not just
+  `jarvis-voice` as earlier notes assumed — the `512Mi` used at first deploy
+  predates torch entirely and will not be sufficient for either service now:
+  `torch`'s own import footprint plus the loaded model plus request-time
+  buffers puts steady-state usage well above that. Start both services at
+  **`--memory 2Gi`** as a conservative floor and confirm actual RSS
+  empirically after deploy — this number is a reasoned estimate, not a
+  measurement (no running container was available to profile in the
+  environment this fix was written in; see `fix-wave2-report.md`).
+- `jarvis-voice` additionally wants `--min-instances 1` (keeps the model
+  warm — a cold-start mid voice-session is bad UX). `jarvis-brain` can stay
+  at `--min-instances 0` since a text-chat cold start is more tolerable, but
+  it still needs the same `--memory` floor as `jarvis-voice` now that it
+  carries the same dependency stack.
