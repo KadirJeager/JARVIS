@@ -72,3 +72,67 @@ def test_adapt_cap_zero_empties_adaptive():
     p.adapt(A, "headset", cap=0, now_fn=lambda: "t1")
     # Should append then evict to cap=0
     assert len(p.adaptive) == 0, f"Expected empty adaptive with cap=0, got {len(p.adaptive)} items"
+
+
+# --- I6: diversity-preserving eviction (spec §5) ----------------------------
+
+PHONE = [1.0, 0.0, 0.0]
+HEADSET = [0.0, 1.0, 0.0]
+TABLET = [0.0, 0.0, 1.0]
+
+
+def _phone_variant(i):
+    """Near-identical phone samples: same channel, tiny day-to-day variation."""
+    return [1.0, 0.001 * i, 0.0]
+
+
+def test_adapt_keeps_rare_channels_when_flooded_by_one_device():
+    """Spec §5 requires diversity-preserving eviction, "salt recency değil,
+    çünkü recency drift'e açık". With pure recency, twenty phone utterances
+    evict every headset/tablet sample and the gallery stops covering channels by
+    itself -- the exact claim §5 makes. Redundancy-based eviction discards one
+    of the twenty near-duplicates instead."""
+    clk = iter(f"t{i}" for i in range(100))
+    p = SpeakerProfile(anchors=[], adaptive=[])
+    p.adapt(HEADSET, "headset", cap=4, now_fn=lambda: next(clk))
+    p.adapt(TABLET, "tablet", cap=4, now_fn=lambda: next(clk))
+    for i in range(20):
+        p.adapt(_phone_variant(i), "phone", cap=4, now_fn=lambda: next(clk))
+
+    assert len(p.adaptive) == 4
+    hints = {a["device_hint"] for a in p.adaptive}
+    assert "headset" in hints, "the only headset sample was evicted by phone traffic"
+    assert "tablet" in hints, "the only tablet sample was evicted by phone traffic"
+    assert "phone" in hints, "the newest channel must still be represented"
+
+
+def test_adapt_evicts_the_redundant_sample_not_merely_the_oldest():
+    """Directly pins the eviction rule: the sample whose nearest neighbour is
+    closest goes, even when it is the NEWEST one."""
+    clk = iter(f"t{i}" for i in range(100))
+    p = SpeakerProfile(anchors=[], adaptive=[])
+    p.adapt(HEADSET, "headset", cap=2, now_fn=lambda: next(clk))
+    p.adapt(TABLET, "tablet", cap=2, now_fn=lambda: next(clk))
+    p.adapt(TABLET, "tablet", cap=2, now_fn=lambda: next(clk))   # duplicate of #2
+    # one of the two identical tablet vectors must go, never the unique headset
+    assert [a["device_hint"] for a in p.adaptive] == ["headset", "tablet"]
+
+
+def test_adapt_never_evicts_anchors_even_when_they_are_the_redundant_ones():
+    """Anchors are the anti-drift baseline: adaptation may only ever shrink the
+    adaptive set, never the anchor set, however redundant an anchor looks."""
+    clk = iter(f"t{i}" for i in range(100))
+    p = SpeakerProfile(anchors=[PHONE, PHONE], adaptive=[])
+    for i in range(6):
+        p.adapt(_phone_variant(i), "phone", cap=2, now_fn=lambda: next(clk))
+    assert p.anchors == [PHONE, PHONE]
+    assert len(p.adaptive) == 2
+
+
+def test_anchor_score_ignores_adaptive_samples():
+    """anchor_score is the ADAPT gate's metric: it must not see the adaptive
+    set at all, otherwise the gate can be ratcheted (see test_speaker_service)."""
+    p = SpeakerProfile(anchors=[PHONE], adaptive=[{"vec": TABLET, "device_hint": "t", "ts": "t0"}])
+    assert p.score(TABLET, top_k=1) == 1.0        # full gallery: matches the adaptive sample
+    assert p.anchor_score(TABLET, top_k=1) == 0.0  # anchors only: no match
+

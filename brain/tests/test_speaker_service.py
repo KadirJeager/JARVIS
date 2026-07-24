@@ -70,3 +70,42 @@ def test_score_exactly_at_adapt_feeds_profile():
                           accept=1.0, adapt=1.0, cap=5, top_k=1)
     svc.identify("k", b"A", "phone", auth_is_kadir=True)
     assert len(load_profile(db, "k").adaptive) == 1
+
+
+# --- M1: the self-feed gate must not be ratchetable -------------------------
+
+def test_adapt_gate_ignores_adaptive_samples_so_poisoning_cannot_ratchet():
+    """Scoring the ADAPT gate against the whole gallery is a ratchet: once an
+    attacker lands ONE adaptive sample, their similarity to their own sample
+    dominates the top-k, so every later attempt clears the gate more easily and
+    walks the profile toward them. The gate is scored against the immutable
+    anchors, which adaptation cannot move, so a landed sample buys nothing."""
+    db = FakeDB()
+    enroll_anchors(db, "k", [A])
+    # simulate one already-landed attacker sample
+    profile = load_profile(db, "k")
+    profile.adaptive.append({"vec": FAR, "device_hint": "phone", "ts": "t0"})
+    from app.speaker_store import save_profile
+    save_profile(db, "k", profile)
+
+    svc = SpeakerService(db, embed_fn=lambda pcm: FAR, now_fn=lambda: "t1",
+                         accept=0.9, adapt=0.97, cap=5, top_k=1)
+    verified, score = svc.identify("k", b"F", "phone", auth_is_kadir=True)
+
+    assert score == 1.0          # full gallery: matches their own landed sample
+    assert verified is True      # ACCEPT stays a full-gallery decision (by design)
+    after = load_profile(db, "k")
+    assert len(after.adaptive) == 1, "the attacker fed the profile again -- ratchet is open"
+    assert after.adaptive[0]["ts"] == "t0"
+
+
+def test_empty_anchor_gallery_never_self_feeds():
+    """No enrollment -> no baseline -> nothing may be learned. Otherwise the
+    very first caller would define the voiceprint."""
+    db = FakeDB()
+    svc = SpeakerService(db, embed_fn=lambda pcm: A, now_fn=lambda: "t",
+                         accept=0.9, adapt=0.97, cap=5, top_k=1)
+    verified, score = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    assert (verified, score) == (False, 0.0)
+    assert load_profile(db, "k").adaptive == []
+
