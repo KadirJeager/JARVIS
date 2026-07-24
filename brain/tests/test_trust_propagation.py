@@ -466,7 +466,15 @@ def test_production_runners_behave_as_wired(production_init):
         return runner.agent.before_tool_callback(
             _Tool("update_user_profile"), {"patch": {}}, tool_context)
 
-    voice_decision = decide(main_mod._voice_runner)
+    # Through the ACCESSOR, not the private: get_voice_runner_sessions_memory()
+    # is what app/voice.py actually calls, so it -- not `_voice_runner` -- is the
+    # last mile of the production path. Reading the private left a fully-green
+    # bypass: changing the accessor to return `_runner` handed the WS voice path
+    # a trust-less agent (the exact C1 defect) with all tests passing.
+    voice_runner, sessions, _ = main_mod.get_voice_runner_sessions_memory()
+    assert sessions is main_mod._session_service, (
+        "voice.py would build sessions on a different service than the runner uses")
+    voice_decision = decide(voice_runner)
     text_decision = decide(main_mod._runner)
 
     assert voice_decision is not None and "onay" in voice_decision["result"].lower(), (
