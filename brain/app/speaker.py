@@ -158,6 +158,26 @@ class SpeakerService:
         # part -- embedding -- stays outside it and fully parallel.
         self._gallery_lock = threading.Lock()
 
+    def enroll(self, user_id: str, vecs: list[list[float]]) -> int:
+        """Bootstrap enrollment (POST /api/voice/enroll) under the SAME lock
+        identify() uses. Returns the anchor count actually persisted.
+
+        speaker_store.enroll_anchors is a load -> extend -> save read-modify-
+        write, exactly like identify()'s adapt path. Until the speaker work
+        moved inference off the event loop, BOTH ran to completion on that one
+        loop with no await inside their windows, so interleaving was
+        structurally impossible and the store needed no lock. asyncio.to_thread
+        made the race real -- an enroll landing between identify()'s load and
+        save (or vice versa) silently loses one side's write. Sharing this lock
+        restores the invariant.
+
+        The count is re-read from storage inside the lock rather than derived
+        from the vectors we just sent, so the number returned to the client is
+        the number Firestore actually holds."""
+        with self._gallery_lock:
+            speaker_store.enroll_anchors(self.db, user_id, vecs)
+            return len(speaker_store.load_profile(self.db, user_id).anchors)
+
     def identify(self, user_id: str, pcm: bytes, device_hint: str,
                  auth_is_kadir: bool) -> tuple[bool, float]:
         vec = self.embed_fn(pcm)

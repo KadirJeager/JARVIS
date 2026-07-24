@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import os
@@ -11,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, speaker, speaker_store, voice, voice_trust
+from . import config, messages, speaker, voice, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -230,9 +231,20 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
     if not req.clips:
         raise HTTPException(status_code=400, detail="En az bir ses klibi gerekli")
     try:
-        vecs = [speaker.embed(base64.b64decode(clip)) for clip in req.clips]
-        speaker_store.enroll_anchors(_enroll_db(), email, vecs)
-        total = len(speaker_store.load_profile(_enroll_db(), email).anchors)
+        # OFF THE EVENT LOOP, for the same reason the live verify path is
+        # (app/voice.py): speaker.embed is real ECAPA inference plus, on the
+        # first call in a process, the ~89 MB lazy model load -- seconds of
+        # blocking CPU, multiplied by the number of clips. Run inline in this
+        # async endpoint it stalls the whole loop, and jarvis-brain serves
+        # /api/chat and /ws/voice from that same loop.
+        vecs = await asyncio.to_thread(
+            lambda: [speaker.embed(base64.b64decode(clip)) for clip in req.clips]
+        )
+        # Via SpeakerService, NOT speaker_store directly: enrollment's
+        # load->extend->save must share the gallery lock with identify()'s
+        # adapt path, which now really can run concurrently in a worker thread
+        # (see SpeakerService.enroll).
+        total = get_speaker_service().enroll(email, vecs)
     except Exception:
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
