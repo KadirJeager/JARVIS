@@ -21,10 +21,16 @@ def save_history(db, user_id: str, entries: list[dict]) -> None:
 
 
 def record(db, user_id: str, entry: dict, cap: int) -> None:
-    """Append one verification outcome, keeping only the newest `cap`."""
+    """Append one verification outcome, keeping only the newest `cap`.
+
+    Explicit guard for cap <= 0: negative-slice trap list[-0:] == list[:] (whole
+    list), which would disable the bound entirely (same as SPEAKER_BARGE_IN_ONSET_BYTES
+    in config.py). cap=0 means "keep no history"."""
     entries = load_history(db, user_id)
     entries.append(entry)
-    save_history(db, user_id, entries[-cap:])
+    # Guard: if cap <= 0, keep no history (save empty list); otherwise keep newest cap
+    trimmed = [] if cap <= 0 else entries[-cap:]
+    save_history(db, user_id, trimmed)
 
 
 def delete_history(db, user_id: str) -> None:

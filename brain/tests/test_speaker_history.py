@@ -44,3 +44,22 @@ def test_delete_history_removes_the_document():
     assert speaker_history.load_history(db, "k") == []
     snap = db.collection("speaker_history").document("k").get()
     assert snap.exists is False, "doc must be GONE, not emptied -- deletion is deletion"
+
+
+def test_cap_zero_keeps_no_history():
+    """cap=0 must keep no entries, not unbounded history.
+    The negative-slice trap: list[-0:] == list[:] (whole list).
+    Same guard as SPEAKER_BARGE_IN_ONSET_BYTES in config.py."""
+    db = FakeDB()
+    speaker_history.record(db, "k", _entry(1), cap=0)
+    speaker_history.record(db, "k", _entry(2), cap=0)
+    assert speaker_history.load_history(db, "k") == []
+
+
+def test_cap_one_keeps_only_newest():
+    db = FakeDB()
+    speaker_history.record(db, "k", _entry(1), cap=1)
+    speaker_history.record(db, "k", _entry(2), cap=1)
+    entries = speaker_history.load_history(db, "k")
+    assert len(entries) == 1
+    assert entries[0]["id"] == "e2"
