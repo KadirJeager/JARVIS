@@ -359,3 +359,115 @@ def test_manual_sample_votes_in_accept_but_never_referees_adapt():
     assert out.adapted_sample_id is None                       # ...but did not referee
     profile = load_profile(db, "k")
     assert sum(1 for s in profile.adaptive if s["source"] == "auto") == 0
+
+
+# --- Final review Finding 1: confirm on an already-adapted entry must PROMOTE
+# the live auto sample in place, never append a duplicate --------------------
+
+
+def test_confirm_on_auto_adapted_entry_promotes_in_place():
+    """When identify() already self-fed the utterance (adapted_sample_id
+    points at a live auto sample), confirm must relabel THAT sample manual
+    rather than append a second copy of the same vector -- a duplicate would
+    double-count in top-k ACCEPT scoring and burn a manual-cap slot for data
+    already in the gallery."""
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    svc = _mgmt_svc(db)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)  # adapts (score 1.0)
+    auto_id = out.adapted_sample_id
+    assert auto_id is not None
+    speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
+
+    result = svc.confirm_history("k", "e1")
+
+    assert result["already"] is False
+    assert result["added_sample_id"] == auto_id
+    profile = load_profile(db, "k")
+    matching = [s for s in profile.adaptive if s["vec"] == A]
+    assert len(matching) == 1, "confirm must not duplicate the vec"
+    assert matching[0]["id"] == auto_id
+    assert matching[0]["source"] == "manual"
+    entry = speaker_history.load_history(db, "k")[0]
+    assert entry["correction"] == "confirmed"
+    assert entry["adapted_sample_id"] == auto_id, "link must stay pointed at the promoted sample"
+    assert sum(1 for s in profile.adaptive if s["source"] == "manual") == 1
+    assert sum(1 for s in profile.adaptive if s["source"] == "auto") == 0
+
+
+def test_confirm_then_reject_of_an_auto_adapted_entry_leaves_no_trace_of_the_vec():
+    """The reviewer's repro, end to end. Before promote-in-place, confirm
+    appended a DUPLICATE manual sample and overwrote the entry's link to
+    point at the duplicate, so a later reject removed only the duplicate --
+    the ORIGINAL auto sample (same vec) survived and kept voting even though
+    the user said "bu ben değildim" (spec §6: reject must remove the sample
+    the utterance became; confirm->reject reversal is explicitly legitimate).
+    This test is RED against the pre-fix code."""
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    svc = _mgmt_svc(db)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    auto_id = out.adapted_sample_id
+    assert auto_id is not None
+    speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
+
+    svc.confirm_history("k", "e1")
+    svc.reject_history("k", "e1")
+
+    profile = load_profile(db, "k")
+    assert [s for s in profile.adaptive if s["vec"] == A] == [], (
+        "the confirmed-then-rejected utterance must leave NO sample voting, "
+        "auto or manual")
+
+
+def test_confirm_falls_back_to_append_when_the_linked_sample_is_gone():
+    """The link can outlive the sample it points at (eviction, deletion). The
+    vec captured in the history entry at record time is then the only
+    surviving copy, so confirm must fall back to today's append-from-vec
+    path -- there is nothing left to promote in place."""
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    svc = _mgmt_svc(db)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    auto_id = out.adapted_sample_id
+    assert auto_id is not None
+    speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
+
+    from app.speaker_store import save_profile
+    profile = load_profile(db, "k")
+    profile.adaptive = [s for s in profile.adaptive if s["id"] != auto_id]  # simulate eviction
+    save_profile(db, "k", profile)
+
+    result = svc.confirm_history("k", "e1")
+
+    assert result["added_sample_id"] != auto_id, "a fresh id, not the gone one"
+    manuals = [s for s in load_profile(db, "k").adaptive if s["source"] == "manual"]
+    assert len(manuals) == 1
+    assert manuals[0]["id"] == result["added_sample_id"]
+    assert manuals[0]["vec"] == A
+
+
+def test_cap_refused_promote_leaves_the_entry_unmarked_and_sample_auto():
+    """Cap-check ordering: promoting an auto sample still increases the
+    manual count by one, so a full manual cap must refuse the promote --
+    leaving the entry uncorrected and the sample still "auto" -- exactly the
+    same rule the append path already follows."""
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    from app.speaker import make_sample, RuleViolation
+    from app.speaker_store import save_profile
+    profile = load_profile(db, "k")
+    for i in range(5):
+        profile.adaptive.append(make_sample(FAR, "manual", "phone", "t", f"m{i}"))
+    save_profile(db, "k", profile)
+
+    svc = _mgmt_svc(db)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)  # adapts despite full manual cap
+    auto_id = out.adapted_sample_id
+    assert auto_id is not None
+    speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
+
+    import pytest as _pytest
+    with _pytest.raises(RuleViolation, match="5/5"):
+        svc.confirm_history("k", "e1")
+
+    entry = speaker_history.load_history(db, "k")[0]
+    assert entry["correction"] is None, "a refused promote must not mark the entry"
+    saved = [s for s in load_profile(db, "k").adaptive if s["id"] == auto_id]
+    assert len(saved) == 1 and saved[0]["source"] == "auto", "unpromoted"

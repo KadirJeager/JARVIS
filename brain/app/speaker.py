@@ -356,11 +356,30 @@ class SpeakerService:
         raise SampleNotFound(entry_id)
 
     def confirm_history(self, user_id: str, entry_id: str) -> dict:
-        """"Bu bendim" (spec §6): the stored embedding becomes a MANUAL gallery
-        sample -- it VOTES in ACCEPT but never REFEREES adapt (it lives in the
-        adaptive list, and anchor_score reads anchors only, spec §5).
-        Idempotent via entry.correction; adapted_sample_id doubles as the link
-        for a later reversal."""
+        """"Bu bendim" (spec §6): the utterance's embedding ends up as a
+        MANUAL gallery sample -- it VOTES in ACCEPT but never REFEREES adapt
+        (it lives in the adaptive list, and anchor_score reads anchors only,
+        spec §5). Idempotent via entry.correction; adapted_sample_id doubles
+        as the link for a later reversal.
+
+        Three cases, by what adapted_sample_id currently points at:
+        - a LIVE auto sample (identify() already self-fed this utterance):
+          PROMOTE it in place (source -> "manual") rather than appending a
+          duplicate of the same vector -- a duplicate would double-count in
+          top-k ACCEPT scoring, burn a manual-cap slot for data already in
+          the gallery, and (worse) leave the original auto sample voting
+          after a later reject removed only the duplicate, defeating "bu ben
+          değildim" (spec §6: reject must remove the sample the utterance
+          became).
+        - a LIVE manual sample (only reachable via a reject->confirm cycle
+          that left the link intact instead of nulling it -- not reachable
+          through reject_history's current state machine, but handled sanely
+          rather than assumed impossible): nothing to promote, just mark.
+        - no live sample (never adapted, or the linked sample was since
+          evicted/deleted): fall back to appending a fresh manual sample
+          built from the vec captured in the entry -- the only surviving
+          copy.
+        """
         with self._gallery_lock:
             entries = speaker_history.load_history(self.db, user_id)
             entry = self._find_entry(entries, entry_id)
@@ -370,10 +389,29 @@ class SpeakerService:
             profile = speaker_store.load_profile(self.db, user_id)
             manual_count = sum(
                 1 for s in profile.adaptive if s["source"] == "manual")
+
+            linked_id = entry.get("adapted_sample_id")
+            linked = next((s for s in profile.adaptive if s["id"] == linked_id),
+                          None) if linked_id else None
+
+            if linked is not None and linked["source"] == "manual":
+                entry["correction"] = "confirmed"
+                speaker_history.save_history(self.db, user_id, entries)
+                return {"added_sample_id": linked["id"], "already": False}
+
             if manual_count >= self.manual_cap:
                 raise RuleViolation(
                     f"Elle eklenen örnek sınırı dolu ({manual_count}/{self.manual_cap}). "
                     "Yenisini eklemek için önce elle eklenmiş bir örneği sil.")
+
+            if linked is not None and linked["source"] == "auto":
+                linked["source"] = "manual"
+                entry["correction"] = "confirmed"
+                # adapted_sample_id already points at linked["id"] -- unchanged.
+                speaker_store.save_profile(self.db, user_id, profile)
+                speaker_history.save_history(self.db, user_id, entries)
+                return {"added_sample_id": linked["id"], "already": False}
+
             sample = make_sample(entry["vec"], "manual",
                                  entry.get("device_hint", "unknown"),
                                  self.now_fn(), self.id_fn())

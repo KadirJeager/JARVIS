@@ -306,10 +306,17 @@ def test_correction_endpoints_require_auth(manage_client):
 
 
 def test_production_service_carries_the_config_manual_cap_and_labels(manage_client, monkeypatch):
-    """Same wiring-guard class as Task 3's history_cap test."""
+    """Same wiring-guard class as Task 3's history_cap test. manual_cap's
+    ctor default (5) coincidentally equals config's default (SPEAKER_MANUAL_CAP
+    == 5), so asserting against the out-of-the-box default would not catch
+    the wiring being dropped -- monkeypatch to a distinctive value, same fix
+    as test_production_service_carries_the_config_history_cap in
+    tests/test_speaker_service.py."""
     from app import config
+    monkeypatch.setattr(config, "SPEAKER_MANUAL_CAP", 3)
+    monkeypatch.setattr(main_mod, "_speaker_service", None)
     svc = main_mod.get_speaker_service()
-    assert svc.manual_cap == config.SPEAKER_MANUAL_CAP
+    assert svc.manual_cap == 3
     assert svc.labels == config.SPEAKER_SAMPLE_LABELS
 
 
