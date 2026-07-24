@@ -219,11 +219,21 @@ server-verifiable presence/attestation signal, which this slice does not have.
   `jarvis-voice` as earlier notes assumed — the `512Mi` used at first deploy
   predates torch entirely and will not be sufficient for either service now:
   `torch`'s own import footprint plus the loaded model plus request-time
-  buffers puts steady-state usage well above that. Start both services at
-  **`--memory 2Gi`** as a conservative floor and confirm actual RSS
-  empirically after deploy — this number is a reasoned estimate, not a
-  measurement (no running container was available to profile in the
-  environment this fix was written in; see `fix-wave2-report.md`).
+  buffers puts steady-state usage well above that.
+
+  **Now measured, inside the real image** (`resource.ru_maxrss`, cumulative
+  peak): bare interpreter **17.9 MB** → `app.main` imported **126.0 MB** →
+  `speaker` module imported **126.0 MB** (unchanged: torch is genuinely lazy,
+  a text-only instance never pays for it) → ECAPA loaded plus one 3 s embed
+  **562.2 MB** → five further full-window (10 s) embeds **590.4 MB**.
+
+  So **peak ≈ 590 MB**, and `512Mi` would indeed OOM on the first embed. The
+  measured floor is **`--memory 1Gi`** (~70 % headroom over peak); the model is
+  a process-wide singleton and each connection's mic buffer is only 320 KB, so
+  concurrency barely moves this. `2Gi` remains a defensible conservative
+  choice, but it is now a deliberate margin rather than a guess — and on
+  `jarvis-voice`, which runs `--min-instances 1`, that margin is billed
+  continuously.
 - `jarvis-voice` additionally wants `--min-instances 1` (keeps the model
   warm — a cold-start mid voice-session is bad UX). `jarvis-brain` can stay
   at `--min-instances 0` since a text-chat cold start is more tolerable, but
@@ -247,3 +257,21 @@ server-verifiable presence/attestation signal, which this slice does not have.
   does not read `.dockerignore` and does not find the repo-root `.gitignore`
   when the source directory is `brain/`. Without it the upload was 2.5 GiB
   (both interpreters); with it, 560 KiB.
+- **A probe revision is already deployed and serving no traffic.**
+  `jarvis-brain-00007-vix`, built from merged `main`, reachable at
+  `https://probe---jarvis-brain-xxxxxxxxxx-ew.a.run.app` (`/api/health` → 200,
+  `/` → 200; `/healthz` → 404, which is Google Frontend reserving that path,
+  not a fault). Production traffic stays on `jarvis-brain-00006-222`. To
+  promote it:
+
+  ```bash
+  gcloud run services update-traffic jarvis-brain --region europe-west1 \
+      --to-revisions jarvis-brain-00007-vix=100
+  # rollback: --to-revisions jarvis-brain-00006-222=100
+  ```
+
+  Do the promotion **together with** enrolling Kadir's voice
+  (`scripts/enroll_kadir.py`): until the gallery has anchors every utterance
+  scores 0, which is harmless under `foreground` (HIGH regardless) but means
+  `locked`/`ambient` sit at MEDIUM/LOW. `jarvis-voice` still needs its own
+  deploy with `--min-instances 1`.
