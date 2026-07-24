@@ -12,12 +12,17 @@ const val BASE_URL = "https://jarvis-brain-000000000000.europe-west1.run.app"
 object NetworkModule {
     /**
      * Builds the [JarvisApi] with a Bearer-attaching OkHttp client and a lenient
-     * kotlinx.serialization converter. [tokenProvider] is read per request.
+     * kotlinx.serialization converter. [tokenProvider] is read per request; on a 401,
+     * [tokenRefresher] provides a fresh token for a single silent retry.
      */
-    fun create(tokenProvider: () -> String?): JarvisApi {
+    fun create(
+        tokenProvider: () -> String?,
+        tokenRefresher: () -> String? = { null },
+    ): JarvisApi {
         val json = Json { ignoreUnknownKeys = true }
         val client = OkHttpClient.Builder()
             .addInterceptor(AuthInterceptor(tokenProvider))
+            .authenticator(TokenAuthenticator(tokenRefresher))
             .build()
         return Retrofit.Builder()
             .baseUrl("$BASE_URL/")
