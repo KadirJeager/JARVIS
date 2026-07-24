@@ -158,4 +158,16 @@ SPEAKER_MIN_UTTERANCE_SECONDS = _effective_min_utterance_seconds(
                          _DEFAULT_MIN_UTTERANCE_SECONDS))
 )
 SPEAKER_MIN_UTTERANCE_BYTES = _utterance_bytes(SPEAKER_MIN_UTTERANCE_SECONDS)
+# How much of the mic buffer a BARGE-IN keeps. A different concept from the
+# floor above -- that one asks "is this enough audio to score?", this one asks
+# "where did the barge-in utterance start?" -- and deliberately NOT derived from
+# it, nor operator-tunable. The floor may legitimately be set to 0 (an opt-out),
+# and voice.py trims with `del buf[:-onset]`, where `del buf[:-0]` is a NO-OP:
+# sharing the constant would silently retire the trim and leave the model's
+# whole speaking time in front of the utterance being scored. Same trap the mic
+# window carries a guard for; it must not come back through a coupling. Clamped
+# into (0, the mic window] so it is always both positive and reachable.
+SPEAKER_BARGE_IN_ONSET_BYTES = min(
+    max(1, _utterance_bytes(0.5)), SPEAKER_UTTERANCE_MAX_BYTES
+)
 TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to

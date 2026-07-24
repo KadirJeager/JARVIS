@@ -1010,7 +1010,7 @@ async def test_a_barge_in_turn_does_not_run_the_fallback(shape):
     assert len(speaker.calls) == 1, (
         f"the barge-in turn verified twice ({shape}) -- the second call scored "
         f"{speaker.calls[1][1][:16]!r}..., audio buffered while the model spoke")
-    assert bytes(bridge._utterance) == barge_in_audio[-config.SPEAKER_MIN_UTTERANCE_BYTES:], (
+    assert bytes(bridge._utterance) == barge_in_audio[-config.SPEAKER_BARGE_IN_ONSET_BYTES:], (
         "the barge-in utterance was dropped instead of left, trimmed to its "
         "onset window, for its own boundary")
     assert bridge._verified_this_turn is False, "the next turn must still verify"
@@ -1120,8 +1120,8 @@ async def test_a_barge_in_keeps_only_the_onset_not_the_model_s_speaking_time():
                                 speaker_service=speaker, presence="locked"))
     bridge._utterance = bytearray(b"turn-one-audio")
 
-    model_time_noise = b"\x00" * (config.SPEAKER_MIN_UTTERANCE_BYTES * 4)
-    onset = b"\x11\x22" * config.SPEAKER_MIN_UTTERANCE_BYTES
+    model_time_noise = b"\x00" * (config.SPEAKER_BARGE_IN_ONSET_BYTES * 4)
+    onset = b"\x11\x22" * config.SPEAKER_BARGE_IN_ONSET_BYTES
 
     async def turn():
         yield _make_event(input_transcription=FakeTranscription("bir", finished=True))
@@ -1131,12 +1131,57 @@ async def test_a_barge_in_keeps_only_the_onset_not_the_model_s_speaking_time():
     await bridge._pump_events(turn(), FakeWS([]))
 
     kept = bytes(bridge._utterance)
-    assert len(kept) == config.SPEAKER_MIN_UTTERANCE_BYTES, (
+    assert len(kept) == config.SPEAKER_BARGE_IN_ONSET_BYTES, (
         f"kept {len(kept)} bytes of the {len(model_time_noise + onset)} buffered "
         "at the barge-in -- the model's speaking time is still in front of the "
         "barge-in utterance")
-    assert kept == onset[-config.SPEAKER_MIN_UTTERANCE_BYTES:], (
+    assert kept == onset[-config.SPEAKER_BARGE_IN_ONSET_BYTES:], (
         "the kept window is not the most recent audio")
+
+
+@pytest.mark.asyncio
+async def test_the_barge_in_onset_window_is_its_own_positive_constant(monkeypatch):
+    """The onset window and the fallback's minimum length are two DIFFERENT
+    concepts that happen to share a default. Deriving the trim from the floor
+    couples them, and the floor is operator-tunable down to 0 -- a documented,
+    deliberate opt-out. `del buf[:-0]` is `del buf[:0]`, a NO-OP, so that
+    setting would silently retire the trim and put the model's whole speaking
+    time back in front of the barge-in utterance.
+
+    This is the same `del buf[:-0]` trap the mic window was already fixed for;
+    it came back through the coupling, not through the arithmetic. The onset
+    window is therefore its own constant, always positive, and not reachable
+    from that env var at all.
+    """
+    import importlib
+
+    # RELOAD, not monkeypatch: the coupling this guards against happens at
+    # IMPORT time, so rebinding the floor on the already-imported module cannot
+    # see it. The env var has to be in place before the constants are computed.
+    monkeypatch.setenv("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS", "0")
+    try:
+        importlib.reload(config)
+        assert config.SPEAKER_MIN_UTTERANCE_BYTES == 0, "the opt-out did not take effect"
+        assert config.SPEAKER_BARGE_IN_ONSET_BYTES > 0, (
+            "the onset window collapsed to 0 with the floor: `del buf[:-0]` is a "
+            "no-op, so a barge-in would keep the model's whole speaking time")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    buffered = b"\x00" * (config.SPEAKER_BARGE_IN_ONSET_BYTES * 3)
+    bridge._utterance = bytearray(buffered)
+
+    async def barge_in():
+        yield _make_event(interrupted=True)
+
+    await bridge._pump_events(barge_in(), FakeWS([]))
+    assert len(bridge._utterance) == config.SPEAKER_BARGE_IN_ONSET_BYTES, (
+        "with the floor opted out the barge-in trim became a no-op: the whole "
+        f"{len(buffered)}-byte buffer survived")
 
 
 @pytest.mark.asyncio

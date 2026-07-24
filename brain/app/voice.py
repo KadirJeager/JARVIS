@@ -238,7 +238,10 @@ class VoiceBridge:
                 # hundred ms of speech onset, so the tail is the utterance and
                 # everything before it is model-time room noise -- which
                 # speaker.embed would average straight into the embedding.
-                del self._utterance[:-config.SPEAKER_MIN_UTTERANCE_BYTES]
+                # ONSET, not the fallback floor: they are different questions
+                # and the floor is tunable to 0, which would make this a no-op
+                # (see config.SPEAKER_BARGE_IN_ONSET_BYTES).
+                del self._utterance[:-config.SPEAKER_BARGE_IN_ONSET_BYTES]
             if getattr(event, "turn_complete", False):
                 await ws.send_text(json.dumps(vp.evt_turn_complete()))
                 # Fallback: the model never sent a finished input transcription
