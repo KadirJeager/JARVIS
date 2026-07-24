@@ -1,13 +1,29 @@
 package com.jarvis.ui.theme
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
-/**
- * Minimal Material3 wrapper. The full Jarvis palette/typography arrives in Task 6
- * (frontend-design); for now this just establishes the theming seam.
- */
+private val JarvisColorScheme = darkColorScheme(
+    primary = JarvisCyan,
+    onPrimary = JarvisOnAccent,
+    secondary = JarvisViolet,
+    onSecondary = JarvisOnAccent,
+    background = JarvisBg,
+    onBackground = JarvisTextPrimary,
+    surface = JarvisSurface,
+    onSurface = JarvisTextPrimary,
+    surfaceVariant = JarvisSurfaceHigh,
+    onSurfaceVariant = JarvisTextMuted,
+    error = JarvisError,
+)
+
+/** Dark-first Jarvis theme built from the KJ logo palette. */
 @Composable
 fun JarvisTheme(content: @Composable () -> Unit) {
-    MaterialTheme(content = content)
+    MaterialTheme(
+        colorScheme = JarvisColorScheme,
+        typography = JarvisTypography,
+        content = content,
+    )
 }
