@@ -45,6 +45,13 @@ class _OneShotRunner:
 
     def run_live(self, **kwargs):
         async def events():
+            # TODO(debt): wall-clock sleep standing in for the network
+            # round-trip a real Gemini live transcript always has (see the
+            # class docstring above for why a zero-delay fake races
+            # VoiceBridge.run()'s concurrent mic-pump task and breaks this
+            # test). 0.05s has been reliable so far but is a wall-clock
+            # assumption, not a guarantee -- raise it if this ever flakes
+            # under CI load.
             await asyncio.sleep(0.05)
 
             class T:

@@ -63,6 +63,16 @@ def test_parse_hello_missing_token_raises():
         parse_hello('{"device_hint":"phone"}')
 
 
+def test_parse_hello_empty_token_raises():
+    with pytest.raises(ValueError):
+        parse_hello(json.dumps({"token": ""}))
+
+
+def test_parse_hello_non_str_token_raises():
+    with pytest.raises(ValueError):
+        parse_hello(json.dumps({"token": 123}))
+
+
 def test_evt_speaker_shape():
     assert evt_speaker("user", True, 0.87) == {
         "type": "speaker", "role": "user", "verified": True, "score": 0.87,

@@ -676,3 +676,37 @@ async def test_run_does_not_touch_session_state_without_speaker_service():
     ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
     bridge = VoiceBridge(runner=NoEvents(), session_service=Sessions())  # no speaker_service
     await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_run_with_speaker_service_and_stateless_session_does_not_raise():
+    """The test above proves the trust-init block is skipped when
+    speaker_service is None -- it never actually forces execution INTO the
+    `getattr(self.session, "state", None)` guard. Here speaker_service IS set
+    (forcing entry into that branch) while the session still has no `.state`
+    attribute at all: a bare `self.session.state[...] = level` would raise
+    AttributeError, so this is the combination that makes the getattr guard
+    load-bearing rather than dead defensive code."""
+
+    class Sessions:
+        async def get_session(self, **k):
+            return object()          # no .state attribute
+
+        async def create_session(self, **k):
+            return object()
+
+    class NoEvents:
+        def run_live(self, **kwargs):
+            async def events():
+                return
+                yield  # pragma: no cover
+
+            return events()
+
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    bridge = VoiceBridge(
+        runner=NoEvents(), session_service=Sessions(),
+        speaker_service=FakeSpeaker((True, 0.9)),
+        presence="locked", device_hint="phone",
+    )
+    await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)  # must not raise

@@ -82,3 +82,31 @@ def test_enroll_wraps_failure_as_502(enroll_client, monkeypatch):
     assert r.status_code == 502
     assert r.json()["detail"] == "Ses kaydı işlenemedi, tekrar dene"
     assert load_profile(db, "kadir@example.com").anchors == []
+
+
+def test_enroll_final_read_failure_is_502_not_500(enroll_client, monkeypatch):
+    """The endpoint's final speaker_store.load_profile() call (to compute the
+    returned anchor count) used to sit OUTSIDE the try/except that converts
+    failures into the Turkish 502 -- so a transient Firestore error on THAT
+    specific read (embed + enroll_anchors both already succeeded) escaped as
+    a raw, unhandled 500 instead of the same 502 pattern every other failure
+    in this endpoint gets. Only the SECOND load_profile call (the endpoint's
+    own final read) is made to fail; the FIRST call (enroll_anchors' internal
+    load-then-extend, called via the same module-level name) must still
+    succeed, isolating the exact line under test."""
+    c, db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+
+    real_load_profile = main_mod.speaker_store.load_profile
+    calls = {"n": 0}
+
+    def flaky_load_profile(db_, user_id):
+        calls["n"] += 1
+        if calls["n"] > 1:            # 1st call = inside enroll_anchors (must succeed)
+            raise RuntimeError("firestore hiccup on final read")
+        return real_load_profile(db_, user_id)
+
+    monkeypatch.setattr(main_mod.speaker_store, "load_profile", flaky_load_profile)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 502
+    assert r.json()["detail"] == "Ses kaydı işlenemedi, tekrar dene"

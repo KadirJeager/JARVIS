@@ -226,10 +226,10 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
     try:
         vecs = [speaker.embed(base64.b64decode(clip)) for clip in req.clips]
         speaker_store.enroll_anchors(_enroll_db(), email, vecs)
+        total = len(speaker_store.load_profile(_enroll_db(), email).anchors)
     except Exception:
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
-    total = len(speaker_store.load_profile(_enroll_db(), email).anchors)
     return {"anchors": total}
 
 

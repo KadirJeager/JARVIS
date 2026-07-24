@@ -21,3 +21,9 @@ def test_locked_voice_match_is_medium():
 
 def test_locked_voice_mismatch_is_low():
     assert assess(TrustContext(auth_verified=True, presence="ambient", voice_score=0.1), TH) == LOW
+
+def test_locked_voice_score_equal_to_threshold_is_medium():
+    """Inclusive boundary: score == accept_threshold must land on MEDIUM (the
+    `>=` branch), not LOW. A `>=` -> `>` regression in assess() would flip
+    this single case to LOW without affecting any other existing test."""
+    assert assess(TrustContext(auth_verified=True, presence="locked", voice_score=TH), TH) == MEDIUM

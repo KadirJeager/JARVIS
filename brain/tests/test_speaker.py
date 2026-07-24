@@ -44,6 +44,22 @@ def test_score_top_k_mean_not_max():
     assert abs(score - 0.9) < 0.001, f"Expected mean ~0.9, got {score}"
     assert score != 1.0  # Ensure it's not max
 
+def test_score_top_k_truncates_low_similarity_in_larger_gallery():
+    """The existing top_k_mean_not_max test above uses a gallery of exactly 2
+    with top_k=2, so "mean of top-k" and "mean of the whole gallery" are
+    indistinguishable there. Here the gallery has 3 vectors and top_k=2, with
+    the third vector's similarity CLEARLY lower (0.0, orthogonal) -- proving
+    it is genuinely excluded, not just coincidentally absent."""
+    v1 = [1.0, 0.0, 0.0]
+    v2 = [0.8, 0.6, 0.0]  # cosine to query = 0.8 (as in test_score_top_k_mean_not_max)
+    v3 = [0.0, 1.0, 0.0]  # cosine to query = 0.0 -- clearly lower, must be dropped
+    query = [1.0, 0.0, 0.0]
+    p = SpeakerProfile(anchors=[v1, v2, v3], adaptive=[])
+    score = p.score(query, top_k=2)
+    assert abs(score - 0.9) < 0.001, f"Expected top-2 mean ~0.9, got {score}"
+    whole_gallery_mean = (1.0 + 0.8 + 0.0) / 3
+    assert abs(score - whole_gallery_mean) > 0.01  # v3 must not have diluted the mean
+
 def test_score_empty_gallery():
     """Empty gallery (no anchors, no adaptive) should score 0.0."""
     p = SpeakerProfile(anchors=[], adaptive=[])

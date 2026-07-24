@@ -98,3 +98,47 @@ def test_yellow_tool_blocked_when_trust_low():
     assert result is not None
     assert audit.entries[0]["decision"] == "confirm"
     assert audit.entries[0]["trust"] == trust.LOW
+
+
+def test_read_trust_empty_state_defaults_high():
+    """tool_context.state present but empty (falsy dict) -- the `if not
+    state` branch -- must default HIGH just like tool_context=None does."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    result = cb(_tool("get_user_profile"), {}, SimpleNamespace(state={}))
+    assert result is None
+    assert audit.entries[0]["trust"] == trust.HIGH
+
+
+def test_read_trust_state_get_raising_defaults_high():
+    """A truthy .state whose .get() raises (e.g. a malformed ADK State) must
+    be swallowed by _read_trust's except-Exception branch and default HIGH,
+    not propagate and break tool execution."""
+    class RaisingState:
+        def get(self, key, default=None):
+            raise RuntimeError("boom")
+
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    result = cb(_tool("get_user_profile"), {}, SimpleNamespace(state=RaisingState()))
+    assert result is None
+    assert audit.entries[0]["trust"] == trust.HIGH
+
+
+def test_green_zone_medium_trust_is_allowed():
+    """(GREEN, MEDIUM) matrix cell: not RED, not HIGH, not YELLOW -> allow."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    result = cb(_tool("get_user_profile"), {}, _ctx(trust.MEDIUM))
+    assert result is None
+    assert audit.entries[0]["decision"] == "allow"
+
+
+def test_red_zone_medium_trust_still_blocks():
+    """(RED, MEDIUM) matrix cell: RED must block regardless of trust level,
+    unlike YELLOW which only blocks below HIGH."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    result = cb(_tool("unknown_danger"), {}, _ctx(trust.MEDIUM))
+    assert result is not None and "onay" in result["result"].lower()
+    assert audit.entries[0]["decision"] == "block"

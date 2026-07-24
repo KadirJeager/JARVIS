@@ -43,7 +43,8 @@ def test_accepted_but_below_adapt_does_not_feed():
 
 def test_no_adapt_when_not_authed_kadir():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    _svc(db).identify("k", b"A", "phone", auth_is_kadir=False)      # high score but not authed
+    verified, score = _svc(db).identify("k", b"A", "phone", auth_is_kadir=False)  # high score but not authed
+    assert verified is True                     # verification is independent of the adapt auth-gate
     assert load_profile(db, "k").adaptive == []
 
 def test_score_exactly_at_accept_is_verified():
