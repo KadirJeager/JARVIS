@@ -183,16 +183,20 @@ class VoiceBridge:
                     )
 
 
-async def _handshake(ws: WebSocket) -> str | None:
-    """Read + verify the hello frame. Returns the verified email, or None if
-    the handshake did not complete (bad hello -> evt_error + close(4401)
-    already sent; client disconnect -> nothing sent, the peer is gone)."""
+async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
+    """Read + verify the hello frame. Returns (email, device_hint, presence),
+    or None if the handshake did not complete (bad hello -> evt_error +
+    close(4401) already sent; client disconnect -> nothing sent, the peer is
+    gone). device_hint/presence feed the risk-based trust fusion (spec §6,
+    §11) and default via vp.parse_hello when the client omits them."""
     try:
         hello = await ws.receive_text()
     except WebSocketDisconnect:
         return None
     try:
-        return verify_token_email(vp.parse_hello(hello))
+        parsed = vp.parse_hello(hello)
+        email = verify_token_email(parsed["token"])
+        return email, parsed["device_hint"], parsed["presence"]
     except (ValueError, PermissionError):
         await ws.send_text(json.dumps(vp.evt_error("Giriş doğrulanamadı")))
         await ws.close(code=4401)
@@ -202,9 +206,10 @@ async def _handshake(ws: WebSocket) -> str | None:
 @router.websocket("/ws/voice")
 async def ws_voice(ws: WebSocket) -> None:
     await ws.accept()
-    email = await _handshake(ws)
-    if email is None:
+    hs = await _handshake(ws)
+    if hs is None:
         return
+    email, device_hint, presence = hs
     from . import main
 
     try:
@@ -214,7 +219,11 @@ async def ws_voice(ws: WebSocket) -> None:
         # Starlette (which has no websocket exception handler) -- matching how
         # the text path wraps its _init() inside run_turn's caller.
         runner, sessions, memory = main.get_voice_runner_sessions_memory()
-        await VoiceBridge(runner, sessions, memory=memory).run(ws, user_id=email)
+        speaker_service = main.get_speaker_service()
+        await VoiceBridge(
+            runner, sessions, memory=memory, speaker_service=speaker_service,
+            device_hint=device_hint, presence=presence,
+        ).run(ws, user_id=email)
     except Exception:
         logging.exception("voice bridge failed for %s", email)
         await ws.send_text(json.dumps(vp.evt_error("Sesli oturum düştü, tekrar bağlan")))

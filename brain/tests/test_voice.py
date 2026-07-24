@@ -374,10 +374,24 @@ class FakeHandshakeWS:
 async def test_handshake_valid_hello_returns_email(monkeypatch):
     monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
     ws = FakeHandshakeWS(text=json.dumps({"token": "good-token"}))
-    email = await _handshake(ws)
+    email, *_ = await _handshake(ws)
     assert email == "user@example.com"
     assert ws.sent == []
     assert ws.closed_with is None
+
+
+@pytest.mark.asyncio
+async def test_handshake_returns_device_hint_and_presence_from_hello(monkeypatch):
+    """_handshake's contract grew from `email` to `(email, device_hint,
+    presence)` (Task 10) so the trust-fusion wiring in ws_voice has real
+    values to pass into VoiceBridge -- this pins the tuple order and that the
+    values actually come from the parsed hello, not swapped or hardcoded."""
+    monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
+    ws = FakeHandshakeWS(
+        text=json.dumps({"token": "good-token", "device_hint": "headset", "presence": "locked"})
+    )
+    email, device_hint, presence = await _handshake(ws)
+    assert (email, device_hint, presence) == ("user@example.com", "headset", "locked")
 
 
 @pytest.mark.asyncio

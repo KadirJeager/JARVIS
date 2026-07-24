@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -10,7 +11,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, voice
+from . import config, messages, speaker, speaker_store, voice
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -26,6 +27,7 @@ _session_service = InMemorySessionService()
 _memory = None
 _messages: "messages.MessageStore | None" = None
 _voice_runner: Runner | None = None
+_speaker_service: "speaker.SpeakerService | None" = None
 
 
 def _init() -> None:
@@ -46,6 +48,31 @@ def _init() -> None:
         agent=build_agent(_memory, FirestoreAudit(db)),
         session_service=_session_service,
     )
+
+
+def _enroll_db():
+    """Firestore client accessor for speaker enrollment/identification: reuses
+    the SAME client Memory already holds (_init() is idempotent), so this
+    never opens a second Firestore connection."""
+    _init()
+    return _memory.db
+
+
+def get_speaker_service() -> "speaker.SpeakerService":
+    """Lazy singleton, mirroring _init_voice()'s pattern: built once per
+    process from config's speaker thresholds, reused by every /ws/voice
+    connection for live speaker identification (enroll below is a separate,
+    simpler embed+store path that doesn't need a SpeakerService)."""
+    global _speaker_service
+    if _speaker_service is None:
+        _speaker_service = speaker.SpeakerService(
+            _enroll_db(),
+            accept=config.SPEAKER_ACCEPT_THRESHOLD,
+            adapt=config.SPEAKER_ADAPT_THRESHOLD,
+            top_k=config.SPEAKER_TOPK,
+            cap=config.SPEAKER_ADAPTIVE_CAP,
+        )
+    return _speaker_service
 
 
 def _init_voice() -> None:
@@ -145,6 +172,10 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class EnrollRequest(BaseModel):
+    clips: list[str]  # base64-encoded PCM16 mono 16kHz utterances
+
+
 # /healthz is intercepted by Google Frontend on run.app (returns Google's own
 # 404 before reaching the container) — the canonical health path is /api/health;
 # /healthz is kept for local convenience only.
@@ -186,6 +217,20 @@ async def history(session_id: str, email: str = Depends(require_user)):
             status_code=502,
             detail="Jarvis şu anda geçmişi getiremiyor (altyapı hatası). Az sonra tekrar dene.",
         )
+
+
+@app.post("/api/voice/enroll")
+async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
+    if not req.clips:
+        raise HTTPException(status_code=400, detail="En az bir ses klibi gerekli")
+    try:
+        vecs = [speaker.embed(base64.b64decode(clip)) for clip in req.clips]
+        speaker_store.enroll_anchors(_enroll_db(), email, vecs)
+    except Exception:
+        logging.exception("enroll: failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
+    total = len(speaker_store.load_profile(_enroll_db(), email).anchors)
+    return {"anchors": total}
 
 
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web")
