@@ -1,7 +1,7 @@
 import logging
 import os
 
-from . import live_model
+from . import live_model, voice_protocol
 
 MODEL_NAME = os.environ.get("JARVIS_MODEL", "gemini-flash-latest")
 # NOT a "-latest" native-audio alias on purpose: confirmed via live smoke test
@@ -70,3 +70,104 @@ TOOL_ZONES = {
     "update_user_profile": ZONE_YELLOW,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
+
+# Speaker identity (Katman 2b Dilim 3a) — cosine thresholds are starting
+# estimates, calibrated after enrollment (spec §15).
+SPEAKER_ACCEPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ACCEPT", "0.35"))
+SPEAKER_ADAPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ADAPT", "0.60"))
+SPEAKER_TOPK = int(os.environ.get("JARVIS_SPEAKER_TOPK", "3"))
+SPEAKER_ADAPTIVE_CAP = int(os.environ.get("JARVIS_SPEAKER_ADAPTIVE_CAP", "20"))
+# Rolling mic-buffer window kept for the next speaker verification. The buffer
+# is drained at a turn boundary, but a turn boundary is NOT guaranteed to
+# arrive, so the window is what bounds memory (and inference time). 10 s is far
+# more audio than ECAPA needs; the thresholds above were calibrated on ~3 s.
+_DEFAULT_UTTERANCE_SECONDS = 10.0
+
+
+def _utterance_bytes(seconds: float) -> int:
+    """Seconds of PCM16 mono at the contract's input rate = 2 bytes per sample."""
+    return int(seconds * voice_protocol.AUDIO_IN_RATE * 2)
+
+
+def _effective_utterance_seconds(seconds: float) -> float:
+    """Reject a window that would round down to a non-positive byte cap.
+
+    A 0 (or negative, or sub-millisecond) setting does NOT "turn the cap off"
+    in any useful sense: voice.py drains the buffer with `del buf[:-cap]`, and
+    `del buf[:-0]` is `del buf[:0]` -- a NO-OP. The bound would silently vanish
+    and the buffer would grow again at AUDIO_IN_RATE*2 = 32 KB/s (~115 MB/h)
+    inside a process that already carries torch. Refuse the value loudly and
+    keep the documented default so the invariant "the cap is positive" holds
+    for every consumer of SPEAKER_UTTERANCE_MAX_BYTES."""
+    if _utterance_bytes(seconds) > 0:
+        return seconds
+    logging.warning(
+        "config: JARVIS_SPEAKER_UTTERANCE_SECONDS=%r yields a %d-byte mic window, "
+        "which would disable the bound entirely; falling back to %.1f s",
+        seconds, _utterance_bytes(seconds), _DEFAULT_UTTERANCE_SECONDS,
+    )
+    return _DEFAULT_UTTERANCE_SECONDS
+
+
+SPEAKER_UTTERANCE_SECONDS = _effective_utterance_seconds(
+    float(os.environ.get("JARVIS_SPEAKER_UTTERANCE_SECONDS", _DEFAULT_UTTERANCE_SECONDS))
+)
+SPEAKER_UTTERANCE_MAX_BYTES = _utterance_bytes(SPEAKER_UTTERANCE_SECONDS)
+# FLOOR for the turn_complete FALLBACK verification only (voice.py). That path
+# fires when no finished input transcription arrived, so it has no positive
+# signal that the buffer holds a whole utterance -- it can be room noise picked
+# up after the real utterance was already scored and drained. Scoring a
+# fragment against thresholds calibrated on ~3 s clips yields an arbitrary
+# verdict, and an unverified verdict is not neutral: it fuses to LOW under
+# locked/ambient. The transcription path deliberately has NO floor -- there
+# Gemini has told us the utterance is complete, and short commands ("evet")
+# must still be verified.
+_DEFAULT_MIN_UTTERANCE_SECONDS = 0.5
+
+
+def _effective_min_utterance_seconds(seconds: float) -> float:
+    """Keep the floor inside [0, the rolling window], loudly.
+
+    Its sibling JARVIS_SPEAKER_UTTERANCE_SECONDS is validated at load, and this
+    one needs it for the same reason -- both ends misbehave silently:
+    a negative value is a floor no buffer can be below (the guard is simply
+    gone), and a value ABOVE the mic window is a floor no buffer can ever
+    REACH, which kills the fallback outright: every turn whose finished
+    transcription never arrives then passes unverified. That second one fails
+    OPEN, so it must not be reachable by a typo."""
+    if seconds < 0:
+        logging.warning(
+            "config: JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS=%r is negative, which "
+            "removes the fallback's fragment guard; falling back to %.1f s",
+            seconds, _DEFAULT_MIN_UTTERANCE_SECONDS,
+        )
+        return _DEFAULT_MIN_UTTERANCE_SECONDS
+    if _utterance_bytes(seconds) > SPEAKER_UTTERANCE_MAX_BYTES:
+        logging.warning(
+            "config: JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS=%r exceeds the %.1f s mic "
+            "window, so the turn_complete fallback could never fire; clamping to "
+            "the window",
+            seconds, SPEAKER_UTTERANCE_SECONDS,
+        )
+        return SPEAKER_UTTERANCE_SECONDS
+    return seconds
+
+
+SPEAKER_MIN_UTTERANCE_SECONDS = _effective_min_utterance_seconds(
+    float(os.environ.get("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS",
+                         _DEFAULT_MIN_UTTERANCE_SECONDS))
+)
+SPEAKER_MIN_UTTERANCE_BYTES = _utterance_bytes(SPEAKER_MIN_UTTERANCE_SECONDS)
+# How much of the mic buffer a BARGE-IN keeps. A different concept from the
+# floor above -- that one asks "is this enough audio to score?", this one asks
+# "where did the barge-in utterance start?" -- and deliberately NOT derived from
+# it, nor operator-tunable. The floor may legitimately be set to 0 (an opt-out),
+# and voice.py trims with `del buf[:-onset]`, where `del buf[:-0]` is a NO-OP:
+# sharing the constant would silently retire the trim and leave the model's
+# whole speaking time in front of the utterance being scored. Same trap the mic
+# window carries a guard for; it must not come back through a coupling. Clamped
+# into (0, the mic window] so it is always both positive and reachable.
+SPEAKER_BARGE_IN_ONSET_BYTES = min(
+    max(1, _utterance_bytes(0.5)), SPEAKER_UTTERANCE_MAX_BYTES
+)
+TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to

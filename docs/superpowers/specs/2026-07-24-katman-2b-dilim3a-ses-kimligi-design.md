@@ -115,7 +115,7 @@ voice_score   : float | None # voiceprint eşleşmesi; None = ses yok (text chat
 
 **`TrustAssessor.assess(ctx) -> TrustLevel`** (`HIGH | MEDIUM | LOW`) — küçük, saf, test edilebilir füzyon fonksiyonu:
 - `auth_verified` taban şart (yoksa bağlantı kurulmaz).
-- `presence == foreground` (kilit açık) → **HIGH** (voice_score ne olursa olsun) — gündelik hayat leniency'si; voice yalnızca etiketler + besler.
+- `presence == foreground` (kilit açık) → **HIGH** (voice_score ne olursa olsun) — gündelik hayat leniency'si; voice yalnızca etiketler + besler. **Uyarı:** `presence` istemci beyanıdır, sunucuda doğrulanamaz → bu kural ses doğrulamasının token sahibi tarafından atlanabilmesi anlamına gelir; sınırın tamamı için §12'nin ilgili maddesine bak.
 - `presence in {locked, ambient}` → voice_score karar verir: eşleşme → HIGH/MEDIUM, eşleşmeme → **LOW**.
 - `voice_score is None` (text) → auth + presence'a dayan (text = foreground/authed → HIGH).
 - **Yeni sinyal eklemek = füzyona bir satır**; mimari değişmez.
@@ -138,6 +138,8 @@ Politika = **2 eksenin fonksiyonu**: mevcut **zone** (yeşil/sarı/kırmızı = 
 - Audit'e `trust_level`, `voice_score`, `presence`, `device_hint` de yazılır.
 
 **Sinyal taşıma mekanizması (plan aşamasında ADK kaynağından doğrulanacak):** voice bridge utterance başına `TrustContext` hesaplar; o turdaki tool call'lara `TrustLevel`'i ulaştırır. Aday mekanizmalar: (a) ADK session state (`tool_context.state`), (b) session-anahtarlı bir trust holder'ı `policy_callback` closure'ının okuması. Kesin seçim ADK 1.36.2 `run_live` event sıralaması + state propagation semantiğine göre plan aşamasında netleşir (bu projenin `append_event`/`_is_other_agent_reply`'ı kaynaktan doğruladığı gibi). Default HIGH garantisi, mekanizma ne olursa olsun text yolunu korur.
+
+> **KARAR (2026-07-24, kurulu google-adk 1.36.2 kaynağından doğrulandı): (b) seçildi.** (a) mekanik olarak **imkânsız**: `InMemorySessionService.get_session()` saklanan session'ı değil bir **kopyasını** döner (`_get_session_impl` → `_copy_session`, in_memory_session_service.py:186-202 / :54-58 / :48-51), `Runner.run_live(user_id=…, session_id=…)` da **kendi** kopyasını ayrıca çeker (runners.py:1049-1054, :401) ve invocation context'i onun üzerine kurar (:1055-1059); `ToolContext` = `Context` (tools/tool_context.py:27) ve `Context.__init__` `State(value=invocation_context.session.state, …)` bağlar (agents/context.py:69-72). Yani bridge'in `session.state` yazısı policy'ye **hiç ulaşmaz** (ampirik: bridge `{'trust_level': 'LOW'}` vs runner `{}` → default HIGH). `run_live(session=…)` bizim nesnemizi verirdi ama 1.36.2'de **deprecated** (runners.py:1016-1017, :1042-1048) → teknik borç, kullanılmadı. Uygulama: `app/voice_trust.py`, `(app_name, user_id, session_id)` ile anahtarlanmış process-içi holder; policy tarafı anahtarı **public** `tool_context.session` üzerinden okur (agents/readonly_context.py:59-62 + sessions/session.py:39-45). Provider **yalnızca** voice runner'ın agent'ına verilir (`main._init_voice`), böylece text yolu yapısal olarak etkilenmez.
 
 ## 8. Bileşen sınırları (temiz mimari)
 
@@ -183,6 +185,7 @@ Politika = **2 eksenin fonksiyonu**: mevcut **zone** (yeşil/sarı/kırmızı = 
 - **Mahremiyet:** voiceprint biyometrik → yalnızca Kadir'in kendi Firestore projesinde, GCP-dışına gitmez (Approach A sebebi). **Ham enrollment sesi saklanmaz**, yalnızca embedding.
 - **DATA-log (CLAUDE.md ilkesi):** utterance başına `voice_score`, eşikler, `TrustLevel`, `presence`, `device_hint`, adapt-edildi-mi, karar → tek çalıştırmada lokalize.
 - **Zaman aşımı/hata:** model yükleme/embed hatası → utterance doğrulanamadı sayılır (`voice_score=None` gibi davranılmaz; `verified=False` + log), oturum düşmez; ses akışı bozulmaz.
+- **`presence` istemci beyanıdır ve DOĞRULANAMAZ — ses, sert ikinci faktör DEĞİL, bir risk sinyalidir.** `presence` (`foreground | locked | ambient`) istemcinin hello frame'inden gelir ([voice_protocol.py:43-47](../../../brain/app/voice_protocol.py#L43-L47)); sunucu tarafında bunu doğrulayacak hiçbir kanıt yok. §6'daki `presence == foreground → HIGH` kuralı koşulsuz olduğundan ([trust.py:29-30](../../../brain/app/trust.py#L29-L30)), **Kadir'in ID token'ını eline geçiren biri her istekte `presence: "foreground"` beyan ederek koşulsuz `HIGH` alır ve voiceprint doğrulamasını tamamen atlar** — sesi taklit etmesi bile gerekmez. Yani bu tasarımda güvenlik sınırı **ID token'dır**; voiceprint kötüye kullanımın maliyetini artırır, audit'i zenginleştirir ve `locked/ambient` beyan edildiğinde kademelendirir, ama tek başına erişimi kapatmaz. Sesin gerçek ikinci faktör olabilmesi için sunucu tarafında doğrulanabilir bir presence/attestation sinyali gerekir; bu dilimde yoktur. Bu bilinçli bir kabul: §12'nin ilk maddesindeki "Kadir asla kilitlenmez" ilkesiyle aynı madalyonun diğer yüzü.
 
 ## 13. Test stratejisi (production-grade)
 

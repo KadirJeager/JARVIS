@@ -1,3 +1,5 @@
+import asyncio
+import base64
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -10,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, voice
+from . import config, messages, speaker, voice, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -26,6 +28,7 @@ _session_service = InMemorySessionService()
 _memory = None
 _messages: "messages.MessageStore | None" = None
 _voice_runner: Runner | None = None
+_speaker_service: "speaker.SpeakerService | None" = None
 
 
 def _init() -> None:
@@ -46,6 +49,31 @@ def _init() -> None:
         agent=build_agent(_memory, FirestoreAudit(db)),
         session_service=_session_service,
     )
+
+
+def _enroll_db():
+    """Firestore client accessor for speaker enrollment/identification: reuses
+    the SAME client Memory already holds (_init() is idempotent), so this
+    never opens a second Firestore connection."""
+    _init()
+    return _memory.db
+
+
+def get_speaker_service() -> "speaker.SpeakerService":
+    """Lazy singleton, mirroring _init_voice()'s pattern: built once per
+    process from config's speaker thresholds, reused by every /ws/voice
+    connection for live speaker identification (enroll below is a separate,
+    simpler embed+store path that doesn't need a SpeakerService)."""
+    global _speaker_service
+    if _speaker_service is None:
+        _speaker_service = speaker.SpeakerService(
+            _enroll_db(),
+            accept=config.SPEAKER_ACCEPT_THRESHOLD,
+            adapt=config.SPEAKER_ADAPT_THRESHOLD,
+            top_k=config.SPEAKER_TOPK,
+            cap=config.SPEAKER_ADAPTIVE_CAP,
+        )
+    return _speaker_service
 
 
 def _init_voice() -> None:
@@ -71,7 +99,13 @@ def _init_voice() -> None:
     db = firestore.Client()
     _voice_runner = Runner(
         app_name=APP_NAME,
-        agent=build_agent(_memory, FirestoreAudit(db), model=config.resolve_live_model()),
+        agent=build_agent(
+            _memory, FirestoreAudit(db), model=config.resolve_live_model(),
+            # ONLY the voice agent gets a trust provider: identity signals exist
+            # only for live voice connections, and this keeps the text runner
+            # structurally unable to see them (app/voice_trust.py).
+            trust_provider=voice_trust.lookup,
+        ),
         session_service=_session_service,
     )
 
@@ -145,6 +179,10 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class EnrollRequest(BaseModel):
+    clips: list[str]  # base64-encoded PCM16 mono 16kHz utterances
+
+
 # /healthz is intercepted by Google Frontend on run.app (returns Google's own
 # 404 before reaching the container) — the canonical health path is /api/health;
 # /healthz is kept for local convenience only.
@@ -186,6 +224,41 @@ async def history(session_id: str, email: str = Depends(require_user)):
             status_code=502,
             detail="Jarvis şu anda geçmişi getiremiyor (altyapı hatası). Az sonra tekrar dene.",
         )
+
+
+@app.post("/api/voice/enroll")
+async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
+    if not req.clips:
+        raise HTTPException(status_code=400, detail="En az bir ses klibi gerekli")
+    try:
+        # OFF THE EVENT LOOP, for the same reason the live verify path is
+        # (app/voice.py): speaker.embed is real ECAPA inference plus, on the
+        # first call in a process, the ~89 MB lazy model load -- seconds of
+        # blocking CPU, multiplied by the number of clips. Run inline in this
+        # async endpoint it stalls the whole loop, and jarvis-brain serves
+        # /api/chat and /ws/voice from that same loop.
+        vecs = await asyncio.to_thread(
+            lambda: [speaker.embed(base64.b64decode(clip)) for clip in req.clips]
+        )
+        # Via SpeakerService, NOT speaker_store directly: enrollment's
+        # load->extend->save must share the gallery lock with identify()'s
+        # adapt path, which now really can run concurrently in a worker thread
+        # (see SpeakerService.enroll).
+        #
+        # ALSO off the loop, and for a reason the embedding above does not
+        # cover: sharing that lock means this call can BLOCK on it, and the
+        # holder is identify() in a worker thread, keeping it across two
+        # Firestore round-trips. Awaited inline, an enrollment landing during a
+        # live utterance would freeze the loop -- every WS connection and every
+        # /api/chat turn on this instance -- until those RPCs returned.
+        # get_speaker_service() is INSIDE the thread too: on the first call it
+        # builds the Firestore client (credential discovery, possibly a metadata
+        # server round-trip), which is not something to do on the loop either.
+        total = await asyncio.to_thread(lambda: get_speaker_service().enroll(email, vecs))
+    except Exception:
+        logging.exception("enroll: failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
+    return {"anchors": total}
 
 
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web")

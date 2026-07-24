@@ -23,18 +23,27 @@ class MainActivity : ComponentActivity() {
                 val state by vm.state.collectAsState()
                 val scope = rememberCoroutineScope()
 
-                // Boot: try silent re-auth; success flips to chat and loads history.
+                // Boot: try silent re-auth. Both outcomes must be reported -- the UI
+                // stays on the boot splash until one of them lands, so swallowing the
+                // failure would hang the app on the splash forever.
                 LaunchedEffect(Unit) {
                     if (container.authManager.silentSignIn().isSuccess) vm.onSignedIn()
+                    else vm.onSilentSignInFailed()
                 }
 
                 Nav(
                     state = state,
                     onSignIn = {
                         scope.launch {
-                            if (container.authManager.signIn(this@MainActivity).isSuccess) {
-                                vm.onSignedIn()
-                            }
+                            vm.onSignInStarted()
+                            val result = container.authManager.signIn(this@MainActivity)
+                            // The failure branch used to be absent entirely, so a
+                            // cancelled or failed credential flow left the button
+                            // looking simply broken.
+                            result.fold(
+                                onSuccess = { vm.onSignedIn() },
+                                onFailure = { vm.onSignInFailed(it.message) },
+                            )
                         }
                     },
                     onInput = vm::onInputChange,
