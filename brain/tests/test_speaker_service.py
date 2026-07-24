@@ -84,7 +84,8 @@ def test_adapt_gate_ignores_adaptive_samples_so_poisoning_cannot_ratchet():
     enroll_anchors(db, "k", [A])
     # simulate one already-landed attacker sample
     profile = load_profile(db, "k")
-    profile.adaptive.append({"vec": FAR, "device_hint": "phone", "ts": "t0"})
+    from app.speaker import make_sample
+    profile.adaptive.append(make_sample(FAR, "auto", "phone", "t0", "landed"))
     from app.speaker_store import save_profile
     save_profile(db, "k", profile)
 

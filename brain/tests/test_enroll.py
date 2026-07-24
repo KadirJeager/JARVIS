@@ -180,9 +180,9 @@ def test_enroll_persists_off_the_event_loop_too(enroll_client, monkeypatch):
     svc = main_mod.get_speaker_service()
     real_enroll_anchors = speaker_store_mod.enroll_anchors
 
-    def recording(db, user_id, vecs):
+    def recording(db, user_id, vecs, **kw):
         enroll_threads.append(threading.get_ident())
-        return real_enroll_anchors(db, user_id, vecs)
+        return real_enroll_anchors(db, user_id, vecs, **kw)
 
     monkeypatch.setattr("app.speaker_store.enroll_anchors", recording)
     assert svc is not None
@@ -211,11 +211,11 @@ def test_enroll_takes_the_same_gallery_lock_as_identify(enroll_client, monkeypat
     held = []
     real_enroll_anchors = speaker_store_mod.enroll_anchors
 
-    def checking_enroll_anchors(db_, user_id, vecs):
+    def checking_enroll_anchors(db_, user_id, vecs, **kw):
         # locked() is True from any thread while the lock is held; if enrollment
         # bypassed the service this callback would see it free.
         held.append(svc._gallery_lock.locked())
-        return real_enroll_anchors(db_, user_id, vecs)
+        return real_enroll_anchors(db_, user_id, vecs, **kw)
 
     monkeypatch.setattr(speaker_store_mod, "enroll_anchors", checking_enroll_anchors)
     r = c.post("/api/voice/enroll", json={"clips": [_clip()]})

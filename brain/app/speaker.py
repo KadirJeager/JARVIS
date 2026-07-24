@@ -2,9 +2,45 @@
 (Katman 2b Dilim 3a, spec §5). SpeakerProfile is PURE (no torch) so gallery
 math is unit-testable without the model; embed()/SpeakerService live below and
 lazily load torch."""
+import uuid
+from datetime import datetime, timezone
 from typing import Callable
 
 from .memory import _cosine_similarity  # DRY: reuse Katman-1 cosine
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_sample_id() -> str:
+    """Stable sample identity (spec §4.1): list position CANNOT be the id --
+    eviction shifts positions, and a client's "delete the 3rd sample" would hit
+    the wrong one. uuid in production, injectable in tests."""
+    return uuid.uuid4().hex
+
+
+def make_sample(vec, source, device_hint, ts, sample_id, label=None, note=None) -> dict:
+    """The ONE sample shape anchors and adaptive share (spec §4.1)."""
+    return {"id": sample_id, "vec": list(vec), "source": source, "ts": ts,
+            "device_hint": device_hint, "label": label, "note": note}
+
+
+def _normalize_sample(raw, default_source: str) -> dict:
+    """Accept the pre-3d shapes (bare vector for anchors, {vec, device_hint,
+    ts} for adaptive) and fill in the 3d fields. Backward reading only:
+    everything SAVED goes out as full samples."""
+    if isinstance(raw, dict):
+        return {
+            "id": raw.get("id") or new_sample_id(),
+            "vec": list(raw["vec"]),
+            "source": raw.get("source") or default_source,
+            "ts": raw.get("ts"),
+            "device_hint": raw.get("device_hint", "unknown"),
+            "label": raw.get("label"),
+            "note": raw.get("note"),
+        }
+    return make_sample(raw, default_source, "unknown", None, new_sample_id())
 
 
 class SpeakerProfile:
@@ -14,12 +50,12 @@ class SpeakerProfile:
     adaptation only ever grows/evicts the adaptive set (anchors are the anti-drift
     anchor). See spec §5."""
 
-    def __init__(self, anchors: list[list[float]], adaptive: list[dict]):
-        self.anchors = anchors
-        self.adaptive = adaptive
+    def __init__(self, anchors: list, adaptive: list):
+        self.anchors = [_normalize_sample(a, "enroll") for a in anchors]
+        self.adaptive = [_normalize_sample(a, "auto") for a in adaptive]
 
     def all_vectors(self) -> list[list[float]]:
-        return list(self.anchors) + [a["vec"] for a in self.adaptive]
+        return [s["vec"] for s in self.anchors] + [s["vec"] for s in self.adaptive]
 
     @staticmethod
     def _top_k_mean(vec: list[float], gallery: list[list[float]], top_k: int) -> float:
@@ -42,40 +78,45 @@ class SpeakerProfile:
         adaptive sample, their similarity to their OWN sample dominates the
         top-k and pushes every later attempt further above the gate. Anchors
         cannot be moved by adaptation, so this gate cannot be ratcheted."""
-        return self._top_k_mean(vec, list(self.anchors), top_k)
+        return self._top_k_mean(vec, [s["vec"] for s in self.anchors], top_k)
 
     def _evict_most_redundant(self) -> None:
-        """Drop the adaptive sample that contributes least NEW information: the
-        one whose nearest neighbour anywhere else in the gallery (anchors or
-        other adaptive samples) is closest. Ties break toward the oldest.
+        """Drop the AUTO adaptive sample that contributes least NEW information
+        (nearest neighbour anywhere else in the gallery is closest; ties break
+        toward the oldest). Manual samples are exempt: they are user-curated
+        (spec §5 -- their guarantee is revocability, so only an explicit DELETE
+        or a reject correction removes one), but they still count as
+        neighbours, so an auto near-duplicate OF a manual sample is redundant.
 
-        Spec §5 asks for diversity-preserving eviction explicitly, "salt recency
-        değil, çünkü recency drift'e açık": with pure recency, twenty utterances
-        from one channel evict every headset/tablet sample and the gallery stops
-        covering channels by itself. Redundancy-based eviction keeps the lone
-        sample from a rarely used device (nothing near it) and discards one of
-        the twenty near-duplicates instead."""
-        if not self.adaptive:
+        Spec §5 (3a) asks for diversity-preserving eviction explicitly: with
+        pure recency, twenty utterances from one channel evict every
+        headset/tablet sample and the gallery stops covering channels."""
+        auto_idx = [i for i, s in enumerate(self.adaptive) if s["source"] == "auto"]
+        if not auto_idx:
             return
-        anchors = list(self.anchors)
-        worst_i, worst_redundancy = 0, None
-        for i, sample in enumerate(self.adaptive):
-            others = anchors + [a["vec"] for j, a in enumerate(self.adaptive) if j != i]
-            # No neighbours at all -> nothing is redundant; -1.0 keeps it below
-            # any real cosine so such a sample is evicted last.
-            redundancy = max((_cosine_similarity(sample["vec"], o) for o in others), default=-1.0)
+        anchor_vecs = [s["vec"] for s in self.anchors]
+        worst_i, worst_redundancy = auto_idx[0], None
+        for i in auto_idx:
+            others = anchor_vecs + [a["vec"] for j, a in enumerate(self.adaptive) if j != i]
+            redundancy = max(
+                (_cosine_similarity(self.adaptive[i]["vec"], o) for o in others),
+                default=-1.0,
+            )
             if worst_redundancy is None or redundancy > worst_redundancy:
                 worst_i, worst_redundancy = i, redundancy
         self.adaptive.pop(worst_i)
 
-    def adapt(self, vec: list[float], device_hint: str, cap: int, now_fn: Callable[[], str]) -> None:
-        """Append a verified sample to the adaptive set, then evict down to cap
-        by redundancy (see _evict_most_redundant). Anchors are never touched.
-        Caller is responsible for the ADAPT-threshold + auth gating (see
-        SpeakerService)."""
-        self.adaptive.append({"vec": vec, "device_hint": device_hint, "ts": now_fn()})
-        while len(self.adaptive) > cap:
+    def adapt(self, vec: list[float], device_hint: str, cap: int,
+              now_fn: Callable[[], str], id_fn: Callable[[], str] = new_sample_id) -> str:
+        """Append a verified AUTO sample, then evict auto samples down to cap
+        (manual samples have their own cap and lifecycle -- Task 6 / spec §5).
+        Returns the new sample's id so the caller can link it from the
+        verification history (adapted_sample_id, spec §4.2)."""
+        sample = make_sample(vec, "auto", device_hint, now_fn(), id_fn())
+        self.adaptive.append(sample)
+        while sum(1 for s in self.adaptive if s["source"] == "auto") > cap:
             self._evict_most_redundant()
+        return sample["id"]
 
 
 import os
@@ -125,13 +166,7 @@ def embed(pcm: bytes) -> list[float]:
     return emb.squeeze().tolist()
 
 
-from datetime import datetime, timezone
-
 from . import speaker_store
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class SpeakerService:
@@ -141,11 +176,12 @@ class SpeakerService:
     without torch. Two thresholds create a poisoning-guard band: accept <= score
     < adapt means "trust it but don't learn from it" (spec §5)."""
 
-    def __init__(self, db, embed_fn=embed, now_fn=_utc_now,
+    def __init__(self, db, embed_fn=embed, now_fn=_utc_now, id_fn=new_sample_id,
                  accept: float = 0.35, adapt: float = 0.6, cap: int = 20, top_k: int = 3):
         self.db = db
         self.embed_fn = embed_fn
         self.now_fn = now_fn
+        self.id_fn = id_fn
         self.accept = accept
         self.adapt = adapt
         self.cap = cap
@@ -158,7 +194,8 @@ class SpeakerService:
         # part -- embedding -- stays outside it and fully parallel.
         self._gallery_lock = threading.Lock()
 
-    def enroll(self, user_id: str, vecs: list[list[float]]) -> int:
+    def enroll(self, user_id: str, vecs: list[list[float]],
+               device_hint: str = "unknown") -> int:
         """Bootstrap enrollment (POST /api/voice/enroll) under the SAME lock
         identify() uses. Returns the anchor count actually persisted.
 
@@ -179,7 +216,10 @@ class SpeakerService:
         from the vectors we just sent, so the number returned to the client is
         the number Firestore actually holds."""
         with self._gallery_lock:
-            speaker_store.enroll_anchors(self.db, user_id, vecs)
+            speaker_store.enroll_anchors(
+                self.db, user_id, vecs,
+                device_hint=device_hint, now_fn=self.now_fn, id_fn=self.id_fn,
+            )
             return len(speaker_store.load_profile(self.db, user_id).anchors)
 
     def identify(self, user_id: str, pcm: bytes, device_hint: str,
@@ -197,7 +237,7 @@ class SpeakerService:
             verified = score >= self.accept
             adapted = anchor_score >= self.adapt and auth_is_kadir
             if adapted:
-                profile.adapt(vec, device_hint, self.cap, self.now_fn)
+                profile.adapt(vec, device_hint, self.cap, self.now_fn, self.id_fn)
                 speaker_store.save_profile(self.db, user_id, profile)
         import logging
         logging.info(

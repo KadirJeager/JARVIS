@@ -181,6 +181,7 @@ class ChatRequest(BaseModel):
 
 class EnrollRequest(BaseModel):
     clips: list[str]  # base64-encoded PCM16 mono 16kHz utterances
+    device_hint: str = "unknown"
 
 
 # /healthz is intercepted by Google Frontend on run.app (returns Google's own
@@ -254,7 +255,9 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         # get_speaker_service() is INSIDE the thread too: on the first call it
         # builds the Firestore client (credential discovery, possibly a metadata
         # server round-trip), which is not something to do on the loop either.
-        total = await asyncio.to_thread(lambda: get_speaker_service().enroll(email, vecs))
+        total = await asyncio.to_thread(
+            lambda: get_speaker_service().enroll(email, vecs, device_hint=req.device_hint)
+        )
     except Exception:
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")

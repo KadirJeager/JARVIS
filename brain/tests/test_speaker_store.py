@@ -14,14 +14,15 @@ def test_save_then_load_round_trips():
     save_profile(db, "kadir@example.com",
                  SpeakerProfile(anchors=[A], adaptive=[{"vec": B, "device_hint": "phone", "ts": "t"}]))
     p = load_profile(db, "kadir@example.com")
-    assert p.anchors == [A]
-    assert p.adaptive == [{"vec": B, "device_hint": "phone", "ts": "t"}]
+    assert [s["vec"] for s in p.anchors] == [A]
+    assert [s["vec"] for s in p.adaptive] == [B]
+    assert p.adaptive[0]["device_hint"] == "phone" and p.adaptive[0]["ts"] == "t"
 
 def test_enroll_anchors_appends():
     db = FakeDB()
     enroll_anchors(db, "kadir@example.com", [A, B])
     p = load_profile(db, "kadir@example.com")
-    assert p.anchors == [A, B]
+    assert [s["vec"] for s in p.anchors] == [A, B]
 
 def test_enroll_anchors_appends_to_pre_existing_anchors():
     """Starts from a NON-empty gallery -- an overwrite bug (anchors = vecs)
@@ -31,7 +32,7 @@ def test_enroll_anchors_appends_to_pre_existing_anchors():
     enroll_anchors(db, "kadir@example.com", [A])
     enroll_anchors(db, "kadir@example.com", [B])
     p = load_profile(db, "kadir@example.com")
-    assert p.anchors == [A, B]
+    assert [s["vec"] for s in p.anchors] == [A, B]
 
 def test_enroll_anchors_does_not_wipe_existing_adaptive():
     db = FakeDB()
@@ -39,15 +40,16 @@ def test_enroll_anchors_does_not_wipe_existing_adaptive():
                  SpeakerProfile(anchors=[A], adaptive=[{"vec": B, "device_hint": "phone", "ts": "t"}]))
     enroll_anchors(db, "kadir@example.com", [B])
     p = load_profile(db, "kadir@example.com")
-    assert p.anchors == [A, B]
-    assert p.adaptive == [{"vec": B, "device_hint": "phone", "ts": "t"}]
+    assert [s["vec"] for s in p.anchors] == [A, B]
+    assert [s["vec"] for s in p.adaptive] == [B]
+    assert p.adaptive[0]["device_hint"] == "phone" and p.adaptive[0]["ts"] == "t"
 
 def test_enroll_anchors_empty_list_is_safe_noop():
     db = FakeDB()
     enroll_anchors(db, "kadir@example.com", [A])
     enroll_anchors(db, "kadir@example.com", [])
     p = load_profile(db, "kadir@example.com")
-    assert p.anchors == [A]
+    assert [s["vec"] for s in p.anchors] == [A]
 
 def test_profiles_are_user_keyed():
     db = FakeDB()
