@@ -100,9 +100,10 @@ and requires the same Google ID token / allowlist auth as `/api/chat`.
 | Variable | Default | Meaning |
 |---|---|---|
 | `JARVIS_SPEAKER_ACCEPT` | `0.35` | Cosine threshold above which an utterance counts as verified |
-| `JARVIS_SPEAKER_ADAPT` | `0.60` | Cosine threshold above which a verified utterance also self-feeds the adaptive gallery (only when authed as Kadir) |
+| `JARVIS_SPEAKER_ADAPT` | `0.60` | Cosine threshold above which a verified utterance also self-feeds the adaptive gallery (only when authed as Kadir). Scored against the **immutable anchors only**, never the full gallery — see note below |
 | `JARVIS_SPEAKER_TOPK` | `3` | Number of top gallery similarities averaged into the score |
-| `JARVIS_SPEAKER_ADAPTIVE_CAP` | `20` | Max adaptive samples kept; oldest evicted first once over cap |
+| `JARVIS_SPEAKER_ADAPTIVE_CAP` | `20` | Max adaptive samples kept; once over cap the **most redundant** sample is evicted (nearest-neighbour), not the oldest |
+| `JARVIS_SPEAKER_UTTERANCE_SECONDS` | `10` | Rolling mic-buffer window kept for the next verification. A value that rounds down to ≤ 0 bytes is refused with a warning and falls back to the default (it would silently remove the bound, not disable it) |
 | `SPEAKER_MODEL_DIR` | `/tmp/spkrec-ecapa` (code default; the Dockerfile overrides this to `/opt/spkrec-ecapa`, where the model is baked in at build time — see Deploy notes below) | ECAPA model dir |
 
 Empirically measured separation on the committed fixtures (`tests/fixtures/`,
@@ -110,6 +111,28 @@ real LibriSpeech clips, see `tests/fixtures/README.md`): same-speaker cosine
 **0.7251**, different-speaker **0.1603** — a ~0.56 margin, which is why the
 defaults above (`accept=0.35`, `adapt=0.60`) sit where they do: comfortably
 below the observed same-speaker match and above the observed impostor score.
+
+**Two thresholds, two galleries.** `ACCEPT` is scored against the whole gallery
+(anchors ∪ adaptive) — that is the point of a gallery: it spans days, health and
+devices. `ADAPT` is scored against the **anchors only** (`SpeakerProfile.anchor_score`),
+because gating self-feeding on the full gallery is a poisoning ratchet: one
+adaptive sample that slipped in dominates its own top-k and pushes every later
+attempt further above the gate. Practical consequence for calibration: right
+after enrollment there are only 1–3 anchors, so a `0.60` gate against them is
+materially stricter than the same number against a grown gallery — expect
+self-feeding to start slowly and tune `JARVIS_SPEAKER_ADAPT` against measured
+anchor scores, not full-gallery scores.
+
+**Limitation — voice is a risk signal, not a hard second factor.** `presence`
+(`foreground` / `locked` / `ambient`) is asserted by the client in its WS hello
+and is **not verifiable server-side**, and `trust.assess` returns `HIGH`
+unconditionally for `foreground`. So anyone holding Kadir's Google ID token can
+simply send `presence: "foreground"` and get unconditional `HIGH` — voice
+verification is bypassed entirely, without needing to defeat the voiceprint.
+Speaker identity therefore raises the cost of misuse and annotates the audit
+trail; it does **not** gate access on its own. Treat the ID token as the
+security boundary. Making voice a real second factor would require a
+server-verifiable presence/attestation signal, which this slice does not have.
 
 ### Deploy notes (for when the owner approves — not executed by this repo)
 

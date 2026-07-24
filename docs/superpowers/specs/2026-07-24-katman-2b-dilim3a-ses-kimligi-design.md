@@ -115,7 +115,7 @@ voice_score   : float | None # voiceprint eşleşmesi; None = ses yok (text chat
 
 **`TrustAssessor.assess(ctx) -> TrustLevel`** (`HIGH | MEDIUM | LOW`) — küçük, saf, test edilebilir füzyon fonksiyonu:
 - `auth_verified` taban şart (yoksa bağlantı kurulmaz).
-- `presence == foreground` (kilit açık) → **HIGH** (voice_score ne olursa olsun) — gündelik hayat leniency'si; voice yalnızca etiketler + besler.
+- `presence == foreground` (kilit açık) → **HIGH** (voice_score ne olursa olsun) — gündelik hayat leniency'si; voice yalnızca etiketler + besler. **Uyarı:** `presence` istemci beyanıdır, sunucuda doğrulanamaz → bu kural ses doğrulamasının token sahibi tarafından atlanabilmesi anlamına gelir; sınırın tamamı için §12'nin ilgili maddesine bak.
 - `presence in {locked, ambient}` → voice_score karar verir: eşleşme → HIGH/MEDIUM, eşleşmeme → **LOW**.
 - `voice_score is None` (text) → auth + presence'a dayan (text = foreground/authed → HIGH).
 - **Yeni sinyal eklemek = füzyona bir satır**; mimari değişmez.
@@ -185,6 +185,7 @@ Politika = **2 eksenin fonksiyonu**: mevcut **zone** (yeşil/sarı/kırmızı = 
 - **Mahremiyet:** voiceprint biyometrik → yalnızca Kadir'in kendi Firestore projesinde, GCP-dışına gitmez (Approach A sebebi). **Ham enrollment sesi saklanmaz**, yalnızca embedding.
 - **DATA-log (CLAUDE.md ilkesi):** utterance başına `voice_score`, eşikler, `TrustLevel`, `presence`, `device_hint`, adapt-edildi-mi, karar → tek çalıştırmada lokalize.
 - **Zaman aşımı/hata:** model yükleme/embed hatası → utterance doğrulanamadı sayılır (`voice_score=None` gibi davranılmaz; `verified=False` + log), oturum düşmez; ses akışı bozulmaz.
+- **`presence` istemci beyanıdır ve DOĞRULANAMAZ — ses, sert ikinci faktör DEĞİL, bir risk sinyalidir.** `presence` (`foreground | locked | ambient`) istemcinin hello frame'inden gelir ([voice_protocol.py:43-47](../../../brain/app/voice_protocol.py#L43-L47)); sunucu tarafında bunu doğrulayacak hiçbir kanıt yok. §6'daki `presence == foreground → HIGH` kuralı koşulsuz olduğundan ([trust.py:29-30](../../../brain/app/trust.py#L29-L30)), **Kadir'in ID token'ını eline geçiren biri her istekte `presence: "foreground"` beyan ederek koşulsuz `HIGH` alır ve voiceprint doğrulamasını tamamen atlar** — sesi taklit etmesi bile gerekmez. Yani bu tasarımda güvenlik sınırı **ID token'dır**; voiceprint kötüye kullanımın maliyetini artırır, audit'i zenginleştirir ve `locked/ambient` beyan edildiğinde kademelendirir, ama tek başına erişimi kapatmaz. Sesin gerçek ikinci faktör olabilmesi için sunucu tarafında doğrulanabilir bir presence/attestation sinyali gerekir; bu dilimde yoktur. Bu bilinçli bir kabul: §12'nin ilk maddesindeki "Kadir asla kilitlenmez" ilkesiyle aynı madalyonun diğer yüzü.
 
 ## 13. Test stratejisi (production-grade)
 
