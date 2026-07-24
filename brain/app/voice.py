@@ -81,6 +81,16 @@ class VoiceBridge:
         # leaks into the next turn and disarms ITS drain and fallback. Only a
         # verification clears this one, and a verification is the only thing
         # that can prove the utterance ended.
+        #
+        # Read the name as the INTENT, not as an invariant the code enforces:
+        # what is actually maintained is "no verification has happened since the
+        # last barge-in". Those differ when a barge-in lands on an already-empty
+        # buffer, which is ordinary -- for one server message ADK yields the
+        # final input_transcription first (gemini_llm_connection.py:283-296) and
+        # the standalone `interrupted` second (:417-426), so the drain happens
+        # and then the flag is stamped on nothing. Harmless, because everything
+        # downstream only asks "may I touch the buffer?" -- but do not build on
+        # the stronger reading.
         self._buffer_holds_pending_utterance = False
         # Identifies THIS connection in the shared trust registry. The registry
         # key is per-user, so two concurrent sockets collide on it; this token
@@ -231,6 +241,10 @@ class VoiceBridge:
                 # produce; if it ever happens the latch sticks for one turn
                 # (fail-open to the last published level, never to a false LOW).
                 self._verified_this_turn = False
+                # Read BEFORE the write: "was an utterance already pending?" is the
+                # difference between a first barge-in and a repeat, and the machine
+                # already models it -- no new flag needed.
+                already_pending = self._buffer_holds_pending_utterance
                 self._buffer_holds_pending_utterance = True
                 # Keep only the onset. The mic never stopped, so the buffer is
                 # [audio collected while the model was speaking][the barge-in
@@ -241,7 +255,16 @@ class VoiceBridge:
                 # ONSET, not the fallback floor: they are different questions
                 # and the floor is tunable to 0, which would make this a no-op
                 # (see config.SPEAKER_BARGE_IN_ONSET_BYTES).
-                del self._utterance[:-config.SPEAKER_BARGE_IN_ONSET_BYTES]
+                #
+                # ONLY on the FIRST barge-in of a pending utterance. "Where did
+                # the speech start?" is an open question once; on a repeat the
+                # audio in front of the window is the user's own speech, already
+                # accumulating, and trimming again would score whatever 0.5 s
+                # happened to be at the tail. ADK delivers the flag twice
+                # routinely -- gemini_llm_connection.py:398 copies `interrupted`
+                # onto the combined turn_complete response.
+                if not already_pending:
+                    del self._utterance[:-config.SPEAKER_BARGE_IN_ONSET_BYTES]
             if getattr(event, "turn_complete", False):
                 await ws.send_text(json.dumps(vp.evt_turn_complete()))
                 # Fallback: the model never sent a finished input transcription

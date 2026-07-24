@@ -6,7 +6,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 import app.voice as voice_mod
-from app import config, trust, voice_trust
+from app import config, trust, voice_protocol as vp, voice_trust
 from app.voice import APP_NAME, VoiceBridge, _handshake
 
 USER = "kadir@example.com"
@@ -1109,6 +1109,49 @@ async def test_the_pending_claim_survives_a_turn_with_no_transcription_at_all():
 
 
 @pytest.mark.asyncio
+async def test_a_repeat_barge_in_does_not_truncate_the_live_utterance():
+    """The onset trim answers "where did the barge-in start?" -- which is only an
+    open question for the FIRST barge-in of a pending utterance.
+
+    On a repeat, the audio in front of the onset window is no longer the model's
+    speaking time: it is the user's own speech, already accumulating. Trimming
+    again throws it away and scores whatever 0.5 s happens to be at the tail --
+    against thresholds calibrated on ~3 s clips.
+
+    Reachable straight from ADK: gemini_llm_connection.py:398 copies
+    `interrupted` verbatim onto the combined turn_complete response, so an
+    interruption spanning two server messages delivers the flag twice.
+    """
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+
+    model_time_noise = b"\x00" * (config.SPEAKER_BARGE_IN_ONSET_BYTES * 3)
+    onset = b"\x11" * config.SPEAKER_BARGE_IN_ONSET_BYTES
+    kept_speaking = b"\x22" * (config.SPEAKER_BARGE_IN_ONSET_BYTES * 2)
+
+    bridge._utterance = bytearray(model_time_noise + onset)
+
+    async def turn():
+        yield _make_event(interrupted=True)          # first barge-in: trim is right
+        bridge._utterance.extend(kept_speaking)      # the user keeps talking
+        yield _make_event(turn_complete=True, interrupted=True)   # ADK repeats the flag
+
+    await bridge._pump_events(turn(), FakeWS([]))
+
+    assert bytes(bridge._utterance) == onset + kept_speaking, (
+        f"the repeat barge-in cut the live utterance down to "
+        f"{len(bridge._utterance)} bytes; {len(onset + kept_speaking)} had been spoken")
+
+    # ...and it is that whole utterance that gets scored at its own boundary.
+    async def boundary():
+        yield _make_event(input_transcription=FakeTranscription("devam", finished=True))
+
+    await bridge._pump_events(boundary(), FakeWS([]))
+    assert speaker.calls[-1][1] == onset + kept_speaking
+
+
+@pytest.mark.asyncio
 async def test_a_barge_in_keeps_only_the_onset_not_the_model_s_speaking_time():
     """At a barge-in the buffer is [audio collected while the model spoke] +
     [the barge-in speech so far] -- the mic never stopped. Keeping all of it
@@ -1162,26 +1205,33 @@ async def test_the_barge_in_onset_window_is_its_own_positive_constant(monkeypatc
     try:
         importlib.reload(config)
         assert config.SPEAKER_MIN_UTTERANCE_BYTES == 0, "the opt-out did not take effect"
-        assert config.SPEAKER_BARGE_IN_ONSET_BYTES > 0, (
-            "the onset window collapsed to 0 with the floor: `del buf[:-0]` is a "
-            "no-op, so a barge-in would keep the model's whole speaking time")
+
+        # BEHAVIOUR under the hostile env, not just `> 0`. Asserting positivity
+        # alone lets `max(SPEAKER_MIN_UTTERANCE_BYTES, 1)` through -- the coupling
+        # restored with positivity bolted on, which is the obvious shape of a
+        # future "fix" and is WORSE than the no-op it replaces: it would keep a
+        # single byte of the utterance instead of the whole buffer.
+        speaker = FakeSpeaker((True, 0.9))
+        bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                    speaker_service=speaker, presence="locked"))
+        buffered = b"\x00" * (config.SPEAKER_BARGE_IN_ONSET_BYTES * 3)
+        bridge._utterance = bytearray(buffered)
+
+        async def barge_in():
+            yield _make_event(interrupted=True)
+
+        await bridge._pump_events(barge_in(), FakeWS([]))
+        kept = len(bridge._utterance)
+        assert kept == config.SPEAKER_BARGE_IN_ONSET_BYTES, (
+            f"with the floor opted out the trim kept {kept} of {len(buffered)} bytes; "
+            f"a usable onset window is {config.SPEAKER_BARGE_IN_ONSET_BYTES}")
+        # Half a second of audio, not a token byte.
+        assert kept >= int(0.25 * vp.AUDIO_IN_RATE * 2), (
+            f"the onset window degraded to {kept} bytes -- technically positive, "
+            "practically no audio at all")
     finally:
         monkeypatch.undo()
         importlib.reload(config)
-
-    speaker = FakeSpeaker((True, 0.9))
-    bridge = _armed(VoiceBridge(runner=None, session_service=None,
-                                speaker_service=speaker, presence="locked"))
-    buffered = b"\x00" * (config.SPEAKER_BARGE_IN_ONSET_BYTES * 3)
-    bridge._utterance = bytearray(buffered)
-
-    async def barge_in():
-        yield _make_event(interrupted=True)
-
-    await bridge._pump_events(barge_in(), FakeWS([]))
-    assert len(bridge._utterance) == config.SPEAKER_BARGE_IN_ONSET_BYTES, (
-        "with the floor opted out the barge-in trim became a no-op: the whole "
-        f"{len(buffered)}-byte buffer survived")
 
 
 @pytest.mark.asyncio

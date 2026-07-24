@@ -134,12 +134,28 @@ model's speaking time from in front of it, and verified at its own boundary.
 That "pending utterance" claim is settled only by the verification that
 consumes the buffer — never by a later event. Every earlier version of this
 logic keyed a per-turn flag on an event that is not guaranteed to arrive, and
-each time the flag leaked into the following turn. The bounded cost of the
-current rule is documented in
-`test_the_pending_claim_survives_a_turn_with_no_transcription_at_all`: a
-barge-in followed by a turn with *no* transcription at all leaves that turn
-unverified, with the previously measured level standing (never a fabricated
-HIGH). The real fix for that class is an energy/VAD gate, not another flag.
+each time the flag leaked into the following turn.
+
+The bounded cost of that rule is pinned by
+`test_the_pending_claim_survives_a_turn_with_no_transcription_at_all`: while a
+claim is outstanding, a turn that produces *no* input transcription at all is
+neither verified nor drained. Three consequences, stated rather than implied:
+
+- that turn keeps the previously **measured** level — never a fabricated HIGH,
+  and the connection baseline is already MEDIUM under `locked`/`ambient`;
+- because the drain is skipped too, audio accumulates across such turns. It
+  stays bounded by the rolling mic window, so the worst case is one 10-second
+  embedding spanning them, not unbounded growth;
+- a tool call can land inside that window (ADK notes at
+  `gemini_llm_connection.py:280-282` that `tool_call` may arrive before its
+  transcription). It is evaluated at the last measured level, for the same
+  authenticated user on the same connection.
+
+The claim is also set by a barge-in that lands on an already-empty buffer, so
+"a barge-in happened" is the real precondition rather than "an utterance is
+genuinely pending" — the second condition (a turn with zero transcriptions) is
+what actually gates the residual's frequency. The real fix for the whole class
+is an energy/VAD gate, not another flag.
 
 Empirically measured separation on the committed fixtures (`tests/fixtures/`,
 real LibriSpeech clips, see `tests/fixtures/README.md`): same-speaker cosine
