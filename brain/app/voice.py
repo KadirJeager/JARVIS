@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.adk.agents.live_request_queue import LiveRequestQueue
@@ -67,6 +68,11 @@ class VoiceBridge:
         self._user_id = ""
         self._trust_key: voice_trust.SessionKey | None = None
         self._verified_this_turn = False
+        # Identifies THIS connection in the shared trust registry. The registry
+        # key is per-user, so two concurrent sockets collide on it; this token
+        # is what lets voice_trust.clear() compare-and-delete instead of wiping
+        # a still-live sibling connection's signals (see voice_trust.clear).
+        self._owner = uuid.uuid4().hex
 
     def _publish_trust(self, level: str, voice_score: float | None) -> None:
         """Make this connection's identity signals visible to the policy layer.
@@ -77,6 +83,7 @@ class VoiceBridge:
         voice_trust.publish(self._trust_key, voice_trust.VoiceSignals(
             trust_level=level, voice_score=voice_score,
             presence=self.presence, device_hint=self.device_hint,
+            owner=self._owner,
         ))
 
     async def _pump_mic_once(self, ws, queue) -> bool:
@@ -90,6 +97,17 @@ class VoiceBridge:
             return False
         if data := msg.get("bytes"):
             if self.speaker_service is not None:
+                if not self._utterance:
+                    # The buffer is empty only before a turn's first frame or
+                    # right after _verify_utterance drained it, so audio
+                    # arriving now starts a NEW utterance -> re-arm the latch.
+                    # Without this the latch could stick: it is otherwise reset
+                    # only at turn_complete, and an ADK `interrupted` flush
+                    # (barge-in) can yield a finished input transcription with
+                    # NO turn_complete after it (models/gemini_llm_connection.py
+                    # flushes on interrupted as well), which would leave the
+                    # next turn permanently unverified -- a silent security miss.
+                    self._verified_this_turn = False
                 self._utterance.extend(data)
                 # BOUNDED buffer: the drain only happens at a turn boundary, and
                 # a turn boundary is not guaranteed to arrive (long silence, a
@@ -265,7 +283,9 @@ class VoiceBridge:
             # would be visible to any later tool call on the same ADK session
             # id (which is per-USER and outlives the connection).
             if self._trust_key is not None:
-                voice_trust.clear(self._trust_key)
+                # Compare-and-delete: a sibling connection for the same user
+                # shares this key, so only OUR own entry may be removed.
+                voice_trust.clear(self._trust_key, self._owner)
             # Persist the transcript snapshot on every exit path (happy path,
             # client disconnect, or exception propagating out of the block
             # above). Wrapped in try/except so a Firestore hiccup can never mask

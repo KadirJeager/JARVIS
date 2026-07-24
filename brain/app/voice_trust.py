@@ -54,13 +54,18 @@ SessionKey = tuple[str, str, str]
 @dataclass(frozen=True)
 class VoiceSignals:
     """One voice connection's current identity evidence. `trust_level` is what
-    the policy matrix consumes; the other three are the "why" the audit trail
-    needs to reconstruct a decision (spec §7)."""
+    the policy matrix consumes; the next three are the "why" the audit trail
+    needs to reconstruct a decision (spec §7).
+
+    `owner` is bookkeeping, not evidence: an opaque per-CONNECTION token used by
+    clear() to compare-and-delete (see below). It is deliberately not part of
+    the audit fields."""
 
     trust_level: str
     voice_score: float | None = None
     presence: str = "foreground"
     device_hint: str = "unknown"
+    owner: str = ""
 
 
 _signals: dict[SessionKey, VoiceSignals] = {}
@@ -82,9 +87,38 @@ def publish(key: SessionKey, signals: VoiceSignals) -> None:
         _signals[key] = signals
 
 
-def clear(key: SessionKey) -> None:
+def clear(key: SessionKey, owner: str) -> None:
+    """COMPARE-AND-DELETE: only drop the entry if `owner` still owns it.
+
+    The key is ``(app_name, user_id, "voice-{user_id}")``, which is IDENTICAL
+    for two concurrent sockets of the same user -- and that happens routinely
+    (a dropped mobile socket lingers while the client already reconnected). An
+    unconditional pop in connection A's teardown would delete connection B's
+    LIVE signals, and B's next tool call would then resolve "no signals" ->
+    policy's HIGH default: the C1 fail-open signature again, just in a narrower
+    window. Comparing the owner token makes A's teardown a no-op once B has
+    taken over.
+
+    Residual, by design: publish() stays last-writer-wins, so ownership follows
+    the most recent publisher. If A publishes after B and then dies, A's clear
+    does remove the entry while B is still live -- B simply falls back to the
+    HIGH default until its next utterance republishes. Resolving that properly
+    needs per-connection signals, but the policy side cannot tell the two
+    connections apart (ADK gives both the same session id), so it would have to
+    fuse them (most-restrictive-wins); out of scope here and recorded as such.
+    """
     with _lock:
-        _signals.pop(key, None)
+        current = _signals.get(key)
+        if current is None:
+            return
+        if current.owner != owner:
+            logging.info(
+                "voice_trust.clear: key=%s is owned by another live connection "
+                "(stored_owner=%s caller_owner=%s) -- keeping its signals",
+                key, current.owner, owner,
+            )
+            return
+        del _signals[key]
 
 
 def peek(key: SessionKey) -> VoiceSignals | None:

@@ -81,7 +81,36 @@ SPEAKER_ADAPTIVE_CAP = int(os.environ.get("JARVIS_SPEAKER_ADAPTIVE_CAP", "20"))
 # is drained at a turn boundary, but a turn boundary is NOT guaranteed to
 # arrive, so the window is what bounds memory (and inference time). 10 s is far
 # more audio than ECAPA needs; the thresholds above were calibrated on ~3 s.
-SPEAKER_UTTERANCE_SECONDS = float(os.environ.get("JARVIS_SPEAKER_UTTERANCE_SECONDS", "10"))
-# PCM16 mono at the contract's input rate = 2 bytes per sample.
-SPEAKER_UTTERANCE_MAX_BYTES = int(SPEAKER_UTTERANCE_SECONDS * voice_protocol.AUDIO_IN_RATE * 2)
+_DEFAULT_UTTERANCE_SECONDS = 10.0
+
+
+def _utterance_bytes(seconds: float) -> int:
+    """Seconds of PCM16 mono at the contract's input rate = 2 bytes per sample."""
+    return int(seconds * voice_protocol.AUDIO_IN_RATE * 2)
+
+
+def _effective_utterance_seconds(seconds: float) -> float:
+    """Reject a window that would round down to a non-positive byte cap.
+
+    A 0 (or negative, or sub-millisecond) setting does NOT "turn the cap off"
+    in any useful sense: voice.py drains the buffer with `del buf[:-cap]`, and
+    `del buf[:-0]` is `del buf[:0]` -- a NO-OP. The bound would silently vanish
+    and the buffer would grow again at AUDIO_IN_RATE*2 = 32 KB/s (~115 MB/h)
+    inside a process that already carries torch. Refuse the value loudly and
+    keep the documented default so the invariant "the cap is positive" holds
+    for every consumer of SPEAKER_UTTERANCE_MAX_BYTES."""
+    if _utterance_bytes(seconds) > 0:
+        return seconds
+    logging.warning(
+        "config: JARVIS_SPEAKER_UTTERANCE_SECONDS=%r yields a %d-byte mic window, "
+        "which would disable the bound entirely; falling back to %.1f s",
+        seconds, _utterance_bytes(seconds), _DEFAULT_UTTERANCE_SECONDS,
+    )
+    return _DEFAULT_UTTERANCE_SECONDS
+
+
+SPEAKER_UTTERANCE_SECONDS = _effective_utterance_seconds(
+    float(os.environ.get("JARVIS_SPEAKER_UTTERANCE_SECONDS", _DEFAULT_UTTERANCE_SECONDS))
+)
+SPEAKER_UTTERANCE_MAX_BYTES = _utterance_bytes(SPEAKER_UTTERANCE_SECONDS)
 TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to
