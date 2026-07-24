@@ -154,6 +154,49 @@ def test_enroll_runs_embedding_off_the_event_loop(enroll_client, monkeypatch):
         f"(embed={embed_threads}, loop={loop_thread['id']})")
 
 
+def test_enroll_persists_off_the_event_loop_too(enroll_client, monkeypatch):
+    """Moving only the embedding off the loop left the SECOND blocking half on
+    it: SpeakerService.enroll takes the gallery lock and then makes two
+    Firestore round-trips inside it.
+
+    That lock is now shared with identify(), which runs in a WORKER thread and
+    holds it across its own load->save. So an enrollment arriving during a live
+    voice utterance blocks the event loop -- every WS connection and every text
+    turn this instance serves -- until the utterance's Firestore calls finish.
+    The lock made the contention possible; the fix is to wait for it off-loop."""
+    import threading
+
+    c, _db = enroll_client
+    loop_thread = {}
+    enroll_threads = []
+
+    async def _user():
+        loop_thread["id"] = threading.get_ident()
+        return "kadir@example.com"
+
+    main_mod.app.dependency_overrides[require_user] = _user
+    monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
+
+    svc = main_mod.get_speaker_service()
+    real_enroll_anchors = speaker_store_mod.enroll_anchors
+
+    def recording(db, user_id, vecs):
+        enroll_threads.append(threading.get_ident())
+        return real_enroll_anchors(db, user_id, vecs)
+
+    monkeypatch.setattr("app.speaker_store.enroll_anchors", recording)
+    assert svc is not None
+
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 200
+    assert enroll_threads, "the persist path never ran"
+    assert loop_thread.get("id") is not None
+    assert all(t != loop_thread["id"] for t in enroll_threads), (
+        "SpeakerService.enroll ran ON the event loop thread while holding a lock "
+        f"identify() takes in a worker thread (enroll={enroll_threads}, "
+        f"loop={loop_thread['id']})")
+
+
 def test_enroll_takes_the_same_gallery_lock_as_identify(enroll_client, monkeypatch):
     """`speaker_store.enroll_anchors` is a load -> extend -> save read-modify-
     write, and so is identify()'s adapt path. Both used to run to completion on

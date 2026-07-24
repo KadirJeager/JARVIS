@@ -244,7 +244,14 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         # load->extend->save must share the gallery lock with identify()'s
         # adapt path, which now really can run concurrently in a worker thread
         # (see SpeakerService.enroll).
-        total = get_speaker_service().enroll(email, vecs)
+        #
+        # ALSO off the loop, and for a reason the embedding above does not
+        # cover: sharing that lock means this call can BLOCK on it, and the
+        # holder is identify() in a worker thread, keeping it across two
+        # Firestore round-trips. Awaited inline, an enrollment landing during a
+        # live utterance would freeze the loop -- every WS connection and every
+        # /api/chat turn on this instance -- until those RPCs returned.
+        total = await asyncio.to_thread(get_speaker_service().enroll, email, vecs)
     except Exception:
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
