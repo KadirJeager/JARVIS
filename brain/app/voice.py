@@ -97,17 +97,16 @@ class VoiceBridge:
             return False
         if data := msg.get("bytes"):
             if self.speaker_service is not None:
-                if not self._utterance:
-                    # The buffer is empty only before a turn's first frame or
-                    # right after _verify_utterance drained it, so audio
-                    # arriving now starts a NEW utterance -> re-arm the latch.
-                    # Without this the latch could stick: it is otherwise reset
-                    # only at turn_complete, and an ADK `interrupted` flush
-                    # (barge-in) can yield a finished input transcription with
-                    # NO turn_complete after it (models/gemini_llm_connection.py
-                    # flushes on interrupted as well), which would leave the
-                    # next turn permanently unverified -- a silent security miss.
-                    self._verified_this_turn = False
+                # NOTE: the per-turn latch is deliberately NOT touched here.
+                # "The buffer is empty" looks like "a new utterance starts", but
+                # _verify_utterance drains that same buffer MID-TURN, and the
+                # mic keeps streaming while the model speaks (web/app.js
+                # forwards every worklet buffer, there is no VAD gate). Re-arming
+                # on the refill therefore let the turn_complete fallback run a
+                # SECOND identify() on post-utterance noise, whose unverified
+                # result fused to LOW and overwrote the turn's correct level.
+                # The latch is owned by the turn lifecycle alone: _pump_events
+                # clears it at turn_complete and at `interrupted`.
                 self._utterance.extend(data)
                 # BOUNDED buffer: the drain only happens at a turn boundary, and
                 # a turn boundary is not guaranteed to arrive (long silence, a
@@ -121,14 +120,29 @@ class VoiceBridge:
             queue.send_realtime(types.Blob(data=data, mime_type=vp.AUDIO_MIME_IN))
         return True
 
-    async def _verify_utterance(self, ws) -> None:
+    async def _verify_utterance(self, ws, min_bytes: int = 0) -> None:
         """Called at the user utterance boundary: run speaker identity on the
         buffered PCM, fuse into a trust level, publish it for the policy layer,
         and tell the client. Any failure is logged and treated as unverified --
-        it must never break the audio stream."""
+        it must never break the audio stream.
+
+        `min_bytes` is the caller's floor: the turn_complete fallback passes
+        config.SPEAKER_MIN_UTTERANCE_BYTES because it has no positive signal
+        that the buffer holds a whole utterance, while the finished-transcription
+        path passes none because Gemini has already told us it does. Below the
+        floor we publish NOTHING -- the per-connection baseline stands, which
+        under locked/ambient is MEDIUM, never HIGH."""
         pcm = bytes(self._utterance)
         self._utterance.clear()
         if not pcm:
+            return
+        if len(pcm) < min_bytes:
+            logging.info(
+                "voice trust: skipped verification for %s, %d bytes buffered is "
+                "below the %d-byte (%.2f s) floor -- fragment, not an utterance",
+                self._user_id, len(pcm), min_bytes,
+                config.SPEAKER_MIN_UTTERANCE_SECONDS,
+            )
             return
         try:
             # OFF THE EVENT LOOP: real ECAPA inference (plus the ~89 MB lazy
@@ -169,6 +183,23 @@ class VoiceBridge:
         and transcript events. Field names verified against installed ADK
         source (see module docstring)."""
         async for event in events:
+            if getattr(event, "interrupted", False):
+                # Barge-in. ADK flushes pending transcriptions on `interrupted`
+                # exactly as it does on turn_complete
+                # (models/gemini_llm_connection.py:349-367), so a barged-into
+                # turn can end with a finished input transcription and NO
+                # turn_complete -- the latch would stick and the NEXT turn would
+                # go unverified. This is the turn-lifecycle signal that reports
+                # it; do NOT drain the buffer, what is in it is the barge-in
+                # utterance and it gets verified at its own boundary.
+                #
+                # Reaches us because RunConfig.save_live_blob is left at its
+                # default False (agents/run_config.py:258): with it enabled ADK
+                # returns early from the control-event flush branch
+                # (flows/llm_flows/base_llm_flow.py:1121-1134) and never yields
+                # this event. tests/test_voice.py guards the behaviour if that
+                # config ever changes.
+                self._verified_this_turn = False
             if getattr(event, "turn_complete", False):
                 await ws.send_text(json.dumps(vp.evt_turn_complete()))
                 # Fallback: the model never sent a finished input transcription
@@ -179,7 +210,9 @@ class VoiceBridge:
                 # models/gemini_llm_connection.py:349-367). Verify what we
                 # buffered rather than silently skipping the turn.
                 if self.speaker_service is not None and not self._verified_this_turn:
-                    await self._verify_utterance(ws)
+                    await self._verify_utterance(
+                        ws, min_bytes=config.SPEAKER_MIN_UTTERANCE_BYTES
+                    )
                 self._verified_this_turn = False
             for tr_attr, role in (("input_transcription", "user"), ("output_transcription", "jarvis")):
                 tr = getattr(event, tr_attr, None)

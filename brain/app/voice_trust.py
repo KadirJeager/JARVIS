@@ -99,19 +99,26 @@ def clear(key: SessionKey, owner: str) -> None:
     window. Comparing the owner token makes A's teardown a no-op once B has
     taken over.
 
-    Residual, by design: publish() stays last-writer-wins, so ownership follows
-    the most recent publisher. If A publishes after B and then dies, A's clear
-    does remove the entry while B is still live -- B simply falls back to the
-    HIGH default until its next utterance republishes. Resolving that properly
-    needs per-connection signals, but the policy side cannot tell the two
-    connections apart (ADK gives both the same session id), so it would have to
-    fuse them (most-restrictive-wins); out of scope here and recorded as such.
+    An entry stored with an EMPTY owner is treated as unowned and stays
+    clearable by anyone. `owner` defaults to "" so VoiceSignals remains
+    constructible where no connection identity exists; without this rule a
+    publisher that forgot to stamp one would create an entry no bridge could
+    ever clear (a uuid never equals ""), leaking stale trust for the process
+    lifetime. Unowned degrades to the pre-owner behaviour, never to immortal.
+
+    TODO(debt): publish() stays last-writer-wins, so ownership follows the most
+    recent publisher. If A publishes after B and then dies, A's clear does
+    remove the entry while B is still live -- B simply falls back to the HIGH
+    default until its next utterance republishes. Resolving that properly needs
+    per-connection signals, but the policy side cannot tell the two connections
+    apart (ADK gives both the same session id), so it would have to fuse them
+    (most-restrictive-wins); out of scope here and recorded as such.
     """
     with _lock:
         current = _signals.get(key)
         if current is None:
             return
-        if current.owner != owner:
+        if current.owner and current.owner != owner:
             logging.info(
                 "voice_trust.clear: key=%s is owned by another live connection "
                 "(stored_owner=%s caller_owner=%s) -- keeping its signals",

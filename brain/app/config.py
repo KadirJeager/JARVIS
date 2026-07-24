@@ -113,4 +113,17 @@ SPEAKER_UTTERANCE_SECONDS = _effective_utterance_seconds(
     float(os.environ.get("JARVIS_SPEAKER_UTTERANCE_SECONDS", _DEFAULT_UTTERANCE_SECONDS))
 )
 SPEAKER_UTTERANCE_MAX_BYTES = _utterance_bytes(SPEAKER_UTTERANCE_SECONDS)
+# FLOOR for the turn_complete FALLBACK verification only (voice.py). That path
+# fires when no finished input transcription arrived, so it has no positive
+# signal that the buffer holds a whole utterance -- it can be room noise picked
+# up after the real utterance was already scored and drained. Scoring a
+# fragment against thresholds calibrated on ~3 s clips yields an arbitrary
+# verdict, and an unverified verdict is not neutral: it fuses to LOW under
+# locked/ambient. The transcription path deliberately has NO floor -- there
+# Gemini has told us the utterance is complete, and short commands ("evet")
+# must still be verified.
+SPEAKER_MIN_UTTERANCE_SECONDS = float(
+    os.environ.get("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS", "0.5")
+)
+SPEAKER_MIN_UTTERANCE_BYTES = _utterance_bytes(SPEAKER_MIN_UTTERANCE_SECONDS)
 TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to

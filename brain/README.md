@@ -104,7 +104,22 @@ and requires the same Google ID token / allowlist auth as `/api/chat`.
 | `JARVIS_SPEAKER_TOPK` | `3` | Number of top gallery similarities averaged into the score |
 | `JARVIS_SPEAKER_ADAPTIVE_CAP` | `20` | Max adaptive samples kept; once over cap the **most redundant** sample is evicted (nearest-neighbour), not the oldest |
 | `JARVIS_SPEAKER_UTTERANCE_SECONDS` | `10` | Rolling mic-buffer window kept for the next verification. A value that rounds down to ≤ 0 bytes is refused with a warning and falls back to the default (it would silently remove the bound, not disable it) |
+| `JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS` | `0.5` | Minimum buffered audio the **turn_complete fallback** will score. Below it the turn is left unverified rather than scored on a fragment — see note below |
 | `SPEAKER_MODEL_DIR` | `/tmp/spkrec-ecapa` (code default; the Dockerfile overrides this to `/opt/spkrec-ecapa`, where the model is baked in at build time — see Deploy notes below) | ECAPA model dir |
+
+**Where verification runs, and the one-sided floor.** A turn is verified once,
+at the finished input transcription — Gemini telling us the utterance is
+complete. There is also a fallback at `turn_complete`, because ADK itself warns
+that a finished-transcription signal may never arrive. That fallback is the
+only path with no positive signal that the buffer holds speech: the mic stays
+open for the whole turn (the PWA has no VAD gate), so between the verification
+and `turn_complete` the drained buffer refills with room noise. The floor above
+applies **only** to the fallback. An unverified result is not neutral — it
+fuses to LOW under `locked`/`ambient` — so scoring noise would actively lock
+Kadir out. Below the floor nothing is published and the per-connection baseline
+stands, which is never HIGH for those presence modes. The transcription path
+deliberately has no floor, so short commands ("evet", "kapat") are still
+verified.
 
 Empirically measured separation on the committed fixtures (`tests/fixtures/`,
 real LibriSpeech clips, see `tests/fixtures/README.md`): same-speaker cosine

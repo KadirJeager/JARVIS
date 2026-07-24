@@ -61,6 +61,7 @@ def _make_event(
     turn_complete=False,
     input_transcription=None,
     output_transcription=None,
+    interrupted=False,
 ):
     """Shape mirrors the ADK live Event surface VoiceBridge reads (verified
     against google/adk/models/llm_response.py in installed google-adk 1.36.2)."""
@@ -83,6 +84,10 @@ def _make_event(
     e.turn_complete = turn_complete
     e.input_transcription = input_transcription
     e.output_transcription = output_transcription
+    # Event extends LlmResponse (events/event.py:31) and _finalize_model_response_event
+    # merges the LlmResponse dump into it, so `interrupted` reaches us as an Event
+    # attribute (models/llm_response.py:99).
+    e.interrupted = interrupted
     return e
 
 
@@ -833,8 +838,14 @@ async def test_turn_complete_verifies_when_no_finished_transcription_arrived():
     Gemini API or Vertex AI might not send a transcription finished signal"
     (models/gemini_llm_connection.py:349-367). If that flush never produces one
     either, turn_complete is still a turn boundary -- verify what was buffered
-    instead of silently skipping the turn."""
+    instead of silently skipping the turn.
+
+    The buffer here is a real utterance's worth of audio: this path now carries
+    a minimum-length floor (see test_turn_complete_fallback_skips_a_sub_floor_
+    fragment), so the token 4-byte buffer this test used before the floor
+    existed would exercise the skip, not the fallback it is about."""
     speaker = FakeSpeaker((True, 0.9))
+    pcm = b"\x00\x01\x02\x03" * (config.SPEAKER_MIN_UTTERANCE_BYTES // 4)
 
     async def fake_events():
         yield _make_event(input_transcription=FakeTranscription("yarim"))
@@ -842,10 +853,10 @@ async def test_turn_complete_verifies_when_no_finished_transcription_arrived():
 
     bridge = _armed(VoiceBridge(runner=None, session_service=None,
                                 speaker_service=speaker, presence="locked"))
-    bridge._utterance = bytearray(b"\x00\x01\x02\x03")
+    bridge._utterance = bytearray(pcm)
     await bridge._pump_events(fake_events(), FakeWS([]))
     assert len(speaker.calls) == 1
-    assert speaker.calls[0][1] == b"\x00\x01\x02\x03"
+    assert speaker.calls[0][1] == pcm
 
 
 @pytest.mark.asyncio
@@ -867,36 +878,84 @@ async def test_turn_complete_with_empty_buffer_does_not_verify():
 
 
 @pytest.mark.asyncio
-async def test_latch_rearms_when_new_mic_audio_arrives_after_a_drain():
-    """M-c: `_verified_this_turn` must not be able to stick.
+async def test_post_utterance_mic_frames_do_not_cause_a_second_verification():
+    """ONE verification per turn, driven through the REAL interleaving.
 
-    It is cleared at turn_complete -- but ADK also flushes pending
-    transcriptions on `interrupted` (barge-in), and that path can yield a
-    finished input transcription with NO turn_complete after it
-    (models/gemini_llm_connection.py:349-367 flushes on interrupted too). The
-    latch would then stay set and the NEXT turn would never be verified: a
-    silent, security-relevant miss. Re-arming when the drained buffer refills
-    closes it, because fresh mic bytes are by definition a new utterance.
+    The mic is open for the whole turn -- web/app.js:151-153 forwards every
+    worklet buffer unconditionally, there is no VAD gate -- and _pump_events
+    runs CONCURRENTLY with the mic loop (voice.py: both are tasks). So between
+    the finished transcription (which drains the buffer) and turn_complete
+    (which arrives only after the model has finished speaking, seconds later)
+    the buffer necessarily refills with post-utterance room noise.
+
+    Any latch scheme that re-arms on that refill turns the turn_complete
+    fallback into a SECOND identify() call -- on noise. ECAPA on sub-second
+    noise returns verified=False, and trust.assess then fuses LOW for
+    locked/ambient, overwriting the correct level computed moments earlier.
+    That is a false reject on the normal path, on exactly the presence modes
+    voice identity exists for.
+    """
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"the-real-utterance")
+
+    async def finished():
+        yield _make_event(input_transcription=FakeTranscription("merhaba", finished=True))
+
+    await bridge._pump_events(finished(), FakeWS([]))       # verify + drain
+
+    # The model is now speaking; the open mic keeps streaming into the drained
+    # buffer. turn_complete only arrives once the model has finished, so this is
+    # SECONDS of room noise -- comfortably above the fallback's minimum-length
+    # floor, which is why that floor alone cannot stand in for this fix.
+    noise = b"\x00\x01" * config.SPEAKER_MIN_UTTERANCE_BYTES
+    ws = FakeWS([{"type": "websocket.receive", "bytes": noise}])
+    await bridge._pump_mic_once(ws, FakeQueue())
+
+    async def turn_end():
+        yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(turn_end(), FakeWS([]))
+
+    assert len(speaker.calls) == 1, (
+        f"ECAPA re-ran on post-utterance audio {speaker.calls[1:]!r}: the turn's "
+        "correct trust level is overwritten by a false reject")
+
+
+@pytest.mark.asyncio
+async def test_interrupted_rearms_the_latch_for_the_next_turn():
+    """The barge-in case M-c was aimed at, keyed on the signal that actually
+    reports it instead of on a proxy.
+
+    ADK flushes pending transcriptions on `interrupted` as well as on
+    turn_complete (models/gemini_llm_connection.py:349-367), so a barged-into
+    turn can end with a finished input transcription and NO turn_complete. The
+    latch is cleared at turn_complete only, so without handling `interrupted`
+    it stays set and the NEXT turn is never verified -- a silent security miss.
+
+    `interrupted` reaches us because RunConfig.save_live_blob defaults to False
+    (agents/run_config.py:258); with it enabled ADK returns early from the
+    control-event flush branch (flows/llm_flows/base_llm_flow.py:1121-1134) and
+    never yields the event. If that config ever changes, this test is the guard.
     """
     speaker = FakeSpeaker((True, 0.9))
     bridge = _armed(VoiceBridge(runner=None, session_service=None,
                                 speaker_service=speaker, presence="locked"))
 
-    # Turn 1: finished transcription -> verified, buffer drained, latch SET.
-    async def turn_one():
-        yield _make_event(input_transcription=FakeTranscription("birinci", finished=True))
-
+    # Turn 1 ends by barge-in: finished transcription, then interrupted, no turn_complete.
     bridge._utterance = bytearray(b"turn-one-audio")
-    await bridge._pump_events(turn_one(), FakeWS([]))
-    assert len(speaker.calls) == 1
-    assert bridge._verified_this_turn is True          # no turn_complete arrived
-    assert bytes(bridge._utterance) == b""
 
-    # Turn 2 begins the only way it can: new mic bytes through the real pump.
-    ws = FakeWS([{"type": "websocket.receive", "bytes": b"turn-two-audio"}])
-    await bridge._pump_mic_once(ws, FakeQueue())
+    async def barged_into_turn():
+        yield _make_event(input_transcription=FakeTranscription("birinci", finished=True))
+        yield _make_event(interrupted=True)
+
+    await bridge._pump_events(barged_into_turn(), FakeWS([]))
+    assert len(speaker.calls) == 1
     assert bridge._verified_this_turn is False, (
-        "the latch stayed set after the buffer refilled -- turn 2 can never be verified")
+        "the latch stuck after a barge-in -- the next turn can never be verified")
+
+    bridge._utterance = bytearray(b"turn-two-audio")
 
     async def turn_two():
         yield _make_event(input_transcription=FakeTranscription("ikinci", finished=True))
@@ -907,21 +966,97 @@ async def test_latch_rearms_when_new_mic_audio_arrives_after_a_drain():
 
 
 @pytest.mark.asyncio
-async def test_mid_utterance_audio_does_not_rearm_the_latch():
-    """The re-arm must key on "the buffer was empty", not "bytes arrived":
-    otherwise every mic frame would clear the latch and a long utterance would
-    be re-verified on each ADK-flushed finished transcription."""
+async def test_turn_complete_fallback_skips_a_sub_floor_fragment():
+    """Defence in depth, independent of the latch.
+
+    The fallback fires when no finished transcription arrived, so unlike the
+    transcription path it has NO positive signal that the buffer holds a whole
+    utterance. Scoring a fragment against thresholds calibrated on ~3 s clips
+    produces an arbitrary verdict -- and an unverified verdict is a LOW under
+    locked/ambient, i.e. it actively harms. Below the floor, publish nothing
+    and let the per-connection baseline stand (fails safe, never HIGH).
+    """
     speaker = FakeSpeaker((True, 0.9))
     bridge = _armed(VoiceBridge(runner=None, session_service=None,
                                 speaker_service=speaker, presence="locked"))
-    bridge._verified_this_turn = True
-    bridge._utterance = bytearray(b"already-buffered")
+    bridge._utterance = bytearray(b"\x00" * (config.SPEAKER_MIN_UTTERANCE_BYTES - 2))
 
-    ws = FakeWS([{"type": "websocket.receive", "bytes": b"more"}])
-    await bridge._pump_mic_once(ws, FakeQueue())
+    ws = FakeWS([])
 
-    assert bridge._verified_this_turn is True
-    assert bytes(bridge._utterance) == b"already-bufferedmore"
+    async def turn_end():
+        yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(turn_end(), ws)
+
+    assert speaker.calls == [], "ECAPA ran on a sub-floor fragment"
+    assert bytes(bridge._utterance) == b"", "the fragment must still be dropped"
+    assert all("speaker" not in t for _, t in ws.sent if isinstance(t, str)), (
+        "a skipped verification must not tell the client the speaker was rejected")
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_fallback_verifies_at_the_floor():
+    """The floor's inclusive boundary: exactly SPEAKER_MIN_UTTERANCE_BYTES is
+    enough audio, so the fallback still does its job for real utterances."""
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    pcm = b"\x01" * config.SPEAKER_MIN_UTTERANCE_BYTES
+    bridge._utterance = bytearray(pcm)
+
+    async def turn_end():
+        yield _make_event(turn_complete=True)
+
+    await bridge._pump_events(turn_end(), FakeWS([]))
+
+    assert len(speaker.calls) == 1
+    assert speaker.calls[0][1] == pcm
+
+
+@pytest.mark.asyncio
+async def test_finished_transcription_verifies_below_the_floor():
+    """The floor is scoped to the FALLBACK path on purpose. A finished input
+    transcription is Gemini telling us the buffer holds a complete user
+    utterance -- a positive signal the fallback does not have. Applying the
+    floor there too would silently stop verifying short commands ("evet",
+    "kapat"), which is the opposite of what this slice is for."""
+    speaker = FakeSpeaker((True, 0.9))
+    bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                speaker_service=speaker, presence="locked"))
+    bridge._utterance = bytearray(b"\x02\x03")
+
+    async def finished():
+        yield _make_event(input_transcription=FakeTranscription("evet", finished=True))
+
+    await bridge._pump_events(finished(), FakeWS([]))
+    assert len(speaker.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_mic_pump_never_touches_the_per_turn_latch():
+    """The latch belongs to the turn lifecycle (_pump_events), never to the
+    byte stream.
+
+    Buffer emptiness is NOT a proxy for "a new turn started": _verify_utterance
+    drains that same buffer mid-turn, so an empty buffer equally means "the
+    utterance was just scored and the model is about to speak". Keying a
+    re-arm on it made every turn verify twice -- see
+    test_post_utterance_mic_frames_do_not_cause_a_second_verification. BOTH
+    buffer states are pinned here so that mechanism cannot come back."""
+    speaker = FakeSpeaker((True, 0.9))
+
+    for label, buffered in (("empty (just drained)", b""),
+                            ("mid-utterance", b"already-buffered")):
+        bridge = _armed(VoiceBridge(runner=None, session_service=None,
+                                    speaker_service=speaker, presence="locked"))
+        bridge._verified_this_turn = True
+        bridge._utterance = bytearray(buffered)
+
+        ws = FakeWS([{"type": "websocket.receive", "bytes": b"more"}])
+        await bridge._pump_mic_once(ws, FakeQueue())
+
+        assert bridge._verified_this_turn is True, f"the mic pump re-armed the latch ({label})"
+        assert bytes(bridge._utterance) == buffered + b"more"
 
 
 # --- overlapping connections for the same user must not fail open -----------
@@ -1006,6 +1141,25 @@ def test_clear_is_a_no_op_for_a_foreign_owner(caplog):
 
 def test_clear_of_an_absent_key_is_silent():
     voice_trust.clear(_trust_key(), "whoever")          # must not raise
+
+
+def test_an_unowned_entry_stays_clearable_by_anyone():
+    """`owner` defaults to "" so that VoiceSignals stays constructible for the
+    many call sites that carry no connection identity (policy tests, fixtures).
+
+    The cost of that default is that a publisher which FORGETS owner= would
+    otherwise create an entry no real bridge could ever clear -- a uuid never
+    equals "" -- leaking one user's stale trust for the process lifetime. Treat
+    the empty token as "unowned": such an entry degrades to the pre-owner
+    behaviour (any teardown may clear it) instead of becoming immortal.
+    Production always stamps a uuid (voice.py), so this changes nothing there.
+    """
+    key = _trust_key()
+    voice_trust.publish(key, voice_trust.VoiceSignals(trust_level=trust.LOW))
+    voice_trust.clear(key, "some-real-connection")
+    assert voice_trust.peek(key) is None, (
+        "an entry published without an owner can never be cleared -- it leaks "
+        "stale trust for the lifetime of the process")
 
 
 # --- M-b: a misconfigured mic window must not silently remove the bound -----
