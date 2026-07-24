@@ -619,3 +619,60 @@ async def test_verify_utterance_treats_identify_exception_as_unverified_and_fail
         {"type": "speaker", "role": "user", "verified": False, "score": 0.0})) in ws.sent
     assert session.state[config.TRUST_STATE_KEY] == trust.LOW
     assert "speaker.identify failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_resets_stale_trust_for_new_connection():
+    """A new voice connection must NOT inherit the trust level a previous
+    connection left in the process-lifetime session state."""
+    session = type("S", (), {"state": {config.TRUST_STATE_KEY: trust.HIGH}})()  # stale HIGH
+
+    class Sessions:
+        async def get_session(self, **k):
+            return session
+
+        async def create_session(self, **k):
+            return session
+
+    class NoEvents:
+        def run_live(self, **kwargs):
+            async def events():
+                return
+                yield  # pragma: no cover
+
+            return events()
+
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    bridge = VoiceBridge(
+        runner=NoEvents(), session_service=Sessions(),
+        speaker_service=FakeSpeaker((True, 0.9)),
+        presence="locked", device_hint="tablet",
+    )
+    await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)
+    # locked + no voice evidence yet -> MEDIUM, NOT the stale HIGH
+    assert session.state[config.TRUST_STATE_KEY] == trust.MEDIUM
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_touch_session_state_without_speaker_service():
+    """No speaker_service -> identity is off -> run() must not write trust
+    (the existing FakeSessionService returns a bare object() with no .state)."""
+
+    class Sessions:
+        async def get_session(self, **k):
+            return object()
+
+        async def create_session(self, **k):
+            return object()
+
+    class NoEvents:
+        def run_live(self, **kwargs):
+            async def events():
+                return
+                yield  # pragma: no cover
+
+            return events()
+
+    ws = YieldingFakeWS([{"type": "websocket.disconnect"}])
+    bridge = VoiceBridge(runner=NoEvents(), session_service=Sessions())  # no speaker_service
+    await asyncio.wait_for(bridge.run(ws, user_id="kadir@example.com"), timeout=2)  # must not raise

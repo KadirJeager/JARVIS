@@ -131,6 +131,23 @@ class VoiceBridge:
                 app_name="jarvis", user_id=user_id, session_id=session_id
             )
         self.session = session
+        if self.speaker_service is not None and self.session is not None:
+            # Initialize THIS connection's trust from its own context so a
+            # new connection never inherits a previous connection's trust
+            # left in session.state (session_id is per-USER and the session
+            # service is a process-lifetime singleton -- see module docstring
+            # / task-12a-brief.md for the stale-trust hole this closes).
+            level = trust.assess(
+                trust.TrustContext(
+                    auth_verified=True, presence=self.presence,
+                    voice_score=None,   # no voice evidence yet this connection
+                    device_hint=self.device_hint,
+                ),
+                config.SPEAKER_ACCEPT_THRESHOLD,
+            )
+            state = getattr(self.session, "state", None)
+            if state is not None:
+                state[config.TRUST_STATE_KEY] = level
         self._user_id = user_id
         queue = LiveRequestQueue()
         run_config = RunConfig(
