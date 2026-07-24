@@ -213,3 +213,21 @@ server-verifiable presence/attestation signal, which this slice does not have.
   at `--min-instances 0` since a text-chat cold start is more tolerable, but
   it still needs the same `--memory` floor as `jarvis-voice` now that it
   carries the same dependency stack.
+- **The image has now actually been built and inspected** (Cloud Build, 4m03s,
+  `speaker-build-check:wave7`), which earlier waves could only reason about
+  statically. Verified by running the checks *inside* the built image:
+  `uid=1000(appuser)` non-root; **torch 2.13.0+cpu** (the CPU wheel resolved,
+  not the multi-GB CUDA one); `/opt/spkrec-ecapa` holds **regular files, zero
+  symlinks**, all owned by `appuser` (`embedding_model.ckpt` 83.3 MB,
+  `classifier.ckpt` 5.5 MB, plus three small files); both `/opt/hf-cache` and
+  `/root/.cache/huggingface` are absent, so the weights ship once; runtime
+  `HF_HOME=/tmp/hf-cache`; and `speaker.embed()` returns a 192-dim vector with
+  `HF_HUB_OFFLINE=1` — i.e. the model genuinely loads from the image with no
+  network. Measured weight: model **85 MB**, torch **750 MB**, which is where
+  the "~850 MB" figure above comes from. **Still a reasoned estimate, not a
+  measurement: the `2Gi` memory floor** — that needs RSS from a running
+  revision.
+- Build context: `brain/.gcloudignore` exists because `gcloud builds submit`
+  does not read `.dockerignore` and does not find the repo-root `.gitignore`
+  when the source directory is `brain/`. Without it the upload was 2.5 GiB
+  (both interpreters); with it, 560 KiB.
