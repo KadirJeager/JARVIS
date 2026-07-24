@@ -20,13 +20,13 @@ def _svc(db, **kw):
 
 def test_matching_voice_verified():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    verified, score = _svc(db).identify("k", b"A", "phone", auth_is_kadir=True)
-    assert verified is True and score == 1.0
+    out = _svc(db).identify("k", b"A", "phone", auth_is_kadir=True)
+    assert out.verified is True and out.score == 1.0
 
 def test_different_voice_not_verified():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    verified, score = _svc(db).identify("k", b"F", "phone", auth_is_kadir=True)
-    assert verified is False
+    out = _svc(db).identify("k", b"F", "phone", auth_is_kadir=True)
+    assert out.verified is False
 
 def test_high_confidence_adapts_and_persists():
     db = FakeDB(); enroll_anchors(db, "k", [A])
@@ -36,15 +36,15 @@ def test_high_confidence_adapts_and_persists():
 
 def test_accepted_but_below_adapt_does_not_feed():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    verified, score = _svc(db).identify("k", b"N", "phone", auth_is_kadir=True)
-    assert score == 0.95                                            # accept(0.9) <= score < adapt(0.97)
-    assert verified is True
+    out = _svc(db).identify("k", b"N", "phone", auth_is_kadir=True)
+    assert out.score == 0.95                                        # accept(0.9) <= score < adapt(0.97)
+    assert out.verified is True
     assert load_profile(db, "k").adaptive == []                    # not fed (poisoning guard band)
 
 def test_no_adapt_when_not_authed_kadir():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    verified, score = _svc(db).identify("k", b"A", "phone", auth_is_kadir=False)  # high score but not authed
-    assert verified is True                     # verification is independent of the adapt auth-gate
+    out = _svc(db).identify("k", b"A", "phone", auth_is_kadir=False)  # high score but not authed
+    assert out.verified is True                  # verification is independent of the adapt auth-gate
     assert load_profile(db, "k").adaptive == []
 
 def test_score_exactly_at_accept_is_verified():
@@ -56,9 +56,9 @@ def test_score_exactly_at_accept_is_verified():
     db = FakeDB(); enroll_anchors(db, "k", [A])
     svc = SpeakerService(db, embed_fn=lambda pcm: {b"A": A}[pcm], now_fn=lambda: "t",
                           accept=1.0, adapt=1.5, cap=5, top_k=1)
-    verified, score = svc.identify("k", b"A", "phone", auth_is_kadir=True)
-    assert score == 1.0
-    assert verified is True
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    assert out.score == 1.0
+    assert out.verified is True
 
 def test_score_exactly_at_adapt_feeds_profile():
     """Boundary: adapt is inclusive (`score >= adapt`), not exclusive. Same
@@ -91,10 +91,10 @@ def test_adapt_gate_ignores_adaptive_samples_so_poisoning_cannot_ratchet():
 
     svc = SpeakerService(db, embed_fn=lambda pcm: FAR, now_fn=lambda: "t1",
                          accept=0.9, adapt=0.97, cap=5, top_k=1)
-    verified, score = svc.identify("k", b"F", "phone", auth_is_kadir=True)
+    out = svc.identify("k", b"F", "phone", auth_is_kadir=True)
 
-    assert score == 1.0          # full gallery: matches their own landed sample
-    assert verified is True      # ACCEPT stays a full-gallery decision (by design)
+    assert out.score == 1.0      # full gallery: matches their own landed sample
+    assert out.verified is True  # ACCEPT stays a full-gallery decision (by design)
     after = load_profile(db, "k")
     assert len(after.adaptive) == 1, "the attacker fed the profile again -- ratchet is open"
     assert after.adaptive[0]["ts"] == "t0"
@@ -106,9 +106,68 @@ def test_empty_anchor_gallery_never_self_feeds():
     db = FakeDB()
     svc = SpeakerService(db, embed_fn=lambda pcm: A, now_fn=lambda: "t",
                          accept=0.9, adapt=0.97, cap=5, top_k=1)
-    verified, score = svc.identify("k", b"A", "phone", auth_is_kadir=True)
-    assert (verified, score) == (False, 0.0)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    assert (out.verified, out.score) == (False, 0.0)
     assert load_profile(db, "k").adaptive == []
+
+
+# --- Dilim 3d: identify() outcome + history recording ------------------------
+
+def test_identify_returns_adapted_sample_id_when_it_feeds():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    out = _svc(db).identify("k", b"A", "headset", auth_is_kadir=True)
+    assert out.adapted_sample_id is not None
+    assert load_profile(db, "k").adaptive[0]["id"] == out.adapted_sample_id
+    assert out.vec == A
+
+
+def test_identify_adapted_sample_id_is_none_in_the_guard_band():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    out = _svc(db).identify("k", b"N", "phone", auth_is_kadir=True)
+    assert out.verified is True and out.adapted_sample_id is None
+
+
+def test_record_history_appends_a_spec_shaped_entry_and_honors_the_cap():
+    from app import speaker_history
+    db = FakeDB()
+    svc = SpeakerService(db, embed_fn=lambda pcm: A, now_fn=lambda: "t0",
+                         accept=0.9, adapt=0.97, cap=5, top_k=1,
+                         id_fn=lambda: "h1", history_cap=2)
+    svc.record_history("k", score=0.8, verified=True, vec=A, device_hint="phone",
+                       presence="locked", trust_level="MEDIUM",
+                       adapted_sample_id=None)
+    entry = speaker_history.load_history(db, "k")[0]
+    assert entry == {"id": "h1", "ts": "t0", "score": 0.8, "verified": True,
+                     "device_hint": "phone", "presence": "locked",
+                     "trust_level": "MEDIUM", "adapted_sample_id": None,
+                     "correction": None, "vec": A}
+    for _ in range(3):
+        svc.record_history("k", score=0.1, verified=False, vec=A,
+                           device_hint="phone", presence="locked",
+                           trust_level="LOW", adapted_sample_id=None)
+    assert len(speaker_history.load_history(db, "k")) == 2   # history_cap wired
+
+
+def test_production_service_carries_the_config_history_cap(monkeypatch):
+    """The 3a lesson, third time proven on that branch: a knob that exists but
+    is not passed by the accessor production calls is a green-suite lie. Pin
+    get_speaker_service itself.
+
+    config.SPEAKER_HISTORY_CAP's default (50) coincidentally equals
+    SpeakerService.__init__'s own history_cap default, so asserting against
+    the out-of-the-box default would not actually catch the wiring being
+    dropped (verified empirically: it did not fail that mutation). Monkeypatch
+    config to a distinctive value so the assertion is load-bearing."""
+    import app.main as main_mod
+    from app import config
+    from tests.fakes import FakeDB as _FakeDB
+    monkeypatch.setattr(config, "SPEAKER_HISTORY_CAP", 7)
+    monkeypatch.setattr(main_mod, "_enroll_db", lambda: _FakeDB(), raising=False)
+    monkeypatch.setattr(main_mod, "_speaker_service", None)
+    svc = main_mod.get_speaker_service()
+    assert svc.history_cap == 7
+    from app.speaker import new_sample_id
+    assert svc.id_fn is new_sample_id
 
 
 def test_gallery_read_modify_write_is_serialized_but_embedding_is_not(monkeypatch):

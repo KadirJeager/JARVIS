@@ -72,6 +72,7 @@ def get_speaker_service() -> "speaker.SpeakerService":
             adapt=config.SPEAKER_ADAPT_THRESHOLD,
             top_k=config.SPEAKER_TOPK,
             cap=config.SPEAKER_ADAPTIVE_CAP,
+            history_cap=config.SPEAKER_HISTORY_CAP,
         )
     return _speaker_service
 

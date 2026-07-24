@@ -3,6 +3,7 @@
 math is unit-testable without the model; embed()/SpeakerService live below and
 lazily load torch."""
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -41,6 +42,17 @@ def _normalize_sample(raw, default_source: str) -> dict:
             "note": raw.get("note"),
         }
     return make_sample(raw, default_source, "unknown", None, new_sample_id())
+
+
+@dataclass
+class IdentifyOutcome:
+    """One utterance's identity verdict plus what the verification history
+    needs to make it correctable later (spec §4.2): the embedding itself and,
+    if the utterance fed the gallery, the id of the sample it became."""
+    verified: bool
+    score: float
+    vec: list[float]
+    adapted_sample_id: str | None
 
 
 class SpeakerProfile:
@@ -166,7 +178,7 @@ def embed(pcm: bytes) -> list[float]:
     return emb.squeeze().tolist()
 
 
-from . import speaker_store
+from . import speaker_history, speaker_store
 
 
 class SpeakerService:
@@ -177,7 +189,8 @@ class SpeakerService:
     < adapt means "trust it but don't learn from it" (spec §5)."""
 
     def __init__(self, db, embed_fn=embed, now_fn=_utc_now, id_fn=new_sample_id,
-                 accept: float = 0.35, adapt: float = 0.6, cap: int = 20, top_k: int = 3):
+                 accept: float = 0.35, adapt: float = 0.6, cap: int = 20, top_k: int = 3,
+                 history_cap: int = 50):
         self.db = db
         self.embed_fn = embed_fn
         self.now_fn = now_fn
@@ -186,6 +199,7 @@ class SpeakerService:
         self.adapt = adapt
         self.cap = cap
         self.top_k = top_k
+        self.history_cap = history_cap
         # identify() now runs in a worker thread (voice.py's asyncio.to_thread),
         # so two live connections for the same user can reach the gallery's
         # load -> adapt -> save read-modify-write at once and silently drop one
@@ -223,8 +237,9 @@ class SpeakerService:
             return len(speaker_store.load_profile(self.db, user_id).anchors)
 
     def identify(self, user_id: str, pcm: bytes, device_hint: str,
-                 auth_is_kadir: bool) -> tuple[bool, float]:
+                 auth_is_kadir: bool) -> IdentifyOutcome:
         vec = self.embed_fn(pcm)
+        adapted_sample_id = None
         with self._gallery_lock:
             profile = speaker_store.load_profile(self.db, user_id)
             # ACCEPT is scored against the WHOLE gallery (that is the point of
@@ -235,15 +250,35 @@ class SpeakerService:
             score = profile.score(vec, self.top_k)
             anchor_score = profile.anchor_score(vec, self.top_k)
             verified = score >= self.accept
-            adapted = anchor_score >= self.adapt and auth_is_kadir
-            if adapted:
-                profile.adapt(vec, device_hint, self.cap, self.now_fn, self.id_fn)
+            if anchor_score >= self.adapt and auth_is_kadir:
+                adapted_sample_id = profile.adapt(
+                    vec, device_hint, self.cap, self.now_fn, self.id_fn)
                 speaker_store.save_profile(self.db, user_id, profile)
         import logging
         logging.info(
             "speaker.identify: user=%s score=%.4f anchor_score=%.4f verified=%s "
             "adapted=%s device=%s anchors=%d adaptive=%d accept=%.2f adapt=%.2f",
-            user_id, score, anchor_score, verified, adapted, device_hint,
-            len(profile.anchors), len(profile.adaptive), self.accept, self.adapt,
+            user_id, score, anchor_score, verified, adapted_sample_id is not None,
+            device_hint, len(profile.anchors), len(profile.adaptive),
+            self.accept, self.adapt,
         )
-        return verified, score
+        return IdentifyOutcome(verified=verified, score=score, vec=vec,
+                               adapted_sample_id=adapted_sample_id)
+
+    def record_history(self, user_id: str, *, score: float, verified: bool,
+                       vec: list[float], device_hint: str, presence: str,
+                       trust_level: str, adapted_sample_id: str | None) -> str:
+        """Append one utterance's verification outcome to the history ring
+        buffer (spec §4.2). Under the gallery lock: corrections (Task 6) read
+        and write history and gallery TOGETHER, so every mutation of either
+        serializes on the one lock (spec §10)."""
+        entry = {
+            "id": self.id_fn(), "ts": self.now_fn(), "score": score,
+            "verified": verified, "device_hint": device_hint,
+            "presence": presence, "trust_level": trust_level,
+            "adapted_sample_id": adapted_sample_id, "correction": None,
+            "vec": vec,
+        }
+        with self._gallery_lock:
+            speaker_history.record(self.db, user_id, entry, self.history_cap)
+        return entry["id"]
