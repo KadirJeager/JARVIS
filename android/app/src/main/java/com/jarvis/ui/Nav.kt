@@ -45,6 +45,10 @@ fun Nav(
     onRetry: () -> Unit,
     onOpenVoiceProfile: () -> Unit,
     onBack: () -> Unit,
+    onToggleConversations: () -> Unit = {},
+    onNewConversation: () -> Unit = {},
+    onOpenConversation: (String) -> Unit = {},
+    onDeleteConversation: (String) -> Unit = {},
 ) {
     when (state.authPhase) {
         AuthPhase.CHECKING -> BootSplash()
@@ -60,6 +64,10 @@ fun Nav(
                 onSend = onSend,
                 onRetry = onRetry,
                 onOpenVoiceProfile = onOpenVoiceProfile,
+                onToggleConversations = onToggleConversations,
+                onNewConversation = onNewConversation,
+                onOpenConversation = onOpenConversation,
+                onDeleteConversation = onDeleteConversation,
             )
             Route.VOICE_PROFILE -> VoiceProfileScreen(
                 state = voiceState,

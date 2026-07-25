@@ -10,7 +10,7 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 const val BASE_URL = "https://jarvis-brain-000000000000.europe-west1.run.app"
 
 /** Both API surfaces, sharing one OkHttp client and one Retrofit instance. */
-class ApiSet(val chat: JarvisApi, val voice: VoiceApi)
+class ApiSet(val chat: JarvisApi, val voice: VoiceApi, val conversations: ConversationsApi)
 
 object NetworkModule {
     /**
@@ -52,6 +52,7 @@ object NetworkModule {
         return ApiSet(
             chat = retrofit.create(JarvisApi::class.java),
             voice = retrofit.create(VoiceApi::class.java),
+            conversations = retrofit.create(ConversationsApi::class.java),
         )
     }
 }

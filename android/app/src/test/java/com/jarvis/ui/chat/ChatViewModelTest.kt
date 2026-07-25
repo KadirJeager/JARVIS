@@ -1,12 +1,17 @@
 package com.jarvis.ui.chat
 
 import com.jarvis.data.chat.ChatRepository
+import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.SessionStore
 import com.jarvis.data.chat.UiMessage
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.HistoryMessage
 import com.jarvis.data.net.HistoryResponse
+import com.jarvis.data.net.ConversationDeletedResponse
+import com.jarvis.data.net.ConversationDto
+import com.jarvis.data.net.ConversationsApi
+import com.jarvis.data.net.ConversationsResponse
 import com.jarvis.data.net.JarvisApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -33,8 +38,10 @@ class ChatViewModelTest {
 
     @After fun tearDown() = Dispatchers.resetMain()
 
-    private class FakeSessionStore(private val id: String = "s") : SessionStore {
+    private class FakeSessionStore(private var id: String = "s") : SessionStore {
         override suspend fun sessionId(): String = id
+        override suspend fun startNew(): String = "new".also { id = it }
+        override suspend fun switchTo(sessionId: String) { id = sessionId }
     }
 
     private class FakeApi(
@@ -55,6 +62,149 @@ class ChatViewModelTest {
 
     private fun vmWith(api: FakeApi) =
         ChatViewModel(ChatRepository(api, FakeSessionStore()))
+
+    private class FakeConversationsApi(var rows: List<ConversationDto> = emptyList()) :
+        ConversationsApi {
+        var deleted: String? = null
+        override suspend fun list() = ConversationsResponse(rows)
+        override suspend fun delete(sessionId: String): ConversationDeletedResponse {
+            deleted = sessionId
+            return ConversationDeletedResponse(sessionId)
+        }
+    }
+
+    private class CountingSessionStore(var current: String = "s-current") : SessionStore {
+        var mints = 0
+        override suspend fun sessionId() = current
+        override suspend fun startNew(): String {
+            mints++
+            current = "new-$mints"
+            return current
+        }
+        override suspend fun switchTo(sessionId: String) { current = sessionId }
+    }
+
+    private fun vmWithConversations(
+        api: FakeApi = FakeApi(),
+        convApi: FakeConversationsApi = FakeConversationsApi(),
+        store: CountingSessionStore = CountingSessionStore(),
+    ) = ChatViewModel(
+        ChatRepository(api, store),
+        ConversationsRepository(convApi, store),
+    )
+
+    /**
+     * Kadir's complaint: the app "always starts from the very beginning of the
+     * conversation". A launch must open a NEW one; the old ones live in the list.
+     */
+    @Test
+    fun coldStart_opensANewConversation() = runTest(dispatcher) {
+        val store = CountingSessionStore()
+        val vm = vmWithConversations(store = store)
+
+        vm.onColdStart()
+        advanceUntilIdle()
+
+        assertEquals(1, store.mints)
+    }
+
+    /**
+     * The Activity's LaunchedEffect re-runs on every configuration change while the
+     * ViewModel survives it, so a second call must be a no-op — otherwise rotating the
+     * phone mid-chat would cut the conversation in half.
+     */
+    @Test
+    fun coldStart_isIdempotent_soARotationDoesNotSplitTheConversation() = runTest(dispatcher) {
+        val store = CountingSessionStore()
+        val vm = vmWithConversations(store = store)
+
+        vm.onColdStart()
+        advanceUntilIdle()
+        vm.onColdStart()
+        advanceUntilIdle()
+
+        assertEquals(1, store.mints)
+    }
+
+    @Test
+    fun startingANewConversation_clearsTheThread_andClosesTheList() = runTest(dispatcher) {
+        val vm = vmWithConversations(api = FakeApi(history = HistoryResponse(listOf(HistoryMessage("model", "eski", "t")))))
+        vm.onSignedIn()
+        advanceUntilIdle()
+        assertEquals(1, vm.state.value.messages.size)
+
+        vm.startNewConversation()
+        advanceUntilIdle()
+
+        assertTrue(vm.state.value.messages.isEmpty())
+        assertFalse(vm.state.value.conversationsOpen)
+    }
+
+    @Test
+    fun openingTheList_loadsIt() = runTest(dispatcher) {
+        val convApi = FakeConversationsApi(listOf(ConversationDto("s1", "eski sohbet", "t", 2)))
+        val vm = vmWithConversations(convApi = convApi)
+
+        vm.toggleConversations()
+        advanceUntilIdle()
+
+        assertTrue(vm.state.value.conversationsOpen)
+        assertEquals(1, vm.state.value.conversations.size)
+        assertEquals("eski sohbet", vm.state.value.conversations[0].title)
+    }
+
+    @Test
+    fun openingAConversation_switchesToItAndLoadsItsHistory() = runTest(dispatcher) {
+        val store = CountingSessionStore()
+        val vm = vmWithConversations(
+            api = FakeApi(history = HistoryResponse(listOf(HistoryMessage("user", "eski mesaj", "t")))),
+            store = store,
+        )
+
+        vm.openConversation("s-old")
+        advanceUntilIdle()
+
+        assertEquals("s-old", store.current)
+        assertEquals(1, vm.state.value.messages.size)
+        assertFalse(vm.state.value.conversationsOpen)
+    }
+
+    /** Deleting the conversation you are reading must clear the thread; deleting another
+     *  must leave what is on screen alone. */
+    @Test
+    fun deletingTheCurrentConversation_clearsTheThread() = runTest(dispatcher) {
+        val store = CountingSessionStore(current = "s-current")
+        val convApi = FakeConversationsApi()
+        val vm = vmWithConversations(
+            api = FakeApi(history = HistoryResponse(listOf(HistoryMessage("model", "bir sey", "t")))),
+            convApi = convApi,
+            store = store,
+        )
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.deleteConversation("s-current")
+        advanceUntilIdle()
+
+        assertEquals("s-current", convApi.deleted)
+        assertTrue(vm.state.value.messages.isEmpty())
+    }
+
+    @Test
+    fun deletingAnotherConversation_leavesTheOpenThreadAlone() = runTest(dispatcher) {
+        val store = CountingSessionStore(current = "s-current")
+        val vm = vmWithConversations(
+            api = FakeApi(history = HistoryResponse(listOf(HistoryMessage("model", "bir sey", "t")))),
+            store = store,
+        )
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.deleteConversation("s-other")
+        advanceUntilIdle()
+
+        assertEquals(1, vm.state.value.messages.size)
+    }
 
     @Test
     fun send_optimisticallyAppendsUser_thenModelReply() = runTest(dispatcher) {

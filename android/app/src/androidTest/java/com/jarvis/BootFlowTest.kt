@@ -10,6 +10,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ConversationDeletedResponse
+import com.jarvis.data.net.ConversationsApi
+import com.jarvis.data.net.ConversationsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
@@ -73,6 +76,11 @@ class BootFlowTest {
         override suspend fun clearSignedIn() { cleared = true }
     }
 
+    private class FakeConversationsApi : ConversationsApi {
+        override suspend fun list() = ConversationsResponse(emptyList())
+        override suspend fun delete(sessionId: String) = ConversationDeletedResponse(sessionId)
+    }
+
     private class FakeChatApi : JarvisApi {
         override suspend fun chat(req: ChatRequest) = ChatResponse("")
         override suspend fun history(sessionId: String) = HistoryResponse(emptyList())
@@ -101,7 +109,7 @@ class BootFlowTest {
         app.container = AppContainer(
             app,
             authManager = HangingAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
             authStateStore = state,
         )
     }

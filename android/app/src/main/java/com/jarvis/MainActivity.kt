@@ -26,7 +26,9 @@ class MainActivity : FragmentActivity() {
         val container = (application as JarvisApp).container
         setContent {
             JarvisTheme {
-                val vm: ChatViewModel = viewModel { ChatViewModel(container.chatRepository) }
+                val vm: ChatViewModel = viewModel {
+                    ChatViewModel(container.chatRepository, container.conversationsRepository)
+                }
                 val state by vm.state.collectAsState()
                 val scope = rememberCoroutineScope()
 
@@ -85,6 +87,8 @@ class MainActivity : FragmentActivity() {
                 // sends a returning user back to sign-in — and it clears the flag so the
                 // next launch does not make the same optimistic bet.
                 LaunchedEffect(Unit) {
+                    // Every launch opens a NEW conversation; the old ones live in the list.
+                    vm.onColdStart()
                     val returning = container.authStateStore.hasSignedInBefore()
                     if (returning) vm.onReturningUser()
 
@@ -135,6 +139,10 @@ class MainActivity : FragmentActivity() {
                     onRetry = vm::refreshHistory,
                     onOpenVoiceProfile = { openVoiceProfile() },
                     onBack = { route = Route.CHAT },
+                    onToggleConversations = vm::toggleConversations,
+                    onNewConversation = vm::startNewConversation,
+                    onOpenConversation = vm::openConversation,
+                    onDeleteConversation = vm::deleteConversation,
                 )
             }
         }
