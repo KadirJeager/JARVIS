@@ -19,8 +19,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,19 +72,31 @@ fun VoiceProfileScreen(
     ) {
         TopBar(onBack)
 
-        when (state.gate) {
-            GatePhase.CHECKING -> Locked(message = "Kimliğin doğrulanıyor...")
-            GatePhase.DENIED -> Denied(state.error, onRetryUnlock)
-            GatePhase.UNLOCKED -> Unlocked(
-                state = state,
-                onRetryLoad = onRetryLoad,
-                onSetLabel = onSetLabel,
-                onDeleteSample = onDeleteSample,
-                onConfirm = onConfirm,
-                onReject = onReject,
-                onDeleteProfile = onDeleteProfile,
-                onDismissError = onDismissError,
-            )
+        // Weighted so this region is bounded to "screen minus TopBar", not the full
+        // screen height again: an unweighted fillMaxSize() child here would report a
+        // height equal to the WHOLE screen (Column gives every unweighted child the
+        // same max constraint), pushing its own content — and anything inside it, like
+        // the LazyColumn's last item — past the real bottom edge by TopBar's height.
+        // That overhang is invisible until content is tall enough to reach it, which is
+        // exactly what the danger-zone confirm button at the tail of Task 8's longer
+        // list does: it renders and reports enabled correctly (semantics don't need
+        // visibility) but a real touch/click at its position lands off-screen and is
+        // silently dropped.
+        Box(Modifier.weight(1f)) {
+            when (state.gate) {
+                GatePhase.CHECKING -> Locked(message = "Kimliğin doğrulanıyor...")
+                GatePhase.DENIED -> Denied(state.error, onRetryUnlock)
+                GatePhase.UNLOCKED -> Unlocked(
+                    state = state,
+                    onRetryLoad = onRetryLoad,
+                    onSetLabel = onSetLabel,
+                    onDeleteSample = onDeleteSample,
+                    onConfirm = onConfirm,
+                    onReject = onReject,
+                    onDeleteProfile = onDeleteProfile,
+                    onDismissError = onDismissError,
+                )
+            }
         }
     }
 }
@@ -155,8 +169,14 @@ private fun Unlocked(
             return@Column
         }
 
+        // weight(1f), not fillMaxSize(): the danger zone below is pinned OUTSIDE this
+        // scrollable region on purpose. A long gallery/history list must never be able to
+        // scroll the delete control out of reach — not for the user (who could still
+        // swipe to it) but for anything that clicks it by computed position rather than
+        // by scrolling first, and simply as a rule: an irreversible action's control
+        // should not depend on how much content happens to be above it.
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -176,9 +196,26 @@ private fun Unlocked(
                 }
             }
 
+            if (profile.history.isNotEmpty()) {
+                item { SectionTitle("Son söyleyişler (${profile.history.size})") }
+                items(profile.history, key = { it.id }) { row ->
+                    HistoryRowView(
+                        row = row,
+                        busy = state.mutatingId != null,
+                        onConfirm = onConfirm,
+                        onReject = onReject,
+                    )
+                }
+            }
+
             item { Placeholders() }
-            // Task 8 adds: history section + danger zone.
         }
+
+        DangerZone(
+            busy = state.mutatingId != null,
+            onDeleteProfile = onDeleteProfile,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
     }
 }
 
@@ -382,3 +419,135 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
 /** ISO-8601 timestamps arrive from the server; only the date part is useful here, and
  *  a null ts is normal for pre-3d anchors. Substring beats a date parser for this. */
 internal fun shortDate(ts: String?): String = ts?.take(10) ?: "—"
+
+/**
+ * ASCII on purpose. Turkish case folding is locale-dependent (I<->ı, İ<->i), so a
+ * dotted "SİL" lowercased on a Turkish-locale device yields a combining sequence that
+ * silently never matches: the user types exactly what is on screen and the button stays
+ * dead. This word is compared with NO case transformation.
+ */
+const val DELETE_CONFIRM_WORD = "SIL"
+
+@Composable
+private fun HistoryRowView(
+    row: com.jarvis.data.voice.HistoryRow,
+    busy: Boolean,
+    onConfirm: (String) -> Unit,
+    onReject: (String) -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(JarvisSurface).padding(14.dp).testTag("voice_history_${row.id}"),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                String.format(java.util.Locale.ROOT, "%.2f", row.score),
+                style = MaterialTheme.typography.titleSmall,
+                color = if (row.verified) JarvisCyan else JarvisError,
+            )
+            Spacer(Modifier.size(10.dp))
+            Text(
+                if (row.verified) "tanındı" else "tanınmadı",
+                style = MaterialTheme.typography.bodyMedium,
+                color = JarvisTextPrimary,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(shortDate(row.ts), style = MaterialTheme.typography.bodySmall, color = JarvisTextMuted)
+        }
+        row.deviceHint?.let {
+            // "Cihaz: " prefix, not the bare hint: the sample gallery above already
+            // renders a bare deviceHint text (e.g. "buds") for its own rows, and a
+            // history row can legitimately share that same device value — a plain,
+            // unprefixed Text here would then collide as a duplicate exact-match node
+            // for anything asserting on the device name alone.
+            Text(
+                "Cihaz: $it",
+                style = MaterialTheme.typography.bodySmall,
+                color = JarvisTextMuted,
+            )
+        }
+        Spacer(Modifier.size(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // The verdict is shown as text so an already-ruled row still reads clearly
+            // even though its matching button is now inert.
+            when (row.correction) {
+                com.jarvis.data.voice.Correction.CONFIRMED ->
+                    Text("bendim", color = JarvisCyan, style = MaterialTheme.typography.labelMedium)
+                com.jarvis.data.voice.Correction.REJECTED ->
+                    Text("ben değildim", color = JarvisError, style = MaterialTheme.typography.labelMedium)
+                com.jarvis.data.voice.Correction.NONE -> Unit
+            }
+            Spacer(Modifier.weight(1f))
+            // Reversal in BOTH directions stays legal (spec §6): changing your mind is a
+            // legitimate use, and forbidding it would lock the user onto a wrong record.
+            TextButton(
+                onClick = { onConfirm(row.id) },
+                enabled = !busy && row.correction != com.jarvis.data.voice.Correction.CONFIRMED,
+                modifier = Modifier.testTag("voice_confirm_${row.id}"),
+            ) { Text("Bendim", color = JarvisCyan) }
+            TextButton(
+                onClick = { onReject(row.id) },
+                enabled = !busy && row.correction != com.jarvis.data.voice.Correction.REJECTED,
+                modifier = Modifier.testTag("voice_reject_${row.id}"),
+            ) { Text("Ben değildim", color = JarvisError) }
+        }
+    }
+}
+
+@Composable
+private fun DangerZone(busy: Boolean, onDeleteProfile: () -> Unit, modifier: Modifier = Modifier) {
+    var open by remember { mutableStateOf(false) }
+    var typed by remember { mutableStateOf("") }
+
+    Column(modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp)) {
+        Text("Tehlikeli bölge", style = MaterialTheme.typography.titleSmall, color = JarvisError)
+        Spacer(Modifier.size(6.dp))
+        Text(
+            "Profili silmek ses örneklerini VE doğrulama geçmişini birlikte kaldırır. Geri alınamaz.",
+            style = MaterialTheme.typography.bodySmall,
+            color = JarvisTextMuted,
+        )
+        Spacer(Modifier.size(10.dp))
+        if (!open) {
+            TextButton(
+                onClick = { open = true },
+                enabled = !busy,
+                modifier = Modifier.testTag("voice_danger_open"),
+            ) { Text("Ses kimliğimi sil", color = JarvisError) }
+        } else {
+            Text(
+                "Onaylamak için $DELETE_CONFIRM_WORD yaz:",
+                style = MaterialTheme.typography.bodyMedium,
+                color = JarvisTextPrimary,
+            )
+            Spacer(Modifier.size(6.dp))
+            OutlinedTextField(
+                value = typed,
+                onValueChange = { typed = it },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("voice_danger_input"),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = JarvisSurface,
+                    unfocusedContainerColor = JarvisSurface,
+                    focusedTextColor = JarvisTextPrimary,
+                    unfocusedTextColor = JarvisTextPrimary,
+                    cursorColor = JarvisCyan,
+                ),
+            )
+            Spacer(Modifier.size(8.dp))
+            Row {
+                TextButton(onClick = { open = false; typed = "" }) {
+                    Text("Vazgeç", color = JarvisTextMuted)
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    // Exact match, no lowercase()/uppercase() anywhere: see
+                    // DELETE_CONFIRM_WORD for why case folding is unsafe here.
+                    enabled = !busy && typed.trim() == DELETE_CONFIRM_WORD,
+                    onClick = onDeleteProfile,
+                    modifier = Modifier.testTag("voice_danger_confirm"),
+                ) { Text("Kalıcı olarak sil", color = JarvisError) }
+            }
+        }
+    }
+}

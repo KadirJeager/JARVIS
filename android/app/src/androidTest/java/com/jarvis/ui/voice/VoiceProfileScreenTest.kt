@@ -2,12 +2,15 @@ package com.jarvis.ui.voice
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextClearance
+import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.voice.Correction
 import com.jarvis.data.voice.HistoryRow
@@ -17,6 +20,7 @@ import com.jarvis.data.voice.VoiceProfile
 import com.jarvis.data.voice.VoiceQuality
 import com.jarvis.data.voice.VoiceSample
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -127,8 +131,10 @@ class VoiceProfileScreenTest {
      *  flight for the whole screen regardless of which row it targets. If a row NOT
      *  being mutated stayed enabled, tapping it would silently drop the click — the
      *  exact "live-looking button that does nothing" this test exists to catch. So this
-     *  asserts both the mutating row (s2) AND an unrelated row (s1) are disabled; s1
-     *  alone would pass under a (wrong) per-row lock too, since s2 != s1. */
+     *  asserts both the mutating row (s2) AND an unrelated row (s1) are disabled; the s1
+     *  assertion is the one that discriminates, because under a (wrong) per-row lock
+     *  `busy(s1) = (s1 == "s2") = false`, so s1 would stay enabled and that assertion
+     *  would fail. */
     @Test
     fun aRowBeingMutated_disablesItsActions() {
         render(ready().copy(mutatingId = "s2"))
@@ -168,5 +174,91 @@ class VoiceProfileScreenTest {
         compose.onNodeWithTag("voice_error").assertIsDisplayed()
         compose.onNodeWithText("Son çapa silinemez: çapasız profil ses doğrulayamaz.")
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun historyRowsShowScoreAndVerdict() {
+        render(ready())
+        compose.onNodeWithTag("voice_history_h1").assertIsDisplayed()
+        compose.onNodeWithText("0.71").assertIsDisplayed()
+        compose.onNodeWithText("tanındı").assertIsDisplayed()
+    }
+
+    @Test
+    fun historyRowsOfferBothCorrections() {
+        var confirmed: String? = null
+        var rejected: String? = null
+        compose.setContent {
+            VoiceProfileScreen(
+                state = ready(), onBack = {}, onRetryUnlock = {}, onRetryLoad = {},
+                onSetLabel = { _, _ -> }, onDeleteSample = {},
+                onConfirm = { confirmed = it }, onReject = { rejected = it },
+                onDeleteProfile = {}, onDismissError = {},
+            )
+        }
+        compose.onNodeWithTag("voice_confirm_h1").performClick()
+        assertEquals("h1", confirmed)
+        compose.onNodeWithTag("voice_reject_h1").performClick()
+        assertEquals("h1", rejected)
+    }
+
+    /** An already-ruled row must show its verdict and stop offering the same action —
+     *  the endpoint is idempotent, but a live button that changes nothing reads broken. */
+    @Test
+    fun anAlreadyConfirmedRow_showsItsVerdict_andDoesNotOfferConfirmAgain() {
+        val ruled = profile.copy(
+            history = listOf(
+                HistoryRow("h2", "2026-07-25T03:00:00Z", 0.8, true, "buds", "HIGH", "s3",
+                    Correction.CONFIRMED),
+            ),
+        )
+        render(
+            VoiceProfileUiState(
+                gate = GatePhase.UNLOCKED, profile = ruled,
+                summary = summarize(ruled.quality, ruled.counts),
+            ),
+        )
+        compose.onNodeWithText("bendim").assertIsDisplayed()
+        compose.onNodeWithTag("voice_confirm_h2").assertIsNotEnabled()
+        compose.onNodeWithTag("voice_reject_h2").assertIsEnabled()   // reversal stays legal
+    }
+
+    /**
+     * Profile deletion is irreversible and takes the history with it, so it must not be
+     * one stray tap away.
+     */
+    @Test
+    fun profileDeletion_requiresTypingTheConfirmationWord() {
+        var deleted = false
+        compose.setContent {
+            VoiceProfileScreen(
+                state = ready(), onBack = {}, onRetryUnlock = {}, onRetryLoad = {},
+                onSetLabel = { _, _ -> }, onDeleteSample = {}, onConfirm = {}, onReject = {},
+                onDeleteProfile = { deleted = true }, onDismissError = {},
+            )
+        }
+        compose.onNodeWithTag("voice_danger_open").performClick()
+        compose.onNodeWithTag("voice_danger_confirm").assertIsNotEnabled()
+
+        compose.onNodeWithTag("voice_danger_input").performTextInput("sil")
+        compose.onNodeWithTag("voice_danger_confirm").assertIsNotEnabled()   // wrong case
+
+        compose.onNodeWithTag("voice_danger_input").performTextClearance()
+        compose.onNodeWithTag("voice_danger_input").performTextInput(DELETE_CONFIRM_WORD)
+        compose.onNodeWithTag("voice_danger_confirm").assertIsEnabled()
+        compose.onNodeWithTag("voice_danger_confirm").performClick()
+        assertTrue(deleted)
+    }
+
+    /**
+     * Turkish case folding is locale-dependent (I<->ı, İ<->i): a dotted "SİL" lowercased
+     * on a Turkish-locale device produces a combining sequence that silently never
+     * matches, so the user types the right word and the button never unlocks. The
+     * confirmation word is ASCII and compared with no case transformation at all.
+     */
+    @Test
+    fun theConfirmationWordIsAsciiSoTurkishCaseFoldingCannotBreakIt() {
+        assertEquals("SIL", DELETE_CONFIRM_WORD)
+        assertTrue(DELETE_CONFIRM_WORD.all { it.code < 128 })
     }
 }
