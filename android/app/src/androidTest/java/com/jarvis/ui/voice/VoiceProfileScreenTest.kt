@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -27,6 +28,15 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
+/**
+ * Covers the simplified voice-identity screen (user feedback: "karışık, hata yapmaya
+ * müsait, çok veri görünüyor"). The default view now shows only the status card and a
+ * capped recent-history list; the full sample gallery, the 3b placeholders and the
+ * danger zone moved behind a collapsed "Ses örneklerini yönet" section (tests that
+ * target them now expand it first via [expandManageSection]). Both destructive
+ * one-tap affordances (sample delete, history correction) now require an explicit
+ * confirm step through a dialog.
+ */
 @RunWith(AndroidJUnit4::class)
 class VoiceProfileScreenTest {
 
@@ -39,7 +49,11 @@ class VoiceProfileScreenTest {
             VoiceSample("s2", SampleSource.AUTO, "2026-07-25T01:00:00Z", "arctis", null, null),
         ),
         history = listOf(
-            HistoryRow("h1", "2026-07-25T02:00:00Z", 0.71, true, "buds", "HIGH", "s2", Correction.NONE),
+            // Deliberately a device NOT used by any sample above: the history row now
+            // shows its device hint bare (no "Cihaz:" prefix, per the decluttered
+            // design), so reusing "buds" here would make it ambiguous with sample s1's
+            // device text once the manage section is expanded on the same screen.
+            HistoryRow("h1", "2026-07-25T02:00:00Z", 0.71, true, "telefon", "HIGH", "s2", Correction.NONE),
         ),
         quality = VoiceQuality(0.71, 0.1, mapOf("buds" to 0.7), emptyMap(), 0.72, 0.65),
     )
@@ -54,6 +68,9 @@ class VoiceProfileScreenTest {
         state: VoiceProfileUiState,
         onSetLabel: (String, String?) -> Unit = { _, _ -> },
         onDeleteSample: (String) -> Unit = {},
+        onConfirm: (String) -> Unit = {},
+        onReject: (String) -> Unit = {},
+        onDeleteProfile: () -> Unit = {},
     ) {
         compose.setContent {
             VoiceProfileScreen(
@@ -63,12 +80,20 @@ class VoiceProfileScreenTest {
                 onRetryLoad = {},
                 onSetLabel = onSetLabel,
                 onDeleteSample = onDeleteSample,
-                onConfirm = {},
-                onReject = {},
-                onDeleteProfile = {},
+                onConfirm = onConfirm,
+                onReject = onReject,
+                onDeleteProfile = onDeleteProfile,
                 onDismissError = {},
             )
         }
+    }
+
+    /** The sample gallery, placeholders and danger zone now live behind this toggle,
+     *  collapsed by default (see [manageSectionIsCollapsedByDefault]). Tests that need
+     *  them expand it first. */
+    private fun expandManageSection() {
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_manage_toggle"))
+        compose.onNodeWithTag("voice_manage_toggle").performClick()
     }
 
     /** Nothing about the voice profile may render before the device lock is satisfied. */
@@ -94,9 +119,38 @@ class VoiceProfileScreenTest {
         compose.onNodeWithTag("voice_status_detail").assertIsDisplayed()
     }
 
+    /** Default-view declutter (user feedback: "çok veri görünüyor"): the raw score/
+     *  percentage breakdown must NOT appear on the default view; the status card shows
+     *  a plain sentence instead. */
+    @Test
+    fun theStatusCardShowsAPlainSentence_notTheRawScoreBreakdown() {
+        render(ready())
+        compose.onNodeWithText("Sesini büyük çoğunlukla doğru tanıyor.").assertIsDisplayed()
+        compose.onAllNodesWithText("Doğrulanmış ortalama 0.71", substring = true)
+            .assertCountEquals(0)
+    }
+
+    /** Hard requirement: the sample gallery, placeholders and danger zone are collapsed
+     *  by default — not merely styled to look collapsed, actually absent from the tree
+     *  until the user opts in. */
+    @Test
+    fun manageSectionIsCollapsedByDefault() {
+        render(ready())
+        compose.onAllNodesWithTag("voice_sample_s1").assertCountEquals(0)
+        compose.onAllNodesWithTag("voice_placeholder_record").assertCountEquals(0)
+        compose.onAllNodesWithTag("voice_danger_open").assertCountEquals(0)
+
+        expandManageSection()
+
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_s1"))
+        compose.onNodeWithTag("voice_sample_s1").assertIsDisplayed()
+    }
+
     @Test
     fun galleryRowsShowTheirSourceBadgeAndDevice() {
         render(ready())
+        expandManageSection()
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_s1"))
         compose.onNodeWithTag("voice_sample_s1").assertIsDisplayed()
         compose.onNodeWithText("kayıt").assertIsDisplayed()
         compose.onNodeWithText("otomatik").assertIsDisplayed()
@@ -106,6 +160,8 @@ class VoiceProfileScreenTest {
     @Test
     fun aLabelledSampleShowsItsTurkishLabel_notTheAsciiWireValue() {
         render(ready())
+        expandManageSection()
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_s1"))
         compose.onNodeWithText("Kulaklık").assertIsDisplayed()
     }
 
@@ -113,19 +169,50 @@ class VoiceProfileScreenTest {
     fun choosingALabel_reportsTheAsciiWireValue_notTheDisplayName() {
         var chosen: Pair<String, String?>? = null
         render(ready(), onSetLabel = { id, label -> chosen = id to label })
+        expandManageSection()
 
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_label_s2"))
         compose.onNodeWithTag("voice_sample_label_s2").performClick()
         compose.onNodeWithTag("voice_label_option_gurultulu").performClick()
 
         assertEquals("s2" to "gurultulu", chosen)
     }
 
+    /**
+     * Sample deletion used to fire on a single tap. It now requires an explicit
+     * confirm: tapping "Sil" alone must NOT call back — only tapping the dialog's
+     * "Evet, sil" does. This is deliberately a plain confirm, not the typed "SIL"
+     * gate (that stays reserved for whole-profile deletion).
+     */
     @Test
-    fun deletingASample_reportsItsId() {
+    fun deletingASample_requiresConfirmation_thenReportsItsId() {
         var deleted: String? = null
         render(ready(), onDeleteSample = { deleted = it })
+        expandManageSection()
+
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_delete_s2"))
         compose.onNodeWithTag("voice_sample_delete_s2").performClick()
+        assertEquals(null, deleted) // tapping "Sil" alone must not delete anything yet
+
+        compose.onNodeWithTag("voice_sample_delete_confirm_s2").assertIsDisplayed()
+        compose.onNodeWithTag("voice_sample_delete_confirm_s2").performClick()
+
         assertEquals("s2", deleted)
+    }
+
+    /** The confirm dialog's "Vazgeç" must close it without ever calling back. */
+    @Test
+    fun cancellingTheSampleDeleteDialog_reportsNothing() {
+        var deleted: String? = null
+        render(ready(), onDeleteSample = { deleted = it })
+        expandManageSection()
+
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_delete_s2"))
+        compose.onNodeWithTag("voice_sample_delete_s2").performClick()
+        compose.onNodeWithTag("voice_sample_delete_cancel_s2").performClick()
+
+        compose.onNodeWithTag("voice_sample_delete_dialog_s2").assertDoesNotExist()
+        assertEquals(null, deleted)
     }
 
     /** The lock is screen-wide, not per-row: [VoiceProfileViewModel.mutate] starts with
@@ -140,6 +227,8 @@ class VoiceProfileScreenTest {
     @Test
     fun aRowBeingMutated_disablesItsActions() {
         render(ready().copy(mutatingId = "s2"))
+        expandManageSection()
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_delete_s2"))
         compose.onNodeWithTag("voice_sample_delete_s2").assertIsNotEnabled()
         compose.onNodeWithTag("voice_sample_delete_s1").assertIsNotEnabled()
         compose.onNodeWithTag("voice_sample_label_s1").assertIsNotEnabled()
@@ -162,10 +251,13 @@ class VoiceProfileScreenTest {
         compose.onNodeWithText("Ses kimliği yok").assertIsDisplayed()
     }
 
-    /** Spec §9: the screen is built expecting 3b's actions from day one. */
+    /** Spec §9: the screen is built expecting 3b's actions from day one. They now live
+     *  in the collapsed "Ses örneklerini yönet" section. */
     @Test
     fun the3bPlaceholdersArePresentButInert() {
         render(ready())
+        expandManageSection()
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_placeholder_record"))
         compose.onNodeWithTag("voice_placeholder_record").assertIsNotEnabled()
         compose.onNodeWithTag("voice_placeholder_retrain").assertIsNotEnabled()
     }
@@ -178,28 +270,49 @@ class VoiceProfileScreenTest {
             .assertIsDisplayed()
     }
 
+    /** The row itself now shows the plain verdict, device and date only — the numeric
+     *  score moved into the detail dialog (spec: "the numeric score belongs in the
+     *  detail, not the list"). */
     @Test
-    fun historyRowsShowScoreAndVerdict() {
+    fun historyRowsShowVerdictDeviceAndDate_butNotTheRawScore() {
         render(ready())
         compose.onNodeWithTag("voice_history_h1").assertIsDisplayed()
-        compose.onNodeWithText("0.71").assertIsDisplayed()
         compose.onNodeWithText("tanındı").assertIsDisplayed()
+        compose.onAllNodesWithText("0.71").assertCountEquals(0)
     }
 
+    /** Tapping the row is the "detail": that's where the numeric score now lives. */
     @Test
-    fun historyRowsOfferBothCorrections() {
+    fun tappingAHistoryRow_opensADialogShowingTheScore() {
+        render(ready())
+        compose.onNodeWithTag("voice_history_h1").performClick()
+        compose.onNodeWithTag("voice_history_dialog_h1").assertIsDisplayed()
+        compose.onNodeWithText("0.71", substring = true).assertIsDisplayed()
+    }
+
+    /**
+     * Replaces the old always-live per-row "Bendim"/"Ben değildim" pair — a single
+     * mis-tap in a dense scrolling list used to delete the gallery sample that
+     * utterance became. Now the row must be tapped to open a dialog before either
+     * action is reachable, and the dialog closes on each decision (spec §6: reversal
+     * in BOTH directions stays legal, proven here by reopening the dialog for the
+     * second action).
+     */
+    @Test
+    fun historyRowDialog_offersBothCorrections_oneDecisionPerOpen() {
         var confirmed: String? = null
         var rejected: String? = null
-        compose.setContent {
-            VoiceProfileScreen(
-                state = ready(), onBack = {}, onRetryUnlock = {}, onRetryLoad = {},
-                onSetLabel = { _, _ -> }, onDeleteSample = {},
-                onConfirm = { confirmed = it }, onReject = { rejected = it },
-                onDeleteProfile = {}, onDismissError = {},
-            )
-        }
+        render(ready(), onConfirm = { confirmed = it }, onReject = { rejected = it })
+
+        // Not reachable before the row is tapped.
+        compose.onAllNodesWithTag("voice_confirm_h1").assertCountEquals(0)
+
+        compose.onNodeWithTag("voice_history_h1").performClick()
         compose.onNodeWithTag("voice_confirm_h1").performClick()
         assertEquals("h1", confirmed)
+        compose.onNodeWithTag("voice_history_dialog_h1").assertDoesNotExist() // closes on decision
+
+        compose.onNodeWithTag("voice_history_h1").performClick()
         compose.onNodeWithTag("voice_reject_h1").performClick()
         assertEquals("h1", rejected)
     }
@@ -207,7 +320,7 @@ class VoiceProfileScreenTest {
     /** An already-ruled row must show its verdict and stop offering the same action —
      *  the endpoint is idempotent, but a live button that changes nothing reads broken. */
     @Test
-    fun anAlreadyConfirmedRow_showsItsVerdict_andDoesNotOfferConfirmAgain() {
+    fun anAlreadyConfirmedRow_showsItsVerdict_andItsDialogDoesNotOfferConfirmAgain() {
         val ruled = profile.copy(
             history = listOf(
                 HistoryRow("h2", "2026-07-25T03:00:00Z", 0.8, true, "buds", "HIGH", "s3",
@@ -221,14 +334,16 @@ class VoiceProfileScreenTest {
             ),
         )
         compose.onNodeWithText("bendim").assertIsDisplayed()
+
+        compose.onNodeWithTag("voice_history_h2").performClick()
         compose.onNodeWithTag("voice_confirm_h2").assertIsNotEnabled()
         compose.onNodeWithTag("voice_reject_h2").assertIsEnabled()   // reversal stays legal
     }
 
-    /** Mirrors [anAlreadyConfirmedRow_showsItsVerdict_andDoesNotOfferConfirmAgain]: spec
-     *  §6 guarantees reversal in BOTH directions, not just away from CONFIRMED. */
+    /** Mirrors [anAlreadyConfirmedRow_showsItsVerdict_andItsDialogDoesNotOfferConfirmAgain]:
+     *  spec §6 guarantees reversal in BOTH directions, not just away from CONFIRMED. */
     @Test
-    fun anAlreadyRejectedRow_showsItsVerdict_andDoesNotOfferRejectAgain() {
+    fun anAlreadyRejectedRow_showsItsVerdict_andItsDialogDoesNotOfferRejectAgain() {
         val ruled = profile.copy(
             history = listOf(
                 HistoryRow("h3", "2026-07-25T03:00:00Z", 0.8, true, "buds", "HIGH", "s3",
@@ -242,26 +357,51 @@ class VoiceProfileScreenTest {
             ),
         )
         compose.onNodeWithText("ben değildim").assertIsDisplayed()
+
+        compose.onNodeWithTag("voice_history_h3").performClick()
         compose.onNodeWithTag("voice_reject_h3").assertIsNotEnabled()
         compose.onNodeWithTag("voice_confirm_h3").assertIsEnabled()   // reversal stays legal
     }
 
+    /** Only the most recent handful of history rows show by default; "Daha fazla
+     *  göster" reveals the rest. */
+    @Test
+    fun recentHistoryIsCappedByDefault_withADahaFazlaToExpandIt() {
+        val manyRows = (1..7).map { i ->
+            HistoryRow("h$i", "2026-07-25T0$i:00:00Z", 0.7, true, "buds", "HIGH", null, Correction.NONE)
+        }
+        val big = profile.copy(history = manyRows)
+        render(
+            VoiceProfileUiState(
+                gate = GatePhase.UNLOCKED, profile = big,
+                summary = summarize(big.quality, big.counts),
+            ),
+        )
+
+        compose.onNodeWithTag("voice_history_h1").assertIsDisplayed()
+        compose.onAllNodesWithTag("voice_history_h6").assertCountEquals(0)
+        compose.onAllNodesWithTag("voice_history_h7").assertCountEquals(0)
+
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_history_show_more"))
+        compose.onNodeWithTag("voice_history_show_more").performClick()
+
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_history_h7"))
+        compose.onNodeWithTag("voice_history_h7").assertIsDisplayed()
+    }
+
     /**
      * Profile deletion is irreversible and takes the history with it, so it must not be
-     * one stray tap away. The danger zone is the last item of the scrollable list (spec
-     * §9), so reaching it here needs performScrollToNode — a bare performScrollTo()
-     * won't do: an un-composed lazy item isn't in the semantics tree yet.
+     * one stray tap away. The danger zone now lives inside the collapsed "Ses
+     * örneklerini yönet" section, so reaching it needs expanding that section first,
+     * then performScrollToNode — a bare performScrollTo() won't do: an un-composed
+     * lazy item isn't in the semantics tree yet.
      */
     @Test
     fun profileDeletion_requiresTypingTheConfirmationWord() {
         var deleted = false
-        compose.setContent {
-            VoiceProfileScreen(
-                state = ready(), onBack = {}, onRetryUnlock = {}, onRetryLoad = {},
-                onSetLabel = { _, _ -> }, onDeleteSample = {}, onConfirm = {}, onReject = {},
-                onDeleteProfile = { deleted = true }, onDismissError = {},
-            )
-        }
+        render(ready(), onDeleteProfile = { deleted = true })
+        expandManageSection()
+
         compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_danger_open"))
         compose.onNodeWithTag("voice_danger_open").performClick()
         compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_danger_confirm"))
