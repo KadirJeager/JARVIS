@@ -1015,7 +1015,7 @@ cd /home/user/Projeler/JARVIS/android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew testDebugUnitTest
 ```
 
-Expected: PASS — 41 JVM testi.
+Expected: PASS — 40 JVM testi.
 
 - [ ] **Step 5: Mutation check**
 
@@ -1317,7 +1317,7 @@ cd /home/user/Projeler/JARVIS/android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew testDebugUnitTest
 ```
 
-Expected: PASS — 54 JVM testi.
+Expected: PASS — 53 JVM testi.
 
 - [ ] **Step 5: Mutation check**
 
@@ -1807,7 +1807,7 @@ cd /home/user/Projeler/JARVIS/android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew testDebugUnitTest
 ```
 
-Expected: PASS — 66 JVM testi.
+Expected: PASS — 65 JVM testi.
 
 - [ ] **Step 5: Mutation check (iki ayrı mutasyon)**
 
@@ -2040,7 +2040,7 @@ cd /home/user/Projeler/JARVIS/android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew testDebugUnitTest connectedDebugAndroidTest
 ```
 
-Expected: PASS — 66 JVM + 5 instrumented (mevcut 3 + yeni 2). Mevcut `SmokeTest`/`ChatScreenTest`/`EndToEndTest` **kırılmamalı**; kırılırsa `FragmentActivity` geçişi bir şeyi bozmuş demektir, orada dur ve kök nedeni bul.
+Expected: PASS — 65 JVM + 5 instrumented (mevcut 3 + yeni 2). Mevcut `SmokeTest`/`ChatScreenTest`/`EndToEndTest` **kırılmamalı**; kırılırsa `FragmentActivity` geçişi bir şeyi bozmuş demektir, orada dur ve kök nedeni bul.
 
 - [ ] **Step 6: Commit**
 
@@ -2938,7 +2938,7 @@ cd /home/user/Projeler/JARVIS/android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew testDebugUnitTest connectedDebugAndroidTest
 ```
 
-Expected: PASS — 66 JVM + 21 instrumented.
+Expected: PASS — 65 JVM + 21 instrumented.
 
 - [ ] **Step 5: Mutation check**
 
@@ -3306,7 +3306,7 @@ cd /home/user/Projeler/JARVIS/android
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew testDebugUnitTest connectedDebugAndroidTest
 ```
 
-Expected: PASS — 66 JVM + 23 instrumented. `EndToEndTest` `ChatScreen`'i doğrudan kuruyorsa yeni parametrenin varsayılanı sayesinde **derlenmeye devam etmeli**; etmiyorsa çağrıyı güncelle ama **iddiaları değiştirme**.
+Expected: PASS — 65 JVM + 23 instrumented. `EndToEndTest` `ChatScreen`'i doğrudan kuruyorsa yeni parametrenin varsayılanı sayesinde **derlenmeye devam etmeli**; etmiyorsa çağrıyı güncelle ama **iddiaları değiştirme**.
 
 - [ ] **Step 5: Mutation check**
 
