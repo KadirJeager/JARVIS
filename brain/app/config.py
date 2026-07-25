@@ -68,6 +68,7 @@ TOOL_ZONES = {
     "remember_fact": ZONE_GREEN,
     "add_lesson": ZONE_GREEN,
     "update_user_profile": ZONE_YELLOW,
+    "get_speaker_status": ZONE_GREEN,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 
