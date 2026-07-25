@@ -1,12 +1,21 @@
 """Minimal in-memory stand-in for the Firestore client surface Memory uses."""
 import itertools
 
+from google.api_core.exceptions import AlreadyExists
+
 
 class FakeSnap:
     """Snapshot object that mimics Firestore document snapshot."""
-    def __init__(self, data):
+    def __init__(self, data, reference=None):
         self.exists = data is not None
         self._data = dict(data or {})
+        # Real firestore_v1 DocumentSnapshot exposes `.reference` (the
+        # DocumentReference it was read from) -- needed so query results can
+        # be deleted individually (bulk delete-by-query has no dedicated
+        # Firestore API; iterate + snap.reference.delete() is the standard
+        # idiom). Only FakeQuery.stream() sets this; FakeCollection.stream()
+        # doesn't need it yet (nothing deletes off a bare collection stream).
+        self.reference = reference
 
     def to_dict(self):
         return self._data
@@ -26,14 +35,23 @@ class FakeDoc:
         else:
             self.store[self.key] = dict(data)
 
+    def create(self, data):
+        """Mirrors Firestore's DocumentReference.create(): a single atomic
+        check-and-write that raises AlreadyExists if the doc is already
+        present, instead of silently overwriting it like set() does."""
+        if self.key in self.store:
+            raise AlreadyExists(f"document already exists: {self.key}")
+        self.store[self.key] = dict(data)
+
     def delete(self):
         self.store.pop(self.key, None)
 
 
 class FakeQuery:
     """Minimal Firestore query surface: where(filter=FieldFilter)/order_by/limit/stream."""
-    def __init__(self, rows):
-        self._rows = list(rows)          # list[dict]
+    def __init__(self, store):
+        self._store = store               # dict[doc_id, data] -- backing store, for .reference
+        self._rows = list(store.items())  # list[(doc_id, data)]
         self._filters = []               # list[(field_path, op_string, value)]
         self._order = None               # (field, direction)
         self._limit = None
@@ -51,14 +69,14 @@ class FakeQuery:
         return self
 
     def stream(self):
-        rows = [d for d in self._rows if self._match(d)]
+        rows = [(doc_id, d) for doc_id, d in self._rows if self._match(d)]
         if self._order:
             field, direction = self._order
             # Sorts only by `field`; does not model Firestore's implicit `__name__` (doc id) secondary tiebreak.
-            rows.sort(key=lambda d: d.get(field), reverse=(direction == "DESCENDING"))
+            rows.sort(key=lambda kv: kv[1].get(field), reverse=(direction == "DESCENDING"))
         if self._limit is not None:
             rows = rows[: self._limit]
-        return [FakeSnap(d) for d in rows]
+        return [FakeSnap(d, reference=FakeDoc(self._store, doc_id)) for doc_id, d in rows]
 
     def _match(self, d):
         for field_path, op_string, value in self._filters:
@@ -90,13 +108,13 @@ class FakeCollection:
             yield FakeSnap(data)
 
     def where(self, filter=None):
-        return FakeQuery(self.docs.values()).where(filter=filter)
+        return FakeQuery(self.docs).where(filter=filter)
 
     def order_by(self, field, direction="ASCENDING"):
-        return FakeQuery(self.docs.values()).order_by(field, direction)
+        return FakeQuery(self.docs).order_by(field, direction)
 
     def limit(self, n):
-        return FakeQuery(self.docs.values()).limit(n)
+        return FakeQuery(self.docs).limit(n)
 
 
 class FakeEvent:

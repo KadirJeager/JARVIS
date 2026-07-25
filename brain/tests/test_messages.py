@@ -48,3 +48,27 @@ def test_sanitize_session_id_accepts_uuid_like():
 def test_sanitize_session_id_rejects_invalid(bad):
     with pytest.raises(ValueError):
         sanitize_session_id(bad)
+
+
+# --- delete_session (Katman 2b conversations feature) -----------------------
+
+
+def test_delete_session_removes_only_that_sessions_messages():
+    store = _store()
+    store.append("u@x.com", "s1", "user", "silinecek")
+    store.append("u@x.com", "s2", "user", "kalacak")
+    deleted = store.delete_session("u@x.com", "s1")
+    assert deleted == 1
+    assert store.history("u@x.com", "s1") == []
+    assert [h["text"] for h in store.history("u@x.com", "s2")] == ["kalacak"]
+
+
+def test_delete_session_isolates_by_user():
+    """HARD CONSTRAINT: deleting user A's session_id must never remove user
+    B's messages under the same session_id."""
+    store = _store()
+    store.append("u@x.com", "s1", "user", "A nin mesaji")
+    store.append("other@x.com", "s1", "user", "B nin mesaji")
+    store.delete_session("u@x.com", "s1")
+    assert store.history("u@x.com", "s1") == []
+    assert [h["text"] for h in store.history("other@x.com", "s1")] == ["B nin mesaji"]

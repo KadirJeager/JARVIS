@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, messages, speaker, voice, voice_manage, voice_trust
+from . import config, conversations, messages, speaker, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_user
 
@@ -28,13 +28,14 @@ _runner: Runner | None = None
 _session_service = InMemorySessionService()
 _memory = None
 _messages: "messages.MessageStore | None" = None
+_conversations: "conversations.ConversationStore | None" = None
 _voice_runner: Runner | None = None
 _speaker_service: "speaker.SpeakerService | None" = None
 
 
 def _init() -> None:
     """Lazy init so tests can import the module without GCP credentials."""
-    global _runner, _memory, _messages
+    global _runner, _memory, _messages, _conversations
     if _runner is not None:
         return
     from google.cloud import firestore
@@ -45,6 +46,7 @@ def _init() -> None:
     db = firestore.Client()
     _memory = Memory(db, embed_fn=make_embed_fn())
     _messages = messages.MessageStore(db)
+    _conversations = conversations.ConversationStore(db)
     _runner = Runner(
         app_name=APP_NAME,
         agent=build_agent(_memory, FirestoreAudit(db)),
@@ -166,6 +168,26 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
     _init()
     await _ensure_session(user_id, session_id)
     _messages.append(user_id, session_id, "user", message)
+    # _conversations is None only in tests that monkeypatch _init to a no-op
+    # and wire _messages/_runner directly (see tests/test_api.py's run_turn
+    # tests); in the real process _init() (called above) always sets it
+    # before this point, so the guard never fires there.
+    if _conversations is not None:
+        # touch() is ancillary bookkeeping for the conversation-list index,
+        # not the primary feature -- the user's message is already durably
+        # persisted via _messages.append() above. A Firestore hiccup here
+        # must be logged and swallowed, never allowed to propagate up to
+        # chat()'s broad except -> 502 and mask a reply that will still be
+        # generated. A missed touch self-heals on this session's next
+        # message via touch()'s upsert (see conversations.py).
+        try:
+            _conversations.touch(user_id, session_id, "user", message)
+        except Exception:
+            logging.exception(
+                "run_turn: conversations.touch failed (user turn) for "
+                "user_id=%s session_id=%s -- continuing without it",
+                user_id, session_id,
+            )
     content = types.Content(role="user", parts=[types.Part(text=message)])
     reply = ""
     async for event in _runner.run_async(
@@ -175,6 +197,19 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
             reply = event.content.parts[0].text or ""
     if reply:
         _messages.append(user_id, session_id, "model", reply)
+        if _conversations is not None:
+            # Same reasoning as the user-turn touch() above: the model's
+            # reply is already durably persisted at this point, so a
+            # bookkeeping failure here must not turn a good, already-stored
+            # reply into a 502 with nothing to show for it.
+            try:
+                _conversations.touch(user_id, session_id, "model", reply)
+            except Exception:
+                logging.exception(
+                    "run_turn: conversations.touch failed (model turn) for "
+                    "user_id=%s session_id=%s -- continuing without it",
+                    user_id, session_id,
+                )
     return reply
 
 
@@ -229,6 +264,46 @@ async def history(session_id: str, email: str = Depends(require_user)):
             status_code=502,
             detail="Jarvis şu anda geçmişi getiremiyor (altyapı hatası). Az sonra tekrar dene.",
         )
+
+
+@app.get("/api/conversations")
+async def list_conversations(email: str = Depends(require_user)):
+    try:
+        _init()
+        return {"conversations": _conversations.list_conversations(user_id=email)}
+    except Exception:
+        logging.exception("conversations: list failed for user_id=%s", email)
+        raise HTTPException(
+            status_code=502,
+            detail="Jarvis şu anda konuşmaları listeleyemiyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+
+
+@app.delete("/api/conversations/{session_id}")
+async def delete_conversation(session_id: str, email: str = Depends(require_user)):
+    try:
+        sid = messages.sanitize_session_id(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Geçersiz oturum kimliği")
+    try:
+        _init()
+        # Two independent writes, no shared transaction (see conversations.py's
+        # module docstring for the full reasoning). Order matters: messages are
+        # deleted FIRST, then the summary. A crash in between then fails closed
+        # (a stale list row pointing at zero messages -- recoverable, harmless)
+        # instead of failing open (summary gone, but the full transcript still
+        # readable via GET /api/history -- a silent leak of a "deleted" chat).
+        _messages.delete_session(user_id=email, session_id=sid)
+        _conversations.delete(user_id=email, session_id=sid)
+    except Exception:
+        logging.exception(
+            "conversations: delete failed for user_id=%s session_id=%s", email, sid
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Jarvis şu anda konuşmayı silemiyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+    return {"deleted": sid}
 
 
 @app.post("/api/voice/enroll")

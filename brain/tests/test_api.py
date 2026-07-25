@@ -7,6 +7,7 @@ import app.auth as auth_mod
 import app.main as main_mod
 from app.agent import AGENT_NAME
 from app.auth import require_user
+from app.conversations import ConversationStore
 from app.messages import MessageStore
 from tests.fakes import FakeDB, FakeRunner
 
@@ -15,6 +16,11 @@ def _store():
     # Monotonic ISO-ish timestamps so ordering is deterministic (no sleep).
     counter = iter(f"2026-01-01T00:00:{i:02d}.000000+00:00" for i in range(60))
     return MessageStore(FakeDB(), now_fn=lambda: next(counter))
+
+
+def _conv_store():
+    counter = iter(f"2026-01-01T00:00:{i:02d}.000000+00:00" for i in range(60))
+    return ConversationStore(FakeDB(), now_fn=lambda: next(counter))
 
 
 @pytest.fixture()
@@ -284,6 +290,68 @@ async def test_run_turn_does_not_persist_empty_model_reply(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_turn_survives_conversations_touch_failure(monkeypatch):
+    """CRITICAL: a Firestore hiccup in the conversation-index bookkeeping
+    write (touch()) must not turn an already-generated, already-persisted
+    reply into a failure. The reply and its row in `_messages` are the
+    primary feature; `conversations` is only an ancillary index that
+    self-heals on the next touch()."""
+    store = _store()
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply="merhaba"))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    class BoomConversations:
+        def touch(self, user_id, session_id, role, text):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(main_mod, "_conversations", BoomConversations())
+
+    async def fake_ensure(user_id, session_id):
+        return None  # session object unused by FakeRunner
+
+    monkeypatch.setattr(main_mod, "_ensure_session", fake_ensure)
+
+    reply = await main_mod.run_turn("u@x.com", "s1", "selam")
+    assert reply == "merhaba"
+    hist = store.history("u@x.com", "s1")
+    assert [(h["role"], h["text"]) for h in hist] == [("user", "selam"), ("model", "merhaba")]
+
+
+def test_chat_endpoint_returns_reply_even_when_conversations_touch_fails(monkeypatch):
+    """Same guarantee as test_run_turn_survives_conversations_touch_failure,
+    exercised through the real /api/chat -> run_turn path (not a
+    monkeypatched run_turn) since the bug this pins lived inside run_turn
+    itself, between the two _messages.append() calls."""
+    store = _store()
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply="merhaba"))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    class BoomConversations:
+        def touch(self, user_id, session_id, role, text):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(main_mod, "_conversations", BoomConversations())
+
+    async def fake_ensure(user_id, session_id):
+        return None
+
+    monkeypatch.setattr(main_mod, "_ensure_session", fake_ensure)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.post("/api/chat", json={"session_id": "s1", "message": "selam"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    assert r.json() == {"reply": "merhaba"}
+    hist = store.history("owner@example.com", "s1")
+    assert [(h["role"], h["text"]) for h in hist] == [("user", "selam"), ("model", "merhaba")]
+
+
+@pytest.mark.asyncio
 async def test_ensure_session_rehydrates_from_history(monkeypatch):
     store = _store()
     store.append("u@x.com", "s1", "user", "adim Kadir")
@@ -336,3 +404,196 @@ async def test_ensure_session_existing_is_not_rehydrated(monkeypatch):
 
     session = await main_mod._ensure_session("u@x.com", "s1")
     assert session.events == []  # already existed -> not rehydrated from history
+
+
+# --- GET /api/conversations, DELETE /api/conversations/{session_id} --------
+# (Katman 2b: enumerate + reopen/delete a user's previous conversations)
+
+
+def test_conversations_requires_auth():
+    with TestClient(main_mod.app) as c:
+        r = c.get("/api/conversations")
+    assert r.status_code in (401, 403)
+
+
+def test_conversations_lists_user_conversations_newest_first(monkeypatch):
+    conv_store = _conv_store()
+    conv_store.touch("owner@example.com", "s1", "user", "eski konusma")
+    conv_store.touch("owner@example.com", "s2", "user", "yeni konusma")
+    monkeypatch.setattr(main_mod, "_conversations", conv_store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/conversations")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 200
+    convs = r.json()["conversations"]
+    assert [c["session_id"] for c in convs] == ["s2", "s1"]
+    assert convs[0]["title"] == "yeni konusma"
+    assert set(convs[0].keys()) == {"session_id", "title", "last_ts", "message_count"}
+
+
+def test_conversations_cross_user_isolation(monkeypatch):
+    """HARD CONSTRAINT: a user must never see another user's conversations."""
+    conv_store = _conv_store()
+    conv_store.touch("owner@example.com", "s1", "user", "benim konusmam")
+    conv_store.touch("other@gmail.com", "s1", "user", "baskasinin konusmasi")
+    monkeypatch.setattr(main_mod, "_conversations", conv_store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/conversations")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 200
+    convs = r.json()["conversations"]
+    assert [c["session_id"] for c in convs] == ["s1"]
+    assert convs[0]["title"] == "benim konusmam"
+
+
+def test_conversations_returns_502_on_failure(monkeypatch):
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    class Boom:
+        def list_conversations(self, user_id):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(main_mod, "_conversations", Boom())
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/conversations")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 502
+    assert "altyapı" in r.json()["detail"]
+
+
+def test_delete_conversation_requires_auth():
+    with TestClient(main_mod.app) as c:
+        r = c.delete("/api/conversations/s1")
+    assert r.status_code in (401, 403)
+
+
+def test_delete_conversation_removes_summary_and_messages(monkeypatch):
+    conv_store = _conv_store()
+    msg_store = _store()
+    conv_store.touch("owner@example.com", "s1", "user", "silinecek")
+    msg_store.append("owner@example.com", "s1", "user", "silinecek")
+    monkeypatch.setattr(main_mod, "_conversations", conv_store)
+    monkeypatch.setattr(main_mod, "_messages", msg_store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.delete("/api/conversations/s1")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 200
+    assert r.json() == {"deleted": "s1"}
+    assert conv_store.list_conversations("owner@example.com") == []
+    assert msg_store.history("owner@example.com", "s1") == []
+
+
+def test_delete_conversation_cannot_touch_another_users_conversation(monkeypatch):
+    """HARD CONSTRAINT: a user must never be able to delete another user's
+    conversation, even with the same session_id."""
+    conv_store = _conv_store()
+    msg_store = _store()
+    conv_store.touch("owner@example.com", "s1", "user", "A nin konusmasi")
+    conv_store.touch("other@gmail.com", "s1", "user", "B nin konusmasi")
+    msg_store.append("other@gmail.com", "s1", "user", "B nin mesaji")
+    monkeypatch.setattr(main_mod, "_conversations", conv_store)
+    monkeypatch.setattr(main_mod, "_messages", msg_store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.delete("/api/conversations/s1")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 200
+    # Attacker's own (empty) conversation is gone, but victim's survives intact.
+    assert [c["title"] for c in conv_store.list_conversations("other@gmail.com")] == ["B nin konusmasi"]
+    assert [h["text"] for h in msg_store.history("other@gmail.com", "s1")] == ["B nin mesaji"]
+
+
+def test_delete_conversation_rejects_bad_session_id(monkeypatch):
+    monkeypatch.setattr(main_mod, "_conversations", _conv_store())
+    monkeypatch.setattr(main_mod, "_messages", _store())
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            # "/" can't appear here (it would split into two path segments and
+            # 405 at routing, before sanitize_session_id even runs) -- an
+            # overlong id exercises the same rejection without that pitfall.
+            r = c.delete(f"/api/conversations/{'x' * 300}")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 400
+
+
+def test_delete_conversation_deletes_messages_before_summary_so_a_crash_fails_closed(monkeypatch):
+    """IMPORTANT: ordering pin. Messages must be deleted BEFORE the summary.
+    If the summary delete then fails, the outcome must be fail-CLOSED: a
+    stale list row pointing at zero real messages (recoverable, harmless) --
+    never fail-OPEN (summary gone but the full transcript still readable via
+    GET /api/history, leaking a "deleted" conversation)."""
+    conv_store = _conv_store()
+    msg_store = _store()
+    conv_store.touch("owner@example.com", "s1", "user", "silinecek")
+    msg_store.append("owner@example.com", "s1", "user", "silinecek")
+
+    class BoomOnSummaryDelete:
+        """Always fails the summary delete itself, without ever mutating the
+        underlying store -- so whether the message row is already gone by
+        the time this raises tells us, unambiguously, which delete call ran
+        first."""
+        def __init__(self, real):
+            self._real = real
+
+        def delete(self, user_id, session_id):
+            raise RuntimeError("firestore down mid-delete")
+
+        def list_conversations(self, user_id):
+            return self._real.list_conversations(user_id)
+
+    monkeypatch.setattr(main_mod, "_conversations", BoomOnSummaryDelete(conv_store))
+    monkeypatch.setattr(main_mod, "_messages", msg_store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.delete("/api/conversations/s1")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    assert r.status_code == 502
+    # Fail-closed evidence: messages are already gone (transcript no longer
+    # readable via /api/history), while the summary lingers as a stale,
+    # harmless list row -- not the reverse.
+    assert msg_store.history("owner@example.com", "s1") == []
+    assert [c["session_id"] for c in conv_store.list_conversations("owner@example.com")] == ["s1"]
+
+
+def test_delete_conversation_returns_502_on_failure(monkeypatch):
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    class Boom:
+        def delete(self, user_id, session_id):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(main_mod, "_conversations", Boom())
+    monkeypatch.setattr(main_mod, "_messages", _store())
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.delete("/api/conversations/s1")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+    assert r.status_code == 502
+    assert "altyapı" in r.json()["detail"]
