@@ -13,16 +13,46 @@ NOT atomic with the messages write: Firestore has no cross-collection (or
 even same-collection multi-doc) transaction in use here, so a crash between
 MessageStore.append() and ConversationStore.touch() -- or between the two
 deletes in main.delete_conversation -- can leave the two collections briefly
-inconsistent (a message with no/stale summary row, or, on delete, a summary
-gone with a stray message left behind or vice versa). Accepted for the same
-reason messages.py accepts ts-tie risk: there is no concurrent-writer path
-today for a single (user_id, session_id), so the window is real but narrow,
-and a later message on the same session self-heals the summary side via
-touch()'s upsert.
+inconsistent. Accepted for the same reason messages.py accepts ts-tie risk:
+there is no locking today for a single (user_id, session_id), so the window
+is real but narrow. Two consequences of that are handled deliberately rather
+than left as accidents:
+
+1. touch() is ancillary bookkeeping, not the primary feature. main.run_turn
+   wraps each of its two touch() calls (user turn, model turn) in its own
+   try/except: a Firestore hiccup there is logged and swallowed, never
+   allowed to turn an already-generated, already-persisted (via
+   MessageStore.append()) reply into a 502. A missed touch self-heals on
+   this session's next message via the upsert below.
+
+2. main.delete_conversation deletes MESSAGES first, then the summary --
+   deliberately the opposite of the naive "delete the index entry first"
+   order. The two directions are NOT symmetric risks:
+   - messages-first (chosen): a crash after the messages are gone but
+     before the summary delete lands is a stale list row pointing at a
+     conversation with zero real messages -- FAILS CLOSED. Recoverable
+     (the row can be cleaned up later) and harmless (GET /api/history for
+     that session_id already returns nothing, since the messages are gone).
+   - summary-first (rejected): a crash after the summary is gone but before
+     the messages delete lands makes the conversation invisible in
+     GET /api/conversations while its full transcript stays fully readable
+     via GET /api/history?session_id=... -- FAILS OPEN. The client is told
+     the conversation is gone and has no way to know its content is still
+     live.
+   Given a choice between an ugly-but-harmless leftover and a silent
+   privacy leak, the ordering below always fails closed.
+
+Known caveat, not fixed (YAGNI without a real concurrent-writer path today):
+touch()'s update branch is still read-modify-write (get() then set(merge)),
+so two genuinely concurrent touches for the same *existing* session can both
+read the same message_count and both write count+1, losing an increment.
+message_count is therefore a best-effort counter, not a value the rest of
+the system may treat as an exact count.
 """
 from datetime import datetime, timezone
 from typing import Callable
 
+from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1 import Query
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -69,12 +99,24 @@ class ConversationStore:
         doesn't otherwise forbid it) gets an empty title that a later user
         message on the same session_id can still fill in, without ever
         overwriting a title that's already set.
+
+        Create-branch race safety: two near-simultaneous first touches for
+        the same brand-new session_id (client double-submit, or a client
+        retry after a Cloud Run timeout) must not both win the "this is a
+        new conversation" branch -- a get()-then-conditional-set() has a
+        TOCTOU gap where both could see "not exists" and the later .set()
+        would silently clobber the earlier one's title/message_count. So the
+        create attempt uses doc_ref.create(), which Firestore itself
+        performs as a single atomic check-and-write and rejects with
+        AlreadyExists if another writer's doc is already there -- no gap to
+        race into. The loser falls through to the ordinary update path
+        below, which re-reads the winner's doc and merges into it instead of
+        overwriting it.
         """
         doc_ref = self.db.collection(COLLECTION).document(_doc_id(user_id, session_id))
-        snap = doc_ref.get()
         now = self._now()
-        if not snap.exists:
-            doc_ref.set({
+        try:
+            doc_ref.create({
                 "user_id": user_id,
                 "session_id": session_id,
                 "title": derive_title(text) if role == "user" else "",
@@ -83,7 +125,10 @@ class ConversationStore:
                 "message_count": 1,
             })
             return
-        data = snap.to_dict()
+        except AlreadyExists:
+            pass  # lost the create race -- another writer's doc is already there
+        snap = doc_ref.get()
+        data = snap.to_dict() if snap.exists else {}
         update = {"last_ts": now, "message_count": data.get("message_count", 0) + 1}
         if role == "user" and not data.get("title"):
             update["title"] = derive_title(text)
@@ -122,5 +167,10 @@ class ConversationStore:
     def delete(self, user_id: str, session_id: str) -> None:
         """Delete this user's conversation summary doc. The doc id itself is
         user-scoped (_doc_id), so this can never touch another user's
-        conversation even if session_id collides."""
+        conversation even if session_id collides.
+
+        Caller ordering: main.delete_conversation calls
+        MessageStore.delete_session() BEFORE this, deliberately -- see this
+        module's docstring for why that order fails closed instead of open.
+        """
         self.db.collection(COLLECTION).document(_doc_id(user_id, session_id)).delete()

@@ -1,6 +1,8 @@
 """Minimal in-memory stand-in for the Firestore client surface Memory uses."""
 import itertools
 
+from google.api_core.exceptions import AlreadyExists
+
 
 class FakeSnap:
     """Snapshot object that mimics Firestore document snapshot."""
@@ -32,6 +34,14 @@ class FakeDoc:
             self.store[self.key].update(data)
         else:
             self.store[self.key] = dict(data)
+
+    def create(self, data):
+        """Mirrors Firestore's DocumentReference.create(): a single atomic
+        check-and-write that raises AlreadyExists if the doc is already
+        present, instead of silently overwriting it like set() does."""
+        if self.key in self.store:
+            raise AlreadyExists(f"document already exists: {self.key}")
+        self.store[self.key] = dict(data)
 
     def delete(self):
         self.store.pop(self.key, None)

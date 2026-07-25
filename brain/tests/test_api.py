@@ -290,6 +290,68 @@ async def test_run_turn_does_not_persist_empty_model_reply(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_turn_survives_conversations_touch_failure(monkeypatch):
+    """CRITICAL: a Firestore hiccup in the conversation-index bookkeeping
+    write (touch()) must not turn an already-generated, already-persisted
+    reply into a failure. The reply and its row in `_messages` are the
+    primary feature; `conversations` is only an ancillary index that
+    self-heals on the next touch()."""
+    store = _store()
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply="merhaba"))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    class BoomConversations:
+        def touch(self, user_id, session_id, role, text):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(main_mod, "_conversations", BoomConversations())
+
+    async def fake_ensure(user_id, session_id):
+        return None  # session object unused by FakeRunner
+
+    monkeypatch.setattr(main_mod, "_ensure_session", fake_ensure)
+
+    reply = await main_mod.run_turn("u@x.com", "s1", "selam")
+    assert reply == "merhaba"
+    hist = store.history("u@x.com", "s1")
+    assert [(h["role"], h["text"]) for h in hist] == [("user", "selam"), ("model", "merhaba")]
+
+
+def test_chat_endpoint_returns_reply_even_when_conversations_touch_fails(monkeypatch):
+    """Same guarantee as test_run_turn_survives_conversations_touch_failure,
+    exercised through the real /api/chat -> run_turn path (not a
+    monkeypatched run_turn) since the bug this pins lived inside run_turn
+    itself, between the two _messages.append() calls."""
+    store = _store()
+    monkeypatch.setattr(main_mod, "_messages", store)
+    monkeypatch.setattr(main_mod, "_runner", FakeRunner(reply="merhaba"))
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+
+    class BoomConversations:
+        def touch(self, user_id, session_id, role, text):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(main_mod, "_conversations", BoomConversations())
+
+    async def fake_ensure(user_id, session_id):
+        return None
+
+    monkeypatch.setattr(main_mod, "_ensure_session", fake_ensure)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.post("/api/chat", json={"session_id": "s1", "message": "selam"})
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    assert r.json() == {"reply": "merhaba"}
+    hist = store.history("owner@example.com", "s1")
+    assert [(h["role"], h["text"]) for h in hist] == [("user", "selam"), ("model", "merhaba")]
+
+
+@pytest.mark.asyncio
 async def test_ensure_session_rehydrates_from_history(monkeypatch):
     store = _store()
     store.append("u@x.com", "s1", "user", "adim Kadir")
@@ -473,6 +535,49 @@ def test_delete_conversation_rejects_bad_session_id(monkeypatch):
     finally:
         main_mod.app.dependency_overrides.clear()
     assert r.status_code == 400
+
+
+def test_delete_conversation_deletes_messages_before_summary_so_a_crash_fails_closed(monkeypatch):
+    """IMPORTANT: ordering pin. Messages must be deleted BEFORE the summary.
+    If the summary delete then fails, the outcome must be fail-CLOSED: a
+    stale list row pointing at zero real messages (recoverable, harmless) --
+    never fail-OPEN (summary gone but the full transcript still readable via
+    GET /api/history, leaking a "deleted" conversation)."""
+    conv_store = _conv_store()
+    msg_store = _store()
+    conv_store.touch("owner@example.com", "s1", "user", "silinecek")
+    msg_store.append("owner@example.com", "s1", "user", "silinecek")
+
+    class BoomOnSummaryDelete:
+        """Always fails the summary delete itself, without ever mutating the
+        underlying store -- so whether the message row is already gone by
+        the time this raises tells us, unambiguously, which delete call ran
+        first."""
+        def __init__(self, real):
+            self._real = real
+
+        def delete(self, user_id, session_id):
+            raise RuntimeError("firestore down mid-delete")
+
+        def list_conversations(self, user_id):
+            return self._real.list_conversations(user_id)
+
+    monkeypatch.setattr(main_mod, "_conversations", BoomOnSummaryDelete(conv_store))
+    monkeypatch.setattr(main_mod, "_messages", msg_store)
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    main_mod.app.dependency_overrides[require_user] = lambda: "owner@example.com"
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.delete("/api/conversations/s1")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    assert r.status_code == 502
+    # Fail-closed evidence: messages are already gone (transcript no longer
+    # readable via /api/history), while the summary lingers as a stale,
+    # harmless list row -- not the reverse.
+    assert msg_store.history("owner@example.com", "s1") == []
+    assert [c["session_id"] for c in conv_store.list_conversations("owner@example.com")] == ["s1"]
 
 
 def test_delete_conversation_returns_502_on_failure(monkeypatch):

@@ -173,7 +173,21 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
     # tests); in the real process _init() (called above) always sets it
     # before this point, so the guard never fires there.
     if _conversations is not None:
-        _conversations.touch(user_id, session_id, "user", message)
+        # touch() is ancillary bookkeeping for the conversation-list index,
+        # not the primary feature -- the user's message is already durably
+        # persisted via _messages.append() above. A Firestore hiccup here
+        # must be logged and swallowed, never allowed to propagate up to
+        # chat()'s broad except -> 502 and mask a reply that will still be
+        # generated. A missed touch self-heals on this session's next
+        # message via touch()'s upsert (see conversations.py).
+        try:
+            _conversations.touch(user_id, session_id, "user", message)
+        except Exception:
+            logging.exception(
+                "run_turn: conversations.touch failed (user turn) for "
+                "user_id=%s session_id=%s -- continuing without it",
+                user_id, session_id,
+            )
     content = types.Content(role="user", parts=[types.Part(text=message)])
     reply = ""
     async for event in _runner.run_async(
@@ -184,7 +198,18 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
     if reply:
         _messages.append(user_id, session_id, "model", reply)
         if _conversations is not None:
-            _conversations.touch(user_id, session_id, "model", reply)
+            # Same reasoning as the user-turn touch() above: the model's
+            # reply is already durably persisted at this point, so a
+            # bookkeeping failure here must not turn a good, already-stored
+            # reply into a 502 with nothing to show for it.
+            try:
+                _conversations.touch(user_id, session_id, "model", reply)
+            except Exception:
+                logging.exception(
+                    "run_turn: conversations.touch failed (model turn) for "
+                    "user_id=%s session_id=%s -- continuing without it",
+                    user_id, session_id,
+                )
     return reply
 
 
@@ -263,9 +288,13 @@ async def delete_conversation(session_id: str, email: str = Depends(require_user
     try:
         _init()
         # Two independent writes, no shared transaction (see conversations.py's
-        # module docstring for the accepted failure mode on a crash between them).
-        _conversations.delete(user_id=email, session_id=sid)
+        # module docstring for the full reasoning). Order matters: messages are
+        # deleted FIRST, then the summary. A crash in between then fails closed
+        # (a stale list row pointing at zero messages -- recoverable, harmless)
+        # instead of failing open (summary gone, but the full transcript still
+        # readable via GET /api/history -- a silent leak of a "deleted" chat).
         _messages.delete_session(user_id=email, session_id=sid)
+        _conversations.delete(user_id=email, session_id=sid)
     except Exception:
         logging.exception(
             "conversations: delete failed for user_id=%s session_id=%s", email, sid
