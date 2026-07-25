@@ -5,7 +5,9 @@ import android.content.Context
 import com.jarvis.data.auth.AndroidBiometricGate
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthManager
+import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.auth.BiometricGate
+import com.jarvis.data.auth.DataStoreAuthStateStore
 import com.jarvis.data.chat.ChatRepository
 import com.jarvis.data.chat.DataStoreSessionStore
 import com.jarvis.data.net.ApiSet
@@ -38,6 +40,10 @@ class AppContainer(
         // Runs on OkHttp's background thread, so blocking here is fine.
         tokenRefresher = { runBlocking { authManager.silentSignIn().getOrNull() } },
     ),
+    // Swappable so a test can say "this device has signed in before" and assert the boot
+    // path actually skips the splash — otherwise only the ViewModel would be pinned, and
+    // deleting the call from MainActivity would leave the suite green.
+    val authStateStore: AuthStateStore = DataStoreAuthStateStore(context.applicationContext),
 ) {
     private val appContext = context.applicationContext
 

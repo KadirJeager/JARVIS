@@ -31,9 +31,29 @@ class ChatViewModel(private val repo: ChatRepository) : ViewModel() {
     }
 
     /**
+     * This device has signed in before, so go straight to the chat — no splash, no
+     * "oturum açılıyor".
+     *
+     * CHECKING is for the launch where we genuinely do not know yet. Once we DO know
+     * (the flag is persisted across installs), waiting on Credential Manager before
+     * drawing anything is a self-inflicted delay: [com.jarvis.data.net.AuthInterceptor]
+     * sends the request without a header when no token is cached yet, and
+     * [com.jarvis.data.net.TokenAuthenticator] refreshes on the resulting 401 and retries
+     * once. The token is therefore allowed to arrive AFTER the chat is on screen.
+     */
+    fun onReturningUser() {
+        _state.update { it.copy(authPhase = AuthPhase.SIGNED_IN, error = null) }
+        refreshHistory()
+    }
+
+    /**
      * Silent re-auth found no usable credential. This is the NORMAL first-run path, not
      * a failure, so it carries no error message — it just ends [AuthPhase.CHECKING] and
      * lets the sign-in screen appear for the first time.
+     *
+     * It is also the ONE thing allowed to send a returning user back to the sign-in
+     * screen (their account was removed from the device): the optimistic path above is
+     * only a bet that the credential is still there, and this is the bet losing.
      */
     fun onSilentSignInFailed() {
         _state.update { it.copy(authPhase = AuthPhase.SIGNED_OUT) }

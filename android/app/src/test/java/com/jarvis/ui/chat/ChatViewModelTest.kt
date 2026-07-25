@@ -147,6 +147,47 @@ class ChatViewModelTest {
         assertNull(vm.state.value.error)      // not an error: nobody has signed in yet
     }
 
+    /**
+     * A user who has signed in before must land in the chat on the FIRST frame — no
+     * spinner, no "oturum açılıyor".
+     *
+     * CHECKING exists for the launch where we genuinely don't know yet. But once we know
+     * (the flag is persisted), blocking the UI on Credential Manager is a self-inflicted
+     * wait: [com.jarvis.data.net.AuthInterceptor] already sends the request without a
+     * header when no token is cached, and [com.jarvis.data.net.TokenAuthenticator]
+     * refreshes on the resulting 401 and retries. So the token can arrive AFTER the chat
+     * is on screen without anything breaking.
+     */
+    @Test
+    fun returningUser_landsInChatOnTheFirstFrame_withNoSpinner() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi(history = HistoryResponse(listOf(HistoryMessage("model", "hi", "t")))))
+
+        vm.onReturningUser()
+
+        // Synchronous: asserted BEFORE advanceUntilIdle, i.e. this is the first frame.
+        assertEquals(AuthPhase.SIGNED_IN, vm.state.value.authPhase)
+        assertTrue(vm.state.value.signedIn)
+
+        advanceUntilIdle()
+        assertEquals(1, vm.state.value.messages.size)   // history still loads behind it
+    }
+
+    /**
+     * The credential really is gone (account removed on the device). Only THEN may we
+     * take the returning user back to the sign-in screen.
+     */
+    @Test
+    fun returningUser_whoseCredentialIsGone_fallsBackToSignedOut() = runTest(dispatcher) {
+        val vm = vmWith(FakeApi())
+        vm.onReturningUser()
+        assertEquals(AuthPhase.SIGNED_IN, vm.state.value.authPhase)
+
+        vm.onSilentSignInFailed()
+        advanceUntilIdle()
+
+        assertEquals(AuthPhase.SIGNED_OUT, vm.state.value.authPhase)
+    }
+
     @Test
     fun interactiveSignIn_reportsProgress_thenSignsIn() = runTest(dispatcher) {
         val vm = vmWith(FakeApi())
