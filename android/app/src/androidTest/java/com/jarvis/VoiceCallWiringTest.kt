@@ -1,5 +1,6 @@
 package com.jarvis
 
+import android.app.ActivityManager
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -127,6 +128,75 @@ class VoiceCallWiringTest {
     fun tearDown() {
         val app = ApplicationProvider.getApplicationContext<JarvisApp>()
         app.container = AppContainer(app)
+    }
+
+    /** True while our mic foreground service is up — asserted by NAME so this test
+     *  compiles (and stays RED) before the service class exists. */
+    private fun micServiceForeground(): Boolean {
+        val am = ApplicationProvider.getApplicationContext<JarvisApp>()
+            .getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        @Suppress("DEPRECATION") // for the app's OWN services this still reports truthfully
+        return am.getRunningServices(Int.MAX_VALUE).any {
+            it.service.className == "com.jarvis.VoiceCallService" && it.foreground
+        }
+    }
+
+    private fun waitUntil(timeoutMs: Long = 8_000, cond: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (cond()) return true
+            Thread.sleep(200)
+        }
+        return cond()
+    }
+
+    /**
+     * The field failure this slice exists for: the screen turning off (or another app
+     * taking the foreground) killed a live call, because nothing held the process's
+     * right to the microphone. A live call must hold a microphone-type foreground
+     * service for exactly as long as it is live.
+     */
+    @Test
+    fun liveCall_holdsMicForegroundService_untilHangUp() {
+        val app = ApplicationProvider.getApplicationContext<JarvisApp>()
+        val transport = FakeTransport()
+        app.container = AppContainer(
+            app,
+            authManager = FakeAuthClient(),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            authStateStore = FakeAuthStateStore(),
+            voiceSessionFactory = { scope ->
+                VoiceSession(
+                    transport = transport,
+                    mic = FakeMic(),
+                    speaker = FakeSpeaker(),
+                    tokenProvider = { "fake-token" },
+                    deviceHint = "android-test",
+                    scope = scope,
+                    voiceUrl = "wss://voice.example/ws/voice",
+                )
+            },
+        )
+
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitForIdle()
+            org.junit.Assert.assertFalse(micServiceForeground())
+
+            compose.onNodeWithTag("voice_call_button").performClick()
+            compose.waitForIdle()
+            transport.listener!!.onOpen()
+            org.junit.Assert.assertTrue(
+                "call is live but no mic foreground service is running",
+                waitUntil { micServiceForeground() },
+            )
+
+            compose.onNodeWithTag("voice_end_button").performClick()
+            compose.waitForIdle()
+            org.junit.Assert.assertTrue(
+                "call ended but the mic foreground service is still running",
+                waitUntil { !micServiceForeground() },
+            )
+        }
     }
 
     @Test

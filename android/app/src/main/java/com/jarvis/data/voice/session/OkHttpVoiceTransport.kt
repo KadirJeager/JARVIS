@@ -1,5 +1,10 @@
 package com.jarvis.data.voice.session
 
+import java.io.EOFException
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -21,6 +26,21 @@ import okio.ByteString.Companion.toByteString
  * to [VoiceTransportListener] is the documented contract of that interface, and
  * [VoiceSession] is written to be called from any thread.
  */
+/**
+ * Maps a transport failure to plain-Turkish user-facing text. Keyed on the exception
+ * CLASS, never the message string — socket message prose varies by vendor and Android
+ * version, the class hierarchy does not. (TransportErrorMessagesTest)
+ */
+fun humanizeTransportError(t: Throwable): String = when (t) {
+    is EOFException -> "Sunucu bağlantıyı beklenmedik şekilde kapattı"
+    is SocketTimeoutException -> "Bağlantı zaman aşımına uğradı"
+    is ConnectException, is UnknownHostException -> "Sunucuya ulaşılamadı"
+    // After the two subclasses above so they win; SocketException covers the broad
+    // "network dropped underneath us" family ("Software caused connection abort" etc.).
+    is SocketException -> "Ağ bağlantısı koptu"
+    else -> t.message ?: t.javaClass.simpleName
+}
+
 class OkHttpVoiceTransport(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
@@ -51,7 +71,7 @@ class OkHttpVoiceTransport(
                     listener.onClosed()
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) =
-                    listener.onFailure(t.message ?: t.javaClass.simpleName)
+                    listener.onFailure(humanizeTransportError(t))
             },
         )
     }

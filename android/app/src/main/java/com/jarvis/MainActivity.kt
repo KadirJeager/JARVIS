@@ -3,11 +3,16 @@ package com.jarvis
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -61,20 +66,51 @@ class MainActivity : FragmentActivity() {
                 // route flipping alone would otherwise render the previous visit's whole
                 // profile for as long as the prompt sheet takes to appear, since
                 // BiometricPrompt is a translucent bottom sheet, not an opaque cover.
-                fun openVoiceProfile() {
+                // isAvailable() is not checked here: BiometricPrompt.authenticate()
+                // already fails closed via onAuthenticationError when no device lock
+                // is configured, landing on the same DENIED state through
+                // onUnlockFailed — a separate isAvailable() branch would just be a
+                // second path to the same user-visible outcome.
+                fun armGate() {
                     voiceVm.onGateRequested()
-                    route = Route.VOICE_PROFILE
-                    // isAvailable() is not checked here: BiometricPrompt.authenticate()
-                    // already fails closed via onAuthenticationError when no device lock
-                    // is configured, landing on the same DENIED state through
-                    // onUnlockFailed — a separate isAvailable() branch would just be a
-                    // second path to the same user-visible outcome.
                     container.biometricGate.prompt(this@MainActivity) { result ->
                         result.fold(
                             onSuccess = { voiceVm.onUnlocked() },
                             onFailure = { voiceVm.onUnlockFailed(it.message) },
                         )
                     }
+                }
+
+                fun openVoiceProfile() {
+                    armGate()
+                    route = Route.VOICE_PROFILE
+                }
+
+                // FLAG_SECURE rides exactly with the voice screen: its content must not
+                // land in screenshots or the recents preview, while the chat stays
+                // screenshotable (Kadir screenshots his own chats).
+                LaunchedEffect(route) {
+                    if (route == Route.VOICE_PROFILE) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                }
+
+                // Returning from the BACKGROUND onto the voice screen re-runs the gate.
+                // ON_START, not ON_RESUME: BiometricPrompt's sheet only PAUSES the
+                // activity, so a resume-keyed gate would loop prompt→pause→resume→prompt
+                // forever. addObserver replays lifecycle up to the current state, so the
+                // first replayed ON_START fires while route is still CHAT and no-ops.
+                val currentRoute by rememberUpdatedState(route)
+                DisposableEffect(Unit) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_START && currentRoute == Route.VOICE_PROFILE) {
+                            armGate()
+                        }
+                    }
+                    lifecycle.addObserver(observer)
+                    onDispose { lifecycle.removeObserver(observer) }
                 }
 
                 // Hand-rolled Nav is invisible to the platform back dispatcher: without
@@ -107,6 +143,18 @@ class MainActivity : FragmentActivity() {
                 // exiting the app under a live microphone.
                 BackHandler(enabled = voiceCallState.phase != VoicePhase.IDLE) {
                     voiceCallVm.stop()
+                }
+
+                // A LIVE call (not an already-dead ERROR screen) holds the mic
+                // foreground service, so screen-off or another app in front cannot
+                // kill the capture or the socket. Keyed on a Boolean, not the phase:
+                // CONNECTING→LISTENING→SPEAKING must not restart the service.
+                val callLive = voiceCallState.phase == VoicePhase.CONNECTING ||
+                    voiceCallState.phase == VoicePhase.LISTENING ||
+                    voiceCallState.phase == VoicePhase.SPEAKING
+                LaunchedEffect(callLive) {
+                    if (callLive) VoiceCallService.start(this@MainActivity)
+                    else VoiceCallService.stop(this@MainActivity)
                 }
 
                 // Boot.
