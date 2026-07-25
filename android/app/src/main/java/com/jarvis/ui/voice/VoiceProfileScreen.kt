@@ -283,9 +283,15 @@ private fun SampleRow(
                     enabled = !busy,
                     modifier = Modifier.testTag("voice_sample_label_${sample.id}"),
                 ) {
+                    // Muted while busy for the same reason as the correction buttons: an
+                    // explicit colour overrides Material3's disabled alpha, so without this
+                    // the control keeps its full-strength look while it is inert.
                     Text(
                         sample.label?.let { labelDisplayName(it) } ?: "Etiket ekle",
-                        color = if (sample.label == null) JarvisTextMuted else JarvisViolet,
+                        color = when {
+                            busy || sample.label == null -> JarvisTextMuted
+                            else -> JarvisViolet
+                        },
                     )
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -318,7 +324,7 @@ private fun SampleRow(
                 enabled = !busy,
                 modifier = Modifier.testTag("voice_sample_delete_${sample.id}"),
             ) {
-                Text("Sil", color = JarvisError)
+                Text("Sil", color = if (busy) JarvisTextMuted else JarvisError)
             }
         }
         sample.note?.takeIf { it.isNotBlank() }?.let {
@@ -457,16 +463,25 @@ private fun HistoryRowView(
             Spacer(Modifier.weight(1f))
             // Reversal in BOTH directions stays legal (spec §6): changing your mind is a
             // legitimate use, and forbidding it would lock the user onto a wrong record.
+            //
+            // The colour is computed from `enabled` rather than passed as a constant: a
+            // literal `color = JarvisCyan` on the Text OVERRIDES the alpha Material3
+            // applies to a disabled button's content, so the already-ruled action rendered
+            // at full brightness and looked tappable. Semantics said disabled and the
+            // tests agreed; only a screenshot showed the user could not tell. A live-
+            // looking button that does nothing is the thing this row was built to avoid.
+            val canConfirm = !busy && row.correction != com.jarvis.data.voice.Correction.CONFIRMED
+            val canReject = !busy && row.correction != com.jarvis.data.voice.Correction.REJECTED
             TextButton(
                 onClick = { onConfirm(row.id) },
-                enabled = !busy && row.correction != com.jarvis.data.voice.Correction.CONFIRMED,
+                enabled = canConfirm,
                 modifier = Modifier.testTag("voice_confirm_${row.id}"),
-            ) { Text("Bendim", color = JarvisCyan) }
+            ) { Text("Bendim", color = if (canConfirm) JarvisCyan else JarvisTextMuted) }
             TextButton(
                 onClick = { onReject(row.id) },
-                enabled = !busy && row.correction != com.jarvis.data.voice.Correction.REJECTED,
+                enabled = canReject,
                 modifier = Modifier.testTag("voice_reject_${row.id}"),
-            ) { Text("Ben değildim", color = JarvisError) }
+            ) { Text("Ben değildim", color = if (canReject) JarvisError else JarvisTextMuted) }
         }
     }
 }
@@ -521,13 +536,19 @@ private fun DangerZone(busy: Boolean, onDeleteProfile: () -> Unit) {
                     Text("Vazgeç", color = JarvisTextMuted)
                 }
                 Spacer(Modifier.weight(1f))
+                // Exact match, no lowercase()/uppercase() anywhere: see
+                // DELETE_CONFIRM_WORD for why case folding is unsafe here.
+                val canDelete = !busy && typed.trim() == DELETE_CONFIRM_WORD
                 TextButton(
-                    // Exact match, no lowercase()/uppercase() anywhere: see
-                    // DELETE_CONFIRM_WORD for why case folding is unsafe here.
-                    enabled = !busy && typed.trim() == DELETE_CONFIRM_WORD,
+                    enabled = canDelete,
                     onClick = onDeleteProfile,
                     modifier = Modifier.testTag("voice_danger_confirm"),
-                ) { Text("Kalıcı olarak sil", color = JarvisError) }
+                ) {
+                    // Full-strength red on an inert irreversible action is the worst case
+                    // of this whole class: it reads as armed before the user has typed the
+                    // confirmation word at all.
+                    Text("Kalıcı olarak sil", color = if (canDelete) JarvisError else JarvisTextMuted)
+                }
             }
         }
     }
