@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,31 +73,19 @@ fun VoiceProfileScreen(
     ) {
         TopBar(onBack)
 
-        // Weighted so this region is bounded to "screen minus TopBar", not the full
-        // screen height again: an unweighted fillMaxSize() child here would report a
-        // height equal to the WHOLE screen (Column gives every unweighted child the
-        // same max constraint), pushing its own content — and anything inside it, like
-        // the LazyColumn's last item — past the real bottom edge by TopBar's height.
-        // That overhang is invisible until content is tall enough to reach it, which is
-        // exactly what the danger-zone confirm button at the tail of Task 8's longer
-        // list does: it renders and reports enabled correctly (semantics don't need
-        // visibility) but a real touch/click at its position lands off-screen and is
-        // silently dropped.
-        Box(Modifier.weight(1f)) {
-            when (state.gate) {
-                GatePhase.CHECKING -> Locked(message = "Kimliğin doğrulanıyor...")
-                GatePhase.DENIED -> Denied(state.error, onRetryUnlock)
-                GatePhase.UNLOCKED -> Unlocked(
-                    state = state,
-                    onRetryLoad = onRetryLoad,
-                    onSetLabel = onSetLabel,
-                    onDeleteSample = onDeleteSample,
-                    onConfirm = onConfirm,
-                    onReject = onReject,
-                    onDeleteProfile = onDeleteProfile,
-                    onDismissError = onDismissError,
-                )
-            }
+        when (state.gate) {
+            GatePhase.CHECKING -> Locked(message = "Kimliğin doğrulanıyor...")
+            GatePhase.DENIED -> Denied(state.error, onRetryUnlock)
+            GatePhase.UNLOCKED -> Unlocked(
+                state = state,
+                onRetryLoad = onRetryLoad,
+                onSetLabel = onSetLabel,
+                onDeleteSample = onDeleteSample,
+                onConfirm = onConfirm,
+                onReject = onReject,
+                onDeleteProfile = onDeleteProfile,
+                onDismissError = onDismissError,
+            )
         }
     }
 }
@@ -169,14 +158,8 @@ private fun Unlocked(
             return@Column
         }
 
-        // weight(1f), not fillMaxSize(): the danger zone below is pinned OUTSIDE this
-        // scrollable region on purpose. A long gallery/history list must never be able to
-        // scroll the delete control out of reach — not for the user (who could still
-        // swipe to it) but for anything that clicks it by computed position rather than
-        // by scrolling first, and simply as a rule: an irreversible action's control
-        // should not depend on how much content happens to be above it.
         LazyColumn(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.fillMaxSize().testTag("voice_list"),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -209,13 +192,8 @@ private fun Unlocked(
             }
 
             item { Placeholders() }
+            item { DangerZone(busy = state.mutatingId != null, onDeleteProfile = onDeleteProfile) }
         }
-
-        DangerZone(
-            busy = state.mutatingId != null,
-            onDeleteProfile = onDeleteProfile,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
     }
 }
 
@@ -455,11 +433,10 @@ private fun HistoryRowView(
             Text(shortDate(row.ts), style = MaterialTheme.typography.bodySmall, color = JarvisTextMuted)
         }
         row.deviceHint?.let {
-            // "Cihaz: " prefix, not the bare hint: the sample gallery above already
-            // renders a bare deviceHint text (e.g. "buds") for its own rows, and a
-            // history row can legitimately share that same device value — a plain,
-            // unprefixed Text here would then collide as a duplicate exact-match node
-            // for anything asserting on the device name alone.
+            // "Cihaz: " prefix: in the sample gallery the device name sits inline next
+            // to a source badge, where it already reads as a label. Here it's the lone
+            // secondary line under the score/verdict row, with nothing else to anchor
+            // it — a bare "buds" is a context-free token, not a device.
             Text(
                 "Cihaz: $it",
                 style = MaterialTheme.typography.bodySmall,
@@ -495,11 +472,15 @@ private fun HistoryRowView(
 }
 
 @Composable
-private fun DangerZone(busy: Boolean, onDeleteProfile: () -> Unit, modifier: Modifier = Modifier) {
-    var open by remember { mutableStateOf(false) }
-    var typed by remember { mutableStateOf("") }
+private fun DangerZone(busy: Boolean, onDeleteProfile: () -> Unit) {
+    // rememberSaveable, not remember: this is a lazy item. Scroll it out of composition
+    // (e.g. to look at a history row again) and back, and plain `remember` would reset
+    // silently — a user who typed SIL, scrolled away, and scrolled back would find the
+    // form collapsed with no indication anything was lost.
+    var open by rememberSaveable { mutableStateOf(false) }
+    var typed by rememberSaveable { mutableStateOf("") }
 
-    Column(modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 32.dp)) {
         Text("Tehlikeli bölge", style = MaterialTheme.typography.titleSmall, color = JarvisError)
         Spacer(Modifier.size(6.dp))
         Text(

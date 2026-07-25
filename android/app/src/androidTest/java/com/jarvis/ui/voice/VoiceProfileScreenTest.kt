@@ -4,11 +4,13 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -223,9 +225,32 @@ class VoiceProfileScreenTest {
         compose.onNodeWithTag("voice_reject_h2").assertIsEnabled()   // reversal stays legal
     }
 
+    /** Mirrors [anAlreadyConfirmedRow_showsItsVerdict_andDoesNotOfferConfirmAgain]: spec
+     *  §6 guarantees reversal in BOTH directions, not just away from CONFIRMED. */
+    @Test
+    fun anAlreadyRejectedRow_showsItsVerdict_andDoesNotOfferRejectAgain() {
+        val ruled = profile.copy(
+            history = listOf(
+                HistoryRow("h3", "2026-07-25T03:00:00Z", 0.8, true, "buds", "HIGH", "s3",
+                    Correction.REJECTED),
+            ),
+        )
+        render(
+            VoiceProfileUiState(
+                gate = GatePhase.UNLOCKED, profile = ruled,
+                summary = summarize(ruled.quality, ruled.counts),
+            ),
+        )
+        compose.onNodeWithText("ben değildim").assertIsDisplayed()
+        compose.onNodeWithTag("voice_reject_h3").assertIsNotEnabled()
+        compose.onNodeWithTag("voice_confirm_h3").assertIsEnabled()   // reversal stays legal
+    }
+
     /**
      * Profile deletion is irreversible and takes the history with it, so it must not be
-     * one stray tap away.
+     * one stray tap away. The danger zone is the last item of the scrollable list (spec
+     * §9), so reaching it here needs performScrollToNode — a bare performScrollTo()
+     * won't do: an un-composed lazy item isn't in the semantics tree yet.
      */
     @Test
     fun profileDeletion_requiresTypingTheConfirmationWord() {
@@ -237,7 +262,9 @@ class VoiceProfileScreenTest {
                 onDeleteProfile = { deleted = true }, onDismissError = {},
             )
         }
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_danger_open"))
         compose.onNodeWithTag("voice_danger_open").performClick()
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_danger_confirm"))
         compose.onNodeWithTag("voice_danger_confirm").assertIsNotEnabled()
 
         compose.onNodeWithTag("voice_danger_input").performTextInput("sil")
