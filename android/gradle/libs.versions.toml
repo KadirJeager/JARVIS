@@ -16,6 +16,11 @@ coroutines = "1.11.0"
 junit = "4.13.2"
 androidxJunit = "1.2.1"
 espressoCore = "3.6.1"
+# 1.1.0 is the latest STABLE; the 1.2.0/1.4.0 lines are alpha only.
+# Brings androidx.fragment (compile) — required, BiometricPrompt only accepts a
+# FragmentActivity — and androidx.appcompat (runtime). The appcompat pull-in is
+# expected, not a misconfiguration.
+biometric = "1.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -44,6 +49,7 @@ kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 
 [plugins]
 # AGP 9.x has built-in Kotlin support — the org.jetbrains.kotlin.android plugin is
