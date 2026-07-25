@@ -72,12 +72,31 @@ class MainActivity : FragmentActivity() {
                 // instead of returning to chat.
                 BackHandler(enabled = route == Route.VOICE_PROFILE) { route = Route.CHAT }
 
-                // Boot: try silent re-auth. Both outcomes must be reported -- the UI
-                // stays on the boot splash until one of them lands, so swallowing the
-                // failure would hang the app on the splash forever.
+                // Boot.
+                //
+                // A returning user goes STRAIGHT to the chat and the credential is
+                // fetched behind it. Previously every launch parked on the splash until
+                // Credential Manager answered, which is what "oturum açılıyor" spinning
+                // on every start actually was. Nothing depends on the token being present
+                // by first frame: AuthInterceptor omits the header when there is no
+                // cached token, and TokenAuthenticator refreshes on the 401 and retries.
+                //
+                // Only a genuinely missing credential (account removed from the device)
+                // sends a returning user back to sign-in — and it clears the flag so the
+                // next launch does not make the same optimistic bet.
                 LaunchedEffect(Unit) {
-                    if (container.authManager.silentSignIn().isSuccess) vm.onSignedIn()
-                    else vm.onSilentSignInFailed()
+                    val returning = container.authStateStore.hasSignedInBefore()
+                    if (returning) vm.onReturningUser()
+
+                    if (container.authManager.silentSignIn().isSuccess) {
+                        container.authStateStore.markSignedIn()
+                        if (!returning) vm.onSignedIn()
+                    } else if (returning) {
+                        container.authStateStore.clearSignedIn()
+                        vm.onSilentSignInFailed()
+                    } else {
+                        vm.onSilentSignInFailed()
+                    }
                 }
 
                 Nav(
@@ -102,7 +121,11 @@ class MainActivity : FragmentActivity() {
                             // cancelled or failed credential flow left the button
                             // looking simply broken.
                             result.fold(
-                                onSuccess = { vm.onSignedIn() },
+                                onSuccess = {
+                                    // Remember it, so every later launch skips the splash.
+                                    container.authStateStore.markSignedIn()
+                                    vm.onSignedIn()
+                                },
                                 onFailure = { vm.onSignInFailed(it.message) },
                             )
                         }
