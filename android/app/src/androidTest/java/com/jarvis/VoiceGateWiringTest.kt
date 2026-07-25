@@ -12,6 +12,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.BiometricGate
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ConversationDeletedResponse
+import com.jarvis.data.net.ConversationsApi
+import com.jarvis.data.net.ConversationsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
@@ -65,6 +68,11 @@ class VoiceGateWiringTest {
     }
 
     /** Empty but well-formed answers: this test is about the gate, not about content. */
+    private class FakeConversationsApi : ConversationsApi {
+        override suspend fun list() = ConversationsResponse(emptyList())
+        override suspend fun delete(sessionId: String) = ConversationDeletedResponse(sessionId)
+    }
+
     private class FakeChatApi : JarvisApi {
         override suspend fun chat(req: ChatRequest) = ChatResponse("")
         override suspend fun history(sessionId: String) = HistoryResponse(emptyList())
@@ -124,7 +132,7 @@ class VoiceGateWiringTest {
             app,
             authManager = FakeAuthClient(),
             biometricGate = fakeGate,
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
         )
 
         ActivityScenario.launch(MainActivity::class.java).use {

@@ -3,6 +3,7 @@ package com.jarvis.ui.chat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.jarvis.data.chat.ChatRepository
+import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.UiMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,7 +16,20 @@ import kotlinx.coroutines.launch
  * (Task 7 calls [onSignedIn] after silent/interactive sign-in), so this ViewModel needs
  * no Android context and stays unit-testable on the JVM.
  */
-class ChatViewModel(private val repo: ChatRepository) : ViewModel() {
+class ChatViewModel(
+    private val repo: ChatRepository,
+    private val conversations: ConversationsRepository? = null,
+) : ViewModel() {
+
+    /**
+     * Guards the once-per-launch "start a fresh conversation" step.
+     *
+     * It lives on the ViewModel, not in the composition: the Activity's LaunchedEffect
+     * re-runs on every configuration change (a rotation recreates the composition) while
+     * the ViewModel survives it. Minting a new conversation there would cut Kadir's chat
+     * in half every time he turned the phone.
+     */
+    private var freshConversationStarted = false
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -74,6 +88,91 @@ class ChatViewModel(private val repo: ChatRepository) : ViewModel() {
                 authPhase = AuthPhase.SIGNED_OUT,
                 error = "Giriş yapılamadı: ${reason ?: "bilinmeyen hata"}",
             )
+        }
+    }
+
+    /**
+     * Cold start: begin a NEW conversation rather than reopening the last one.
+     *
+     * Kadir's complaint was that the app "always starts from the very beginning of the
+     * conversation" — one endless thread, because the session id was minted once per
+     * install and never changed. A new conversation is free until it is used: the backend
+     * only creates a summary row when a message is appended, so an untouched one never
+     * shows up in the list.
+     *
+     * Idempotent across configuration changes via [freshConversationStarted].
+     */
+    fun onColdStart() {
+        if (freshConversationStarted || conversations == null) return
+        freshConversationStarted = true
+        viewModelScope.launch {
+            runCatching { conversations.startNew() }
+            _state.update { it.copy(messages = emptyList()) }
+        }
+    }
+
+    fun startNewConversation() {
+        val repoRef = conversations ?: return
+        _state.update { it.copy(conversationsOpen = false, error = null) }
+        viewModelScope.launch {
+            runCatching { repoRef.startNew() }
+                .onSuccess { _state.update { s -> s.copy(messages = emptyList()) } }
+                .onFailure { e ->
+                    _state.update { s -> s.copy(error = "Yeni sohbet açılamadı: ${e.message}") }
+                }
+        }
+    }
+
+    fun toggleConversations() {
+        val opening = !_state.value.conversationsOpen
+        _state.update { it.copy(conversationsOpen = opening) }
+        if (opening) loadConversations()
+    }
+
+    fun loadConversations() {
+        val repoRef = conversations ?: return
+        _state.update { it.copy(conversationsLoading = true) }
+        viewModelScope.launch {
+            runCatching { repoRef.list() }
+                .onSuccess { rows ->
+                    _state.update { it.copy(conversations = rows, conversationsLoading = false) }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(
+                            conversationsLoading = false,
+                            error = "Sohbetler yüklenemedi: ${e.message}",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun openConversation(sessionId: String) {
+        val repoRef = conversations ?: return
+        _state.update { it.copy(conversationsOpen = false, error = null) }
+        viewModelScope.launch {
+            runCatching { repoRef.open(sessionId) }
+                .onSuccess { refreshHistory() }
+                .onFailure { e ->
+                    _state.update { s -> s.copy(error = "Sohbet açılamadı: ${e.message}") }
+                }
+        }
+    }
+
+    fun deleteConversation(sessionId: String) {
+        val repoRef = conversations ?: return
+        viewModelScope.launch {
+            runCatching { repoRef.delete(sessionId) }
+                .onSuccess { movedToFresh ->
+                    // Only clear the thread when the deleted conversation was the one on
+                    // screen; deleting another must not wipe what the user is reading.
+                    if (movedToFresh) _state.update { it.copy(messages = emptyList()) }
+                    loadConversations()
+                }
+                .onFailure { e ->
+                    _state.update { s -> s.copy(error = "Sohbet silinemedi: ${e.message}") }
+                }
         }
     }
 

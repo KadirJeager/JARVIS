@@ -36,6 +36,8 @@ class EndToEndTest {
 
     private class FakeSessionStore : SessionStore {
         override suspend fun sessionId(): String = "s-e2e"
+        override suspend fun startNew(): String = "s-e2e"
+        override suspend fun switchTo(sessionId: String) = Unit
     }
 
     private class FakeApi : JarvisApi {

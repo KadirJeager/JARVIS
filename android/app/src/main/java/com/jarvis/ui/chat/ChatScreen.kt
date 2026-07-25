@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
 import com.jarvis.R
 import com.jarvis.data.chat.UiMessage
 import com.jarvis.ui.theme.JarvisBg
@@ -61,6 +62,10 @@ fun ChatScreen(
     onSend: () -> Unit,
     onRetry: () -> Unit,
     onOpenVoiceProfile: () -> Unit = {},
+    onToggleConversations: () -> Unit = {},
+    onNewConversation: () -> Unit = {},
+    onOpenConversation: (String) -> Unit = {},
+    onDeleteConversation: (String) -> Unit = {},
 ) {
     Column(
         Modifier
@@ -69,7 +74,7 @@ fun ChatScreen(
             .systemBarsPadding()
             .imePadding(),
     ) {
-        TopBar(onOpenVoiceProfile)
+        TopBar(onOpenVoiceProfile, onToggleConversations)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (state.messages.isEmpty() && !state.loading) {
                 EmptyHint()
@@ -91,15 +96,39 @@ fun ChatScreen(
         }
         state.error?.let { ErrorBanner(it, onRetry) }
         InputBar(input = state.input, sending = state.sending, onInput = onInput, onSend = onSend)
+
+        // Popup, not a sibling Box: an overlay that participates in this Column's layout
+        // changes its geometry, and with imePadding on the Column that pushed the newest
+        // messages off the top of the screen the moment the keyboard opened. A Popup
+        // renders in its own window and occupies no space here.
+        if (state.conversationsOpen) {
+            Popup(onDismissRequest = onToggleConversations) {
+                ConversationsPanel(
+                    conversations = state.conversations,
+                    loading = state.conversationsLoading,
+                    onNewConversation = onNewConversation,
+                    onOpen = onOpenConversation,
+                    onDelete = onDeleteConversation,
+                    onDismiss = onToggleConversations,
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun TopBar(onOpenVoiceProfile: () -> Unit) {
+private fun TopBar(onOpenVoiceProfile: () -> Unit, onToggleConversations: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        TextButton(
+            onClick = onToggleConversations,
+            modifier = Modifier.testTag("open_conversations"),
+        ) {
+            Text("☰", color = JarvisTextPrimary, style = MaterialTheme.typography.titleLarge)
+        }
+        Spacer(Modifier.size(2.dp))
         Image(
             painter = painterResource(R.drawable.logo_kj),
             contentDescription = null,

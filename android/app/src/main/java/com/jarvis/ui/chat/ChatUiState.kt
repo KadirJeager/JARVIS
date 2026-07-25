@@ -1,5 +1,6 @@
 package com.jarvis.ui.chat
 
+import com.jarvis.data.chat.Conversation
 import com.jarvis.data.chat.UiMessage
 
 /**
@@ -30,6 +31,10 @@ data class ChatUiState(
     val loading: Boolean = false,
     val error: String? = null,
     val authPhase: AuthPhase = AuthPhase.CHECKING,
+    /** Previous conversations, newest first. Loaded when the list is opened. */
+    val conversations: List<Conversation> = emptyList(),
+    val conversationsOpen: Boolean = false,
+    val conversationsLoading: Boolean = false,
 ) {
     /** Derived, never stored: one source of truth for "is the session live". */
     val signedIn: Boolean get() = authPhase == AuthPhase.SIGNED_IN

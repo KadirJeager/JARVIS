@@ -11,8 +11,10 @@ import org.junit.Test
 
 class ChatRepositoryTest {
 
-    private class FakeSessionStore(private val id: String) : SessionStore {
+    private class FakeSessionStore(private var id: String) : SessionStore {
         override suspend fun sessionId(): String = id
+        override suspend fun startNew(): String = "new".also { id = it }
+        override suspend fun switchTo(sessionId: String) { id = sessionId }
     }
 
     /** Hand-written test double for the Retrofit interface — no network. */

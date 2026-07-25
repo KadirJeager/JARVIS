@@ -9,6 +9,7 @@ import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.auth.BiometricGate
 import com.jarvis.data.auth.DataStoreAuthStateStore
 import com.jarvis.data.chat.ChatRepository
+import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.DataStoreSessionStore
 import com.jarvis.data.net.ApiSet
 import com.jarvis.data.net.NetworkModule
@@ -47,7 +48,10 @@ class AppContainer(
 ) {
     private val appContext = context.applicationContext
 
-    val chatRepository = ChatRepository(apis.chat, DataStoreSessionStore(appContext))
+    private val sessionStore = DataStoreSessionStore(appContext)
+
+    val chatRepository = ChatRepository(apis.chat, sessionStore)
+    val conversationsRepository = ConversationsRepository(apis.conversations, sessionStore)
     val voiceProfileRepository = VoiceProfileRepository(apis.voice)
 }
 
