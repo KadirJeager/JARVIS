@@ -60,6 +60,7 @@ fun ChatScreen(
     onInput: (String) -> Unit,
     onSend: () -> Unit,
     onRetry: () -> Unit,
+    onOpenVoiceProfile: () -> Unit = {},
 ) {
     Column(
         Modifier
@@ -68,7 +69,7 @@ fun ChatScreen(
             .systemBarsPadding()
             .imePadding(),
     ) {
-        TopBar()
+        TopBar(onOpenVoiceProfile)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (state.messages.isEmpty() && !state.loading) {
                 EmptyHint()
@@ -94,7 +95,7 @@ fun ChatScreen(
 }
 
 @Composable
-private fun TopBar() {
+private fun TopBar(onOpenVoiceProfile: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -106,6 +107,15 @@ private fun TopBar() {
         )
         Spacer(Modifier.size(10.dp))
         Text("Jarvis", style = MaterialTheme.typography.titleLarge, color = JarvisTextPrimary)
+        Spacer(Modifier.weight(1f))
+        TextButton(
+            onClick = onOpenVoiceProfile,
+            // No extra .semantics{contentDescription=...}: the child Text already
+            // supplies that label, and Compose merges semantics for a clickable.
+            modifier = Modifier.testTag("open_voice_profile"),
+        ) {
+            Text("Ses kimliğim", color = JarvisCyan, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 

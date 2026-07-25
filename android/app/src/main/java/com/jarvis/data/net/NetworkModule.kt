@@ -9,26 +9,49 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 /** Deployed jarvis-brain base URL (Katman 2b backend). */
 const val BASE_URL = "https://jarvis-brain-000000000000.europe-west1.run.app"
 
+/** Both API surfaces, sharing one OkHttp client and one Retrofit instance. */
+class ApiSet(val chat: JarvisApi, val voice: VoiceApi)
+
 object NetworkModule {
     /**
-     * Builds the [JarvisApi] with a Bearer-attaching OkHttp client and a lenient
-     * kotlinx.serialization converter. [tokenProvider] is read per request; on a 401,
-     * [tokenRefresher] provides a fresh token for a single silent retry.
+     * Builds both APIs over a Bearer-attaching OkHttp client. [tokenProvider] is read per
+     * request; on a 401, [tokenRefresher] provides a fresh token for a single silent
+     * retry.
+     *
+     * `explicitNulls = true` is restated rather than relied on silently: it is ALREADY
+     * kotlinx-serialization-json's default, so this line changes nothing today — it is a
+     * pin against someone flipping it, because PATCH /api/voice/sample/{id} sends an
+     * explicit null to CLEAR a field and the server reads an absent field as "leave it
+     * alone". What actually makes those bodies correct is structural, not a flag: the
+     * patch models ([LabelPatch] / [NotePatch]) carry ONE field and NO default, so the
+     * field is written unconditionally and `encodeDefaults` cannot affect them either
+     * way. Do NOT set `encodeDefaults = true` here hoping to fix a PATCH — with a shared
+     * two-field body that would start sending `"note":null` on every label edit and WIPE
+     * the user's note.
+     *
+     * [baseUrl] is a parameter so a test can point this exact production chain — same
+     * OkHttp client, same converter, same Retrofit — at a local server and assert the
+     * bytes that actually go on the wire (VoicePatchWireTest).
      */
-    fun create(
+    fun createApis(
         tokenProvider: () -> String?,
         tokenRefresher: () -> String? = { null },
-    ): JarvisApi {
-        val json = Json { ignoreUnknownKeys = true }
+        baseUrl: String = BASE_URL,
+    ): ApiSet {
+        val json = Json { ignoreUnknownKeys = true; explicitNulls = true }
         val client = OkHttpClient.Builder()
             .addInterceptor(AuthInterceptor(tokenProvider))
             .authenticator(TokenAuthenticator(tokenRefresher))
             .build()
-        return Retrofit.Builder()
-            .baseUrl("$BASE_URL/")
+        val retrofit = Retrofit.Builder()
+            // Retrofit demands the trailing slash; accept it either way from the caller.
+            .baseUrl(baseUrl.trimEnd('/') + "/")
             .client(client)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
-            .create(JarvisApi::class.java)
+        return ApiSet(
+            chat = retrofit.create(JarvisApi::class.java),
+            voice = retrofit.create(VoiceApi::class.java),
+        )
     }
 }
