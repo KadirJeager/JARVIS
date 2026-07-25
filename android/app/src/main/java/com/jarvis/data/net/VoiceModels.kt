@@ -1,7 +1,6 @@
 package com.jarvis.data.net
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 /**
  * Wire models for the speaker-identity management contract (brain/app/voice_manage.py,
@@ -69,16 +68,26 @@ data class VoiceProfileResponse(
 )
 
 /**
- * PATCH body. The server tells "omitted" from "explicitly null" via Pydantic's
- * model_fields_set: an omitted label leaves the label alone, an explicit null CLEARS it.
- * kotlinx.serialization omits nulls by default, which would silently turn every "clear
- * the label" into a no-op — see [VoiceApiJson].
+ * PATCH bodies. The server tells "omitted" from "explicitly null" via Pydantic's
+ * model_fields_set: an omitted field is left alone, an explicit null CLEARS it.
+ *
+ * These are deliberately ONE FIELD EACH AND DEFAULT-FREE, and that is the whole point:
+ *  - No default ⇒ the generated serializer writes the field unconditionally, so
+ *    `label = null` really reaches the wire as `"label":null` and a "clear the label"
+ *    is not silently downgraded to a no-op. (With a `= null` default kotlinx emits
+ *    `shouldEncodeElementDefault(...) || value != null`, so under the default
+ *    `encodeDefaults = false` the null would be DROPPED and the body would be `{}`.)
+ *  - One field ⇒ the sibling field is not even declared, so patching a label can never
+ *    carry an incidental `"note":null` that would make the server WIPE the note.
+ *
+ * Do not merge these back into one model with defaults: that combination is exactly the
+ * pair of bugs above, and no `Json` flag can satisfy both at once.
  */
 @Serializable
-data class SamplePatchRequest(
-    val label: String? = null,
-    val note: String? = null,
-)
+data class LabelPatch(val label: String?)
+
+@Serializable
+data class NotePatch(val note: String?)
 
 @Serializable
 data class SampleDeletedResponse(val deleted: String)
@@ -98,14 +107,3 @@ data class RejectResponse(
     val removed_sample_id: String? = null,
     val already: Boolean = false,
 )
-
-/**
- * The PATCH body is the ONE place the client must emit explicit nulls; everywhere else
- * the default (omit) is what we want. Kept as a separate Json instance so the choice is
- * visible and testable rather than a flag buried in NetworkModule.
- */
-object VoiceApiJson {
-    val patchJson = Json { explicitNulls = true; encodeDefaults = true }
-
-    fun encodePatch(req: SamplePatchRequest): String = patchJson.encodeToString(req)
-}

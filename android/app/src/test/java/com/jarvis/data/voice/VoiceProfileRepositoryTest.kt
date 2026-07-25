@@ -1,10 +1,11 @@
 package com.jarvis.data.voice
 
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.LabelPatch
+import com.jarvis.data.net.NotePatch
 import com.jarvis.data.net.ProfileDeletedResponse
 import com.jarvis.data.net.RejectResponse
 import com.jarvis.data.net.SampleDeletedResponse
-import com.jarvis.data.net.SamplePatchRequest
 import com.jarvis.data.net.VoiceApi
 import com.jarvis.data.net.VoiceCountsDto
 import com.jarvis.data.net.VoiceHistoryDto
@@ -23,16 +24,21 @@ class VoiceProfileRepositoryTest {
     private class FakeVoiceApi(
         var profile: VoiceProfileResponse = VoiceProfileResponse(),
     ) : VoiceApi {
-        var patched: Pair<String, SamplePatchRequest>? = null
+        var patchedLabel: Pair<String, LabelPatch>? = null
+        var patchedNote: Pair<String, NotePatch>? = null
         var deletedSample: String? = null
         var confirmed: String? = null
         var rejected: String? = null
         var profileDeleted = false
 
         override suspend fun profile(): VoiceProfileResponse = profile
-        override suspend fun patchSample(id: String, req: SamplePatchRequest): VoiceSampleDto {
-            patched = id to req
-            return VoiceSampleDto(id = id, source = "auto", label = req.label, note = req.note)
+        override suspend fun patchLabel(id: String, req: LabelPatch): VoiceSampleDto {
+            patchedLabel = id to req
+            return VoiceSampleDto(id = id, source = "auto", label = req.label)
+        }
+        override suspend fun patchNote(id: String, req: NotePatch): VoiceSampleDto {
+            patchedNote = id to req
+            return VoiceSampleDto(id = id, source = "auto", note = req.note)
         }
         override suspend fun deleteSample(id: String): SampleDeletedResponse {
             deletedSample = id
@@ -126,12 +132,37 @@ class VoiceProfileRepositoryTest {
         assertNull(q.previous10)
     }
 
+    /**
+     * "Only the label" is the whole claim: the server CLEARS any field the body mentions
+     * with a null, so a label edit that also carried the note would wipe the user's note.
+     * Asserting the note request was never made is what makes the test name true.
+     */
     @Test
     fun setLabel_sendsOnlyTheLabelField() = runBlocking {
         val api = FakeVoiceApi()
         VoiceProfileRepository(api).setLabel("s1", "yorgun")
-        assertEquals("s1", api.patched!!.first)
-        assertEquals("yorgun", api.patched!!.second.label)
+        assertEquals("s1", api.patchedLabel!!.first)
+        assertEquals("yorgun", api.patchedLabel!!.second.label)
+        assertNull("etiket düzenlemesi note'a dokunmamalı", api.patchedNote)
+    }
+
+    /** Clearing the label is a real user action ("Etiketi kaldır"), not just an edit. */
+    @Test
+    fun setLabel_null_clearsTheLabelAndStillLeavesTheNoteAlone() = runBlocking {
+        val api = FakeVoiceApi()
+        VoiceProfileRepository(api).setLabel("s1", null)
+        assertEquals("s1", api.patchedLabel!!.first)
+        assertNull(api.patchedLabel!!.second.label)
+        assertNull("etiket temizleme note'a dokunmamalı", api.patchedNote)
+    }
+
+    @Test
+    fun setNote_sendsOnlyTheNoteField() = runBlocking {
+        val api = FakeVoiceApi()
+        VoiceProfileRepository(api).setNote("s1", null)
+        assertEquals("s1", api.patchedNote!!.first)
+        assertNull(api.patchedNote!!.second.note)
+        assertNull("not düzenlemesi label'a dokunmamalı", api.patchedLabel)
     }
 
     @Test

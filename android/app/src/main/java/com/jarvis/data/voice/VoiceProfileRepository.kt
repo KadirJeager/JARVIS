@@ -1,6 +1,7 @@
 package com.jarvis.data.voice
 
-import com.jarvis.data.net.SamplePatchRequest
+import com.jarvis.data.net.LabelPatch
+import com.jarvis.data.net.NotePatch
 import com.jarvis.data.net.VoiceApi
 import com.jarvis.data.net.VoiceHistoryDto
 import com.jarvis.data.net.VoiceQualityDto
@@ -28,12 +29,14 @@ class VoiceProfileRepository(private val api: VoiceApi) {
         )
     }
 
+    /** A null [label] CLEARS the label; the note is never mentioned, so it is untouched. */
     suspend fun setLabel(sampleId: String, label: String?) {
-        api.patchSample(sampleId, SamplePatchRequest(label = label))
+        api.patchLabel(sampleId, LabelPatch(label))
     }
 
+    /** A null [note] CLEARS the note; the label is never mentioned, so it is untouched. */
     suspend fun setNote(sampleId: String, note: String?) {
-        api.patchSample(sampleId, SamplePatchRequest(note = note))
+        api.patchNote(sampleId, NotePatch(note))
     }
 
     suspend fun deleteSample(sampleId: String) { api.deleteSample(sampleId) }

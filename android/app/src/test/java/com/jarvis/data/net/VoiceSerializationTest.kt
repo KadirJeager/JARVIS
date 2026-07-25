@@ -115,17 +115,10 @@ class VoiceSerializationTest {
         assertEquals(true, r.already)
     }
 
-    /**
-     * PATCH must be able to send an explicit null to CLEAR a label — the server
-     * distinguishes "absent" from "null" via model_fields_set, and kotlinx by default
-     * omits nulls, which would silently turn "clear the label" into a no-op.
-     */
-    @Test
-    fun samplePatch_encodesExplicitNullsSoAClearIsNotSilentlyDropped() {
-        val encoded = VoiceApiJson.encodePatch(SamplePatchRequest(label = null, note = null))
-        assertTrue("label açıkça null gitmeli: $encoded", encoded.contains("\"label\":null"))
-        assertTrue("note açıkça null gitmeli: $encoded", encoded.contains("\"note\":null"))
-    }
+    // PATCH-body encoding is NOT tested here. It used to be, against a `VoiceApiJson`
+    // helper that production never called — a green test over a dead code path, while the
+    // real request went out as `{}`. The bytes production actually sends are now asserted
+    // through the real Retrofit chain in VoicePatchWireTest.
 
     /** A malformed history row must decode, not throw: the repository drops it later. */
     @Test

@@ -8,10 +8,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.LabelPatch
+import com.jarvis.data.net.NotePatch
 import com.jarvis.data.net.ProfileDeletedResponse
 import com.jarvis.data.net.RejectResponse
 import com.jarvis.data.net.SampleDeletedResponse
-import com.jarvis.data.net.SamplePatchRequest
 import com.jarvis.data.net.VoiceApi
 import com.jarvis.data.net.VoiceCountsDto
 import com.jarvis.data.net.VoiceHistoryDto
@@ -47,8 +48,10 @@ class VoiceProfileFlowTest {
                 history = listOf(VoiceHistoryDto("h1", "2026-07-25T01:00:00Z", 0.71, true, "buds")),
             )
         }
-        override suspend fun patchSample(id: String, req: SamplePatchRequest) =
+        override suspend fun patchLabel(id: String, req: LabelPatch) =
             VoiceSampleDto(id, "auto", label = req.label)
+        override suspend fun patchNote(id: String, req: NotePatch) =
+            VoiceSampleDto(id, "auto", note = req.note)
         override suspend fun deleteSample(id: String) = SampleDeletedResponse(id)
         override suspend fun confirm(id: String): ConfirmResponse {
             confirmed = id

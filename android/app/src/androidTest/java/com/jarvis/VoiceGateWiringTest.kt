@@ -11,6 +11,21 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.BiometricGate
+import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ChatRequest
+import com.jarvis.data.net.ChatResponse
+import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.HistoryResponse
+import com.jarvis.data.net.JarvisApi
+import com.jarvis.data.net.LabelPatch
+import com.jarvis.data.net.NotePatch
+import com.jarvis.data.net.ProfileDeletedResponse
+import com.jarvis.data.net.RejectResponse
+import com.jarvis.data.net.SampleDeletedResponse
+import com.jarvis.data.net.VoiceApi
+import com.jarvis.data.net.VoiceProfileResponse
+import com.jarvis.data.net.VoiceSampleDto
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -27,12 +42,15 @@ import org.junit.runner.RunWith
  * fakes into the real [JarvisApp] container BEFORE [MainActivity] launches (the DI seam
  * added for exactly this purpose) and drives the real Activity end to end.
  *
- * The chat/voice REPOSITORIES are intentionally left real here (only `authManager` and
- * `biometricGate` are swappable, per the seam's minimal scope) — `ChatViewModel.onSignedIn`
- * fires one real, expected-to-fail network call against the production backend with a fake
- * token. That call races in the background and never touches `gate`, `mutatingId`, or
- * `profile` in [com.jarvis.ui.voice.VoiceProfileUiState] (see `onGateRequested`/`load`), so
- * it cannot flip any assertion below.
+ * The API set is faked too. A fake [AuthClient] alone puts the app in a signed-in state,
+ * and the real repositories then fire live requests at the DEPLOYED backend
+ * (`GET /api/history`, `GET /api/voice/profile`); read-only and 401-bound, but a test
+ * suite must not reach production at all. [AppContainer]'s `apis` parameter closes that.
+ *
+ * The container is restored in [tearDown]: instrumented tests share one process, so a
+ * leaked fake `AuthClient` would leave a LATER test (e.g. `SmokeTest`) signed in against
+ * fakes it never asked for — green for reasons that have nothing to do with what it
+ * asserts.
  */
 @RunWith(AndroidJUnit4::class)
 class VoiceGateWiringTest {
@@ -44,6 +62,34 @@ class VoiceGateWiringTest {
         override suspend fun signIn(activityContext: Context): Result<String> =
             Result.success(token)
         override suspend fun silentSignIn(): Result<String> = Result.success(token)
+    }
+
+    /** Empty but well-formed answers: this test is about the gate, not about content. */
+    private class FakeChatApi : JarvisApi {
+        override suspend fun chat(req: ChatRequest) = ChatResponse("")
+        override suspend fun history(sessionId: String) = HistoryResponse(emptyList())
+    }
+
+    private class FakeVoiceApi : VoiceApi {
+        override suspend fun profile() = VoiceProfileResponse()
+        override suspend fun patchLabel(id: String, req: LabelPatch) =
+            VoiceSampleDto(id, "auto", label = req.label)
+        override suspend fun patchNote(id: String, req: NotePatch) =
+            VoiceSampleDto(id, "auto", note = req.note)
+        override suspend fun deleteSample(id: String) = SampleDeletedResponse(id)
+        override suspend fun confirm(id: String) = ConfirmResponse("s-new")
+        override suspend fun reject(id: String) = RejectResponse(null)
+        override suspend fun deleteProfile() = ProfileDeletedResponse(true)
+    }
+
+    /**
+     * Hand the process back a real container. Without this the fakes installed below
+     * outlive this class and quietly change what every later test in the run is measuring.
+     */
+    @After
+    fun tearDown() {
+        val app = ApplicationProvider.getApplicationContext<JarvisApp>()
+        app.container = AppContainer(app)
     }
 
     /**
@@ -74,7 +120,12 @@ class VoiceGateWiringTest {
     fun openingTheVoiceScreen_promptsTheRealGate_andReLocksOnEveryEntry() {
         val app = ApplicationProvider.getApplicationContext<JarvisApp>()
         val fakeGate = RecordingBiometricGate()
-        app.container = AppContainer(app, authManager = FakeAuthClient(), biometricGate = fakeGate)
+        app.container = AppContainer(
+            app,
+            authManager = FakeAuthClient(),
+            biometricGate = fakeGate,
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi()),
+        )
 
         ActivityScenario.launch(MainActivity::class.java).use {
             compose.waitForIdle()

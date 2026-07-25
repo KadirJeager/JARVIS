@@ -18,13 +18,25 @@ object NetworkModule {
      * request; on a 401, [tokenRefresher] provides a fresh token for a single silent
      * retry.
      *
-     * `explicitNulls = true` matters: PATCH /api/voice/sample/{id} uses an explicit null
-     * to CLEAR a label, and kotlinx's default (omit nulls) would turn that into "field
-     * absent", which the server reads as "leave it alone".
+     * `explicitNulls = true` is restated rather than relied on silently: it is ALREADY
+     * kotlinx-serialization-json's default, so this line changes nothing today — it is a
+     * pin against someone flipping it, because PATCH /api/voice/sample/{id} sends an
+     * explicit null to CLEAR a field and the server reads an absent field as "leave it
+     * alone". What actually makes those bodies correct is structural, not a flag: the
+     * patch models ([LabelPatch] / [NotePatch]) carry ONE field and NO default, so the
+     * field is written unconditionally and `encodeDefaults` cannot affect them either
+     * way. Do NOT set `encodeDefaults = true` here hoping to fix a PATCH — with a shared
+     * two-field body that would start sending `"note":null` on every label edit and WIPE
+     * the user's note.
+     *
+     * [baseUrl] is a parameter so a test can point this exact production chain — same
+     * OkHttp client, same converter, same Retrofit — at a local server and assert the
+     * bytes that actually go on the wire (VoicePatchWireTest).
      */
     fun createApis(
         tokenProvider: () -> String?,
         tokenRefresher: () -> String? = { null },
+        baseUrl: String = BASE_URL,
     ): ApiSet {
         val json = Json { ignoreUnknownKeys = true; explicitNulls = true }
         val client = OkHttpClient.Builder()
@@ -32,7 +44,8 @@ object NetworkModule {
             .authenticator(TokenAuthenticator(tokenRefresher))
             .build()
         val retrofit = Retrofit.Builder()
-            .baseUrl("$BASE_URL/")
+            // Retrofit demands the trailing slash; accept it either way from the caller.
+            .baseUrl(baseUrl.trimEnd('/') + "/")
             .client(client)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
@@ -41,10 +54,4 @@ object NetworkModule {
             voice = retrofit.create(VoiceApi::class.java),
         )
     }
-
-    /** Kept so existing chat-side callers and tests are untouched. */
-    fun create(
-        tokenProvider: () -> String?,
-        tokenRefresher: () -> String? = { null },
-    ): JarvisApi = createApis(tokenProvider, tokenRefresher).chat
 }

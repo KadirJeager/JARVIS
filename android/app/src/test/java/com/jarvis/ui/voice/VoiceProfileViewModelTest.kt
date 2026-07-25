@@ -1,10 +1,11 @@
 package com.jarvis.ui.voice
 
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.LabelPatch
+import com.jarvis.data.net.NotePatch
 import com.jarvis.data.net.ProfileDeletedResponse
 import com.jarvis.data.net.RejectResponse
 import com.jarvis.data.net.SampleDeletedResponse
-import com.jarvis.data.net.SamplePatchRequest
 import com.jarvis.data.net.VoiceApi
 import com.jarvis.data.net.VoiceCountsDto
 import com.jarvis.data.net.VoiceHistoryDto
@@ -62,8 +63,10 @@ class VoiceProfileViewModelTest {
             profileCalls++
             return response
         }
-        override suspend fun patchSample(id: String, req: SamplePatchRequest) =
+        override suspend fun patchLabel(id: String, req: LabelPatch) =
             VoiceSampleDto(id, "auto", label = req.label)
+        override suspend fun patchNote(id: String, req: NotePatch) =
+            VoiceSampleDto(id, "auto", note = req.note)
         override suspend fun deleteSample(id: String): SampleDeletedResponse {
             deleteSampleError?.let { throw it }
             return SampleDeletedResponse(id)

@@ -16,8 +16,17 @@ interface VoiceApi {
     @GET("api/voice/profile")
     suspend fun profile(): VoiceProfileResponse
 
+    /**
+     * Same endpoint, two methods on purpose. The server treats an ABSENT field as "leave
+     * it alone" and an EXPLICIT null as "clear it" (model_fields_set in voice_manage.py),
+     * so a body must never mention a field the user did not touch. One shared body type
+     * cannot express that — see [LabelPatch] / [NotePatch].
+     */
     @PATCH("api/voice/sample/{id}")
-    suspend fun patchSample(@Path("id") id: String, @Body req: SamplePatchRequest): VoiceSampleDto
+    suspend fun patchLabel(@Path("id") id: String, @Body req: LabelPatch): VoiceSampleDto
+
+    @PATCH("api/voice/sample/{id}")
+    suspend fun patchNote(@Path("id") id: String, @Body req: NotePatch): VoiceSampleDto
 
     @DELETE("api/voice/sample/{id}")
     suspend fun deleteSample(@Path("id") id: String): SampleDeletedResponse
