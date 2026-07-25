@@ -23,9 +23,9 @@ private const val TREND_DEAD_BAND = 0.02
  * shows (spec §9).
  *
  * This deliberately does NOT restate the server's accept/adapt thresholds. Copying
- * 0.35/0.60 here would make the same number live in two places and drift after the
- * calibration pass; the bands below describe how recognition FEELS, and the exact
- * verdict stays where it is enforced.
+ * the server's numeric thresholds here would make the same number live in two places
+ * and drift after the calibration pass; the bands below describe how recognition
+ * FEELS, and the exact verdict stays where it is enforced.
  */
 fun summarize(quality: VoiceQuality, counts: VoiceCounts): QualitySummary {
     if (counts.total == 0) {
