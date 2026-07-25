@@ -2,10 +2,12 @@ package com.jarvis.ui.voice
 
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.net.ConfirmResponse
 import com.jarvis.data.net.LabelPatch
@@ -84,11 +86,21 @@ class VoiceProfileFlowTest {
         vm.onUnlocked()
         compose.waitForIdle()
 
-        compose.onNodeWithText("kayıt").assertIsDisplayed()
-        compose.onNodeWithText("Kulaklık").assertIsDisplayed()
+        // "Son söyleyişler" is default-view content; the sample gallery (where "kayıt"
+        // and "Kulaklık" live) moved behind the collapsed "Ses örneklerini yönet"
+        // section as part of the screen's simplification, so it must be expanded first.
         compose.onNodeWithTag("voice_history_h1").assertIsDisplayed()
         assertEquals(1, api.profileCalls)
 
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_manage_toggle"))
+        compose.onNodeWithTag("voice_manage_toggle").performClick()
+        compose.onNodeWithTag("voice_list").performScrollToNode(hasTestTag("voice_sample_s1"))
+        compose.onNodeWithText("kayıt").assertIsDisplayed()
+        compose.onNodeWithText("Kulaklık").assertIsDisplayed()
+
+        // The history row's "Bendim"/"Ben değildim" now live behind a confirm dialog
+        // opened by tapping the row, rather than firing on a single row-level tap.
+        compose.onNodeWithTag("voice_history_h1").performClick()
         compose.onNodeWithTag("voice_confirm_h1").performClick()
         compose.waitForIdle()
 

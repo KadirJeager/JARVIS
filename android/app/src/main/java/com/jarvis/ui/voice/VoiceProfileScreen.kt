@@ -1,6 +1,7 @@
 package com.jarvis.ui.voice
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -35,6 +37,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.jarvis.data.voice.Correction
+import com.jarvis.data.voice.HistoryRow
 import com.jarvis.data.voice.SampleSource
 import com.jarvis.data.voice.VoiceSample
 import com.jarvis.ui.theme.JarvisBg
@@ -45,6 +49,7 @@ import com.jarvis.ui.theme.JarvisSurfaceHigh
 import com.jarvis.ui.theme.JarvisTextMuted
 import com.jarvis.ui.theme.JarvisTextPrimary
 import com.jarvis.ui.theme.JarvisViolet
+import java.util.Locale
 
 /**
  * Speaker-identity management screen (spec §9). Stateless — every decision is hoisted
@@ -54,6 +59,15 @@ import com.jarvis.ui.theme.JarvisViolet
  * the profile renders at all. That gate is a real protection against a real threat (an
  * unlocked phone in someone else's hand) — and it is NEVER reported to the server, which
  * applies its own brakes independently (spec §7).
+ *
+ * Redesign (user feedback: "karışık, hata yapmaya müsait, çok veri görünüyor"): the
+ * default view answers ONE question — does it recognise me? — with a plain-language
+ * status card and a short recent-activity list. Everything else (the full sample
+ * gallery, per-sample deletion, the 3b placeholders, the danger zone) lives behind a
+ * single collapsed "Ses örneklerini yönet" section, collapsed by default. Both
+ * destructive one-tap affordances (sample delete, history "ben değildim") are now
+ * gated behind an explicit confirm step — a dialog for sample deletion, and a
+ * tap-to-open correction dialog for history rows — instead of firing on the first tap.
  */
 @Composable
 fun VoiceProfileScreen(
@@ -132,6 +146,9 @@ private fun Denied(error: String?, onRetryUnlock: () -> Unit) {
     }
 }
 
+/** Only the most recent few history rows show by default; "daha fazla" reveals the rest. */
+private const val RECENT_HISTORY_LIMIT = 5
+
 @Composable
 private fun Unlocked(
     state: VoiceProfileUiState,
@@ -158,30 +175,32 @@ private fun Unlocked(
             return@Column
         }
 
+        // Both declared at this level (not inside a lazy item), so they are NOT reset by
+        // scrolling — only leaving the screen (which re-arms the gate, spec's
+        // onGateRequested) resets them, which is exactly why "collapsed by default"
+        // holds on every fresh entry.
+        var historyExpanded by rememberSaveable { mutableStateOf(false) }
+        var manageExpanded by rememberSaveable { mutableStateOf(false) }
+
         LazyColumn(
             modifier = Modifier.fillMaxSize().testTag("voice_list"),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item { state.summary?.let { StatusCard(it, state.profile.counts.total) } }
+            item { state.summary?.let { StatusCard(it) } }
 
             if (profile.isEmpty) {
                 item { EmptyState() }
-            } else {
-                item { SectionTitle("Ses örneklerim (${profile.counts.total})") }
-                items(profile.samples, key = { it.id }) { sample ->
-                    SampleRow(
-                        sample = sample,
-                        busy = state.mutatingId != null,
-                        onSetLabel = onSetLabel,
-                        onDelete = onDeleteSample,
-                    )
-                }
             }
 
             if (profile.history.isNotEmpty()) {
                 item { SectionTitle("Son söyleyişler (${profile.history.size})") }
-                items(profile.history, key = { it.id }) { row ->
+                val visibleHistory = if (historyExpanded) {
+                    profile.history
+                } else {
+                    profile.history.take(RECENT_HISTORY_LIMIT)
+                }
+                items(visibleHistory, key = { it.id }) { row ->
                     HistoryRowView(
                         row = row,
                         busy = state.mutatingId != null,
@@ -189,16 +208,52 @@ private fun Unlocked(
                         onReject = onReject,
                     )
                 }
+                if (profile.history.size > RECENT_HISTORY_LIMIT) {
+                    item {
+                        TextButton(
+                            onClick = { historyExpanded = !historyExpanded },
+                            modifier = Modifier.testTag("voice_history_show_more"),
+                        ) {
+                            Text(
+                                if (historyExpanded) "Daha az göster" else "Daha fazla göster",
+                                color = JarvisCyan,
+                            )
+                        }
+                    }
+                }
             }
 
-            item { Placeholders() }
-            item { DangerZone(busy = state.mutatingId != null, onDeleteProfile = onDeleteProfile) }
+            item {
+                ManageSectionHeader(
+                    expanded = manageExpanded,
+                    onToggle = { manageExpanded = !manageExpanded },
+                )
+            }
+
+            if (manageExpanded) {
+                if (state.summary != null && hasQualityBreakdown(state.summary)) {
+                    item { QualityDetailCard(state.summary) }
+                }
+                if (!profile.isEmpty) {
+                    item { SectionTitle("Ses örneklerim (${profile.counts.total})") }
+                    items(profile.samples, key = { it.id }) { sample ->
+                        SampleRow(
+                            sample = sample,
+                            busy = state.mutatingId != null,
+                            onSetLabel = onSetLabel,
+                            onDelete = onDeleteSample,
+                        )
+                    }
+                }
+                item { Placeholders() }
+                item { DangerZone(busy = state.mutatingId != null, onDeleteProfile = onDeleteProfile) }
+            }
         }
     }
 }
 
 @Composable
-private fun StatusCard(summary: QualitySummary, sampleCount: Int) {
+private fun StatusCard(summary: QualitySummary) {
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
             .background(JarvisSurface).padding(16.dp),
@@ -216,12 +271,42 @@ private fun StatusCard(summary: QualitySummary, sampleCount: Int) {
         }
         Spacer(Modifier.size(6.dp))
         Text(
-            summary.detail,
+            statusSentence(summary),
             style = MaterialTheme.typography.bodyMedium,
             color = JarvisTextMuted,
             modifier = Modifier.testTag("voice_status_detail"),
         )
     }
+}
+
+/**
+ * One plain-Turkish sentence for the default view (user feedback: "çok veri görünüyor").
+ * [QualitySummary.detail] already carries the raw score/percentage breakdown (mean,
+ * fail rate, per-label scores) computed server-side — that number-dense string still
+ * exists and is shown in the "Ses örneklerini yönet" section (see [QualityDetailCard]),
+ * just not in the default view.
+ *
+ * Matched on the headline text rather than adding a field to QualitySummary: this
+ * screen is the one file in scope for this redesign, and the three headline strings
+ * are already part of the contract other tests assert on verbatim, so they are a
+ * stable switch key.
+ */
+private fun statusSentence(summary: QualitySummary): String = when (summary.headline) {
+    "Tanınma güçlü" -> "Sesini büyük çoğunlukla doğru tanıyor."
+    "Tanınma orta" -> "Sesini çoğu zaman tanıyor, ama zaman zaman karıştırıyor."
+    "Tanınma zayıf" -> "Sesini sık sık tanıyamıyor; birkaç temiz kayıt eklemek yardımcı olabilir."
+    // "Ses kimliği yok" / "Henüz ölçüm yok": summary.detail is already one plain
+    // sentence with no score/percentage breakdown, so it is shown as-is.
+    else -> summary.detail
+}
+
+/** True only for the three headlines whose [QualitySummary.detail] is the raw,
+ *  number-dense breakdown — those are the ones worth surfacing again in the
+ *  "manage" section; the other two headlines' detail is already plain and would
+ *  just duplicate [statusSentence]. */
+private fun hasQualityBreakdown(summary: QualitySummary): Boolean = when (summary.headline) {
+    "Tanınma güçlü", "Tanınma orta", "Tanınma zayıf" -> true
+    else -> false
 }
 
 private fun trendGlyph(t: TrendDirection) = when (t) {
@@ -248,6 +333,41 @@ private fun SectionTitle(text: String) {
     )
 }
 
+/** The collapsed-by-default section holding everything that used to sit on the main
+ *  view: the sample gallery, the 3b placeholders, and the danger zone (user feedback:
+ *  "çok veri görünüyor" — most visits need none of this). */
+@Composable
+private fun ManageSectionHeader(expanded: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(JarvisSurface)
+            .clickable(onClick = onToggle)
+            .padding(14.dp)
+            .testTag("voice_manage_toggle"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Ses örneklerini yönet",
+            style = MaterialTheme.typography.titleSmall,
+            color = JarvisTextPrimary,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(if (expanded) "▾" else "▸", color = JarvisTextMuted)
+    }
+}
+
+@Composable
+private fun QualityDetailCard(summary: QualitySummary) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(JarvisSurface).padding(14.dp).testTag("voice_quality_detail"),
+    ) {
+        Text("Kalite ayrıntıları", style = MaterialTheme.typography.titleSmall, color = JarvisTextPrimary)
+        Spacer(Modifier.size(6.dp))
+        Text(summary.detail, style = MaterialTheme.typography.bodySmall, color = JarvisTextMuted)
+    }
+}
+
 @Composable
 private fun SampleRow(
     sample: VoiceSample,
@@ -256,6 +376,11 @@ private fun SampleRow(
     onDelete: (String) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    // Sample deletion degrades recognition (it can remove an anchor) and used to fire
+    // on a single tap in a dense scrolling list. This is a confirm STEP, not the typed
+    // "SIL" gate — that gate is reserved for whole-profile deletion (spec: don't reuse
+    // it here, it would be disproportionate for one sample).
+    var deleteConfirmOpen by remember { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
             .background(JarvisSurface).padding(14.dp).testTag("voice_sample_${sample.id}"),
@@ -320,7 +445,7 @@ private fun SampleRow(
             }
             Spacer(Modifier.weight(1f))
             TextButton(
-                onClick = { onDelete(sample.id) },
+                onClick = { deleteConfirmOpen = true },
                 enabled = !busy,
                 modifier = Modifier.testTag("voice_sample_delete_${sample.id}"),
             ) {
@@ -330,6 +455,38 @@ private fun SampleRow(
         sample.note?.takeIf { it.isNotBlank() }?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = JarvisTextMuted)
         }
+    }
+
+    if (deleteConfirmOpen) {
+        AlertDialog(
+            onDismissRequest = { deleteConfirmOpen = false },
+            modifier = Modifier.testTag("voice_sample_delete_dialog_${sample.id}"),
+            title = { Text("Bu örneği sil?") },
+            text = {
+                Text(
+                    "Bu ses örneğini silmek anında uygulanır ve geri alınamaz.",
+                    color = JarvisTextMuted,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteConfirmOpen = false
+                        onDelete(sample.id)
+                    },
+                    modifier = Modifier.testTag("voice_sample_delete_confirm_${sample.id}"),
+                ) { Text("Evet, sil", color = JarvisError) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { deleteConfirmOpen = false },
+                    modifier = Modifier.testTag("voice_sample_delete_cancel_${sample.id}"),
+                ) { Text("Vazgeç", color = JarvisTextMuted) }
+            },
+            containerColor = JarvisSurface,
+            titleContentColor = JarvisTextPrimary,
+            textContentColor = JarvisTextMuted,
+        )
     }
 }
 
@@ -404,6 +561,10 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
  *  a null ts is normal for pre-3d anchors. Substring beats a date parser for this. */
 internal fun shortDate(ts: String?): String = ts?.take(10) ?: "—"
 
+/** Locale.ROOT: a Turkish-locale device would otherwise render "0,74" and break parity
+ *  with the scores logged server-side. */
+private fun scoreText(score: Double): String = String.format(Locale.ROOT, "%.2f", score)
+
 /**
  * ASCII on purpose. Turkish case folding is locale-dependent (I<->ı, İ<->i), so a
  * dotted "SİL" lowercased on a Turkish-locale device yields a combining sequence that
@@ -412,78 +573,124 @@ internal fun shortDate(ts: String?): String = ts?.take(10) ?: "—"
  */
 const val DELETE_CONFIRM_WORD = "SIL"
 
+/** Plain-language correction label shown under a history row. The exact wording
+ *  ("bendim" / "ben değildim") intentionally matches the dialog's button copy so the
+ *  row and the dialog it opens read as the same decision. */
+private fun correctionLabel(correction: Correction): String? = when (correction) {
+    Correction.CONFIRMED -> "bendim"
+    Correction.REJECTED -> "ben değildim"
+    Correction.NONE -> null
+}
+
+/**
+ * A history row is now a single tap target: it shows the plain verdict, device and
+ * date only (the numeric score moved into the detail dialog — spec: "the numeric
+ * score belongs in the detail, not the list"). Tapping it opens [CorrectionDialog],
+ * replacing the old always-live "Bendim"/"Ben değildim" pair — a single mis-tap in a
+ * dense scrolling list used to delete the gallery sample that utterance became.
+ */
 @Composable
 private fun HistoryRowView(
-    row: com.jarvis.data.voice.HistoryRow,
+    row: HistoryRow,
     busy: Boolean,
     onConfirm: (String) -> Unit,
     onReject: (String) -> Unit,
 ) {
+    var dialogOpen by remember { mutableStateOf(false) }
+
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-            .background(JarvisSurface).padding(14.dp).testTag("voice_history_${row.id}"),
+            .background(JarvisSurface)
+            .clickable { dialogOpen = true }
+            .padding(14.dp).testTag("voice_history_${row.id}"),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                String.format(java.util.Locale.ROOT, "%.2f", row.score),
-                style = MaterialTheme.typography.titleSmall,
+                if (row.verified) "tanındı" else "tanınmadı",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
                 color = if (row.verified) JarvisCyan else JarvisError,
             )
             Spacer(Modifier.size(10.dp))
-            Text(
-                if (row.verified) "tanındı" else "tanınmadı",
-                style = MaterialTheme.typography.bodyMedium,
-                color = JarvisTextPrimary,
-            )
+            row.deviceHint?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = JarvisTextMuted)
+            }
             Spacer(Modifier.weight(1f))
             Text(shortDate(row.ts), style = MaterialTheme.typography.bodySmall, color = JarvisTextMuted)
         }
-        row.deviceHint?.let {
-            // "Cihaz: " prefix: in the sample gallery the device name sits inline next
-            // to a source badge, where it already reads as a label. Here it's the lone
-            // secondary line under the score/verdict row, with nothing else to anchor
-            // it — a bare "buds" is a context-free token, not a device.
+        correctionLabel(row.correction)?.let {
+            Spacer(Modifier.size(4.dp))
+            Text(it, style = MaterialTheme.typography.labelMedium, color = JarvisTextMuted)
+        }
+    }
+
+    if (dialogOpen) {
+        CorrectionDialog(
+            row = row,
+            busy = busy,
+            onDismiss = { dialogOpen = false },
+            onConfirm = {
+                dialogOpen = false
+                onConfirm(row.id)
+            },
+            onReject = {
+                dialogOpen = false
+                onReject(row.id)
+            },
+        )
+    }
+}
+
+/**
+ * The "small sheet/dialog" that replaces the two always-live per-row buttons. Reversal
+ * in BOTH directions stays legal (spec §6: changing your mind is legitimate) — only the
+ * action matching the row's CURRENT verdict is disabled.
+ *
+ * The colour is computed from `enabled` rather than passed as a constant: a literal
+ * `color = JarvisCyan` on the Text OVERRIDES the alpha Material3 applies to a disabled
+ * button's content, so the already-ruled action would render at full brightness and
+ * look tappable. Semantics said disabled and the tests agreed; only a screenshot showed
+ * the user could not tell. A live-looking button that does nothing is the thing this
+ * dialog was built to avoid.
+ */
+@Composable
+private fun CorrectionDialog(
+    row: HistoryRow,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+    onReject: () -> Unit,
+) {
+    val canConfirm = !busy && row.correction != Correction.CONFIRMED
+    val canReject = !busy && row.correction != Correction.REJECTED
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("voice_history_dialog_${row.id}"),
+        title = { Text("Bu söyleyiş sen miydin?") },
+        text = {
             Text(
-                "Cihaz: $it",
-                style = MaterialTheme.typography.bodySmall,
+                "${shortDate(row.ts)} · ${row.deviceHint ?: "bilinmiyor"} · skor ${scoreText(row.score)}",
                 color = JarvisTextMuted,
             )
-        }
-        Spacer(Modifier.size(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // The verdict is shown as text so an already-ruled row still reads clearly
-            // even though its matching button is now inert.
-            when (row.correction) {
-                com.jarvis.data.voice.Correction.CONFIRMED ->
-                    Text("bendim", color = JarvisCyan, style = MaterialTheme.typography.labelMedium)
-                com.jarvis.data.voice.Correction.REJECTED ->
-                    Text("ben değildim", color = JarvisError, style = MaterialTheme.typography.labelMedium)
-                com.jarvis.data.voice.Correction.NONE -> Unit
-            }
-            Spacer(Modifier.weight(1f))
-            // Reversal in BOTH directions stays legal (spec §6): changing your mind is a
-            // legitimate use, and forbidding it would lock the user onto a wrong record.
-            //
-            // The colour is computed from `enabled` rather than passed as a constant: a
-            // literal `color = JarvisCyan` on the Text OVERRIDES the alpha Material3
-            // applies to a disabled button's content, so the already-ruled action rendered
-            // at full brightness and looked tappable. Semantics said disabled and the
-            // tests agreed; only a screenshot showed the user could not tell. A live-
-            // looking button that does nothing is the thing this row was built to avoid.
-            val canConfirm = !busy && row.correction != com.jarvis.data.voice.Correction.CONFIRMED
-            val canReject = !busy && row.correction != com.jarvis.data.voice.Correction.REJECTED
+        },
+        confirmButton = {
             TextButton(
-                onClick = { onConfirm(row.id) },
+                onClick = onConfirm,
                 enabled = canConfirm,
                 modifier = Modifier.testTag("voice_confirm_${row.id}"),
             ) { Text("Bendim", color = if (canConfirm) JarvisCyan else JarvisTextMuted) }
+        },
+        dismissButton = {
             TextButton(
-                onClick = { onReject(row.id) },
+                onClick = onReject,
                 enabled = canReject,
                 modifier = Modifier.testTag("voice_reject_${row.id}"),
             ) { Text("Ben değildim", color = if (canReject) JarvisError else JarvisTextMuted) }
-        }
-    }
+        },
+        containerColor = JarvisSurface,
+        titleContentColor = JarvisTextPrimary,
+        textContentColor = JarvisTextMuted,
+    )
 }
 
 @Composable
