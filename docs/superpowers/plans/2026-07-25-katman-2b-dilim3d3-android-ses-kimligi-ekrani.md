@@ -3335,6 +3335,15 @@ Emülatörde Google hesabı ve cihaz kilidi yok; bu adımlar Kadir'in gerçek te
 - [ ] "Ben değildim" ile geri al → tersine düzeltmenin serbest olduğu doğrulanmalı (spec §6).
 - [ ] Tehlikeli bölge: `SIL` yazılmadan düğme pasif kalmalı. **Gerçekten silme** — Kadir'in enrollment'ı gidiyor.
 - [ ] Ekrandan çık, tekrar gir → kapı **yeniden** sormalı (oturum başına bir kez değil).
+- [ ] **Aynı adımda: prompt'un ARKASINDA profil içeriği görünmemeli.** Bu madde sonradan
+      eklendi çünkü Task 9'un Critical'ı tam olarak buradan kaçıyordu: kapı gerçekten
+      yeniden soruyordu, ama `GatePhase.CHECKING` hiçbir yerde geri kurulmadığı için
+      içerik prompt'un altında çiziliydi. Yalnızca "sordu mu?" diye bakan bir kontrol
+      bunu göremez — arkaya bak.
+- [ ] HOME'a bas, uygulamayı recents'ten geri getir. **BİLİNEN AÇIK:** kapı burada
+      yeniden kurulmuyor ve `FLAG_SECURE` yok, yani içerik hem promptsuz görünür hem de
+      recents önizlemesinde çıkar. Bunu bir kusur olarak DOĞRULA ve sıradaki dilime yaz;
+      bu turda kapsam dışı bırakıldı.
 
 ## Notlar / bilinen borç
 
