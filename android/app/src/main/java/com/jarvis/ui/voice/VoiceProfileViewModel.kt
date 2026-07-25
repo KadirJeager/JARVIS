@@ -21,6 +21,17 @@ class VoiceProfileViewModel(private val repo: VoiceProfileRepository) : ViewMode
     private val _state = MutableStateFlow(VoiceProfileUiState())
     val state: StateFlow<VoiceProfileUiState> = _state.asStateFlow()
 
+    /**
+     * Re-arm the gate. The host calls this on EVERY entry into the screen, before the
+     * prompt is even shown: `route` flips synchronously but `prompt(...)` is async, so
+     * without this reset a second visit would render the previous visit's full profile
+     * (samples, scores, correction history) underneath the prompt sheet while it is still
+     * animating in — the gate protecting nothing after the first unlock of the session.
+     */
+    fun onGateRequested() = _state.update {
+        it.copy(gate = GatePhase.CHECKING, profile = null, summary = null, error = null, deleted = false)
+    }
+
     /** The device lock was satisfied. Only now does anything get fetched. */
     fun onUnlocked() {
         _state.update { it.copy(gate = GatePhase.UNLOCKED, error = null) }

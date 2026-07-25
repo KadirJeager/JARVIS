@@ -3,6 +3,7 @@ package com.jarvis
 import android.app.Application
 import android.content.Context
 import com.jarvis.data.auth.AndroidBiometricGate
+import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthManager
 import com.jarvis.data.auth.BiometricGate
 import com.jarvis.data.chat.ChatRepository
@@ -14,11 +15,18 @@ import kotlinx.coroutines.runBlocking
 /**
  * Hand-rolled DI container (no Hilt — YAGNI for this slice). Wires the deployed backend
  * client with the auth token provider and the 401 silent-refresh path.
+ *
+ * [authManager] and [biometricGate] are constructor params, not hardcoded fields: an
+ * instrumented test installs a fake pair onto [JarvisApp.container] before `MainActivity`
+ * launches, so the real biometric-gate wiring inside the Activity can be pinned by a test
+ * instead of only by the manual HITL checklist.
  */
-class AppContainer(context: Context) {
+class AppContainer(
+    context: Context,
+    val authManager: AuthClient = AuthManager(context.applicationContext),
+    val biometricGate: BiometricGate = AndroidBiometricGate(context.applicationContext),
+) {
     private val appContext = context.applicationContext
-
-    val authManager = AuthManager(appContext)
 
     private val apis = NetworkModule.createApis(
         tokenProvider = { authManager.currentToken() },
@@ -28,12 +36,15 @@ class AppContainer(context: Context) {
 
     val chatRepository = ChatRepository(apis.chat, DataStoreSessionStore(appContext))
     val voiceProfileRepository = VoiceProfileRepository(apis.voice)
-    val biometricGate: BiometricGate = AndroidBiometricGate(appContext)
 }
 
 class JarvisApp : Application() {
+    /**
+     * No `private set`: an instrumented test needs to install a container built with
+     * fake collaborators before `MainActivity`'s `onCreate` reads it, which happens on
+     * process-wide `Application` singleton this class already is.
+     */
     lateinit var container: AppContainer
-        private set
 
     override fun onCreate() {
         super.onCreate()

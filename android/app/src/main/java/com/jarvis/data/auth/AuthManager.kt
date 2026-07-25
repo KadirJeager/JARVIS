@@ -14,6 +14,18 @@ const val WEB_CLIENT_ID =
     "000000000000-tmu4im1mba53dmqj1gbhgba55v3i6hmb.apps.googleusercontent.com"
 
 /**
+ * The subset of [AuthManager] that `MainActivity` and `AppContainer` actually depend on,
+ * extracted as a seam so an instrumented test can inject a fake and drive sign-in/token
+ * state without Credential Manager or Google Play Services. [AuthManager]'s internals are
+ * unchanged by this — it is a contract on top of the existing class, not a rewrite.
+ */
+interface AuthClient {
+    fun currentToken(): String?
+    suspend fun signIn(activityContext: Context): Result<String>
+    suspend fun silentSignIn(): Result<String>
+}
+
+/**
  * Google sign-in via Credential Manager. Returns the Google **ID token** (JWT) that the
  * backend verifies as `Authorization: Bearer <token>`.
  *
@@ -23,25 +35,25 @@ const val WEB_CLIENT_ID =
  *
  * The last obtained token is cached in [currentToken] for the request interceptor.
  */
-class AuthManager(private val appContext: Context) {
+class AuthManager(private val appContext: Context) : AuthClient {
 
     private val credentialManager = CredentialManager.create(appContext)
 
     @Volatile
     private var token: String? = null
 
-    fun currentToken(): String? = token
+    override fun currentToken(): String? = token
 
     fun clear() {
         token = null
     }
 
     /** Interactive sign-in; [activityContext] must be an Activity to show the picker. */
-    suspend fun signIn(activityContext: Context): Result<String> =
+    override suspend fun signIn(activityContext: Context): Result<String> =
         get(activityContext, filterByAuthorized = false, autoSelect = false)
 
     /** Silent re-auth (no UI); safe to call off the main thread with the app context. */
-    suspend fun silentSignIn(): Result<String> =
+    override suspend fun silentSignIn(): Result<String> =
         get(appContext, filterByAuthorized = true, autoSelect = true)
 
     private suspend fun get(

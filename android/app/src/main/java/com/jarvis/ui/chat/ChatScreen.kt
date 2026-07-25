@@ -110,8 +110,9 @@ private fun TopBar(onOpenVoiceProfile: () -> Unit) {
         Spacer(Modifier.weight(1f))
         TextButton(
             onClick = onOpenVoiceProfile,
-            modifier = Modifier.testTag("open_voice_profile")
-                .semantics { contentDescription = "Ses kimliğim" },
+            // No extra .semantics{contentDescription=...}: the child Text already
+            // supplies that label, and Compose merges semantics for a clickable.
+            modifier = Modifier.testTag("open_voice_profile"),
         ) {
             Text("Ses kimliğim", color = JarvisCyan, style = MaterialTheme.typography.bodyMedium)
         }

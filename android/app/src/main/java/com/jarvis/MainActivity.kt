@@ -1,13 +1,14 @@
 package com.jarvis
 
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -32,7 +33,11 @@ class MainActivity : FragmentActivity() {
                 val voiceVm: VoiceProfileViewModel =
                     viewModel { VoiceProfileViewModel(container.voiceProfileRepository) }
                 val voiceState by voiceVm.state.collectAsState()
-                var route by remember { mutableStateOf(Route.CHAT) }
+                // rememberSaveable, not remember: a rotation while on the voice screen
+                // must not silently drop the user back to chat. Safe now that every entry
+                // re-locks (see onGateRequested below) — a restored VOICE_PROFILE route
+                // still starts from CHECKING, with no stale content to leak.
+                var route by rememberSaveable { mutableStateOf(Route.CHAT) }
 
                 // Whole-profile deletion leaves nothing to show; drop back to the chat.
                 LaunchedEffect(voiceState.deleted) {
@@ -41,9 +46,19 @@ class MainActivity : FragmentActivity() {
 
                 // The gate runs on ENTERING the screen, not once per process: leaving and
                 // coming back must ask again, otherwise the lock protects only the first
-                // visit of the session.
+                // visit of the session. onGateRequested() runs FIRST and SYNCHRONOUSLY,
+                // before the route flips and before the (asynchronous) prompt is shown:
+                // route flipping alone would otherwise render the previous visit's whole
+                // profile for as long as the prompt sheet takes to appear, since
+                // BiometricPrompt is a translucent bottom sheet, not an opaque cover.
                 fun openVoiceProfile() {
+                    voiceVm.onGateRequested()
                     route = Route.VOICE_PROFILE
+                    // isAvailable() is not checked here: BiometricPrompt.authenticate()
+                    // already fails closed via onAuthenticationError when no device lock
+                    // is configured, landing on the same DENIED state through
+                    // onUnlockFailed — a separate isAvailable() branch would just be a
+                    // second path to the same user-visible outcome.
                     container.biometricGate.prompt(this@MainActivity) { result ->
                         result.fold(
                             onSuccess = { voiceVm.onUnlocked() },
@@ -51,6 +66,11 @@ class MainActivity : FragmentActivity() {
                         )
                     }
                 }
+
+                // Hand-rolled Nav is invisible to the platform back dispatcher: without
+                // this, the system Back button exits the app from the voice screen
+                // instead of returning to chat.
+                BackHandler(enabled = route == Route.VOICE_PROFILE) { route = Route.CHAT }
 
                 // Boot: try silent re-auth. Both outcomes must be reported -- the UI
                 // stays on the boot splash until one of them lands, so swallowing the
