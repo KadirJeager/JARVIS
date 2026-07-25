@@ -122,12 +122,19 @@ class VoiceProfileScreenTest {
         assertEquals("s2", deleted)
     }
 
-    /** A row already mutating must not accept a second tap (the VM would drop it anyway,
-     *  but a live-looking button that does nothing reads as a broken screen). */
+    /** The lock is screen-wide, not per-row: [VoiceProfileViewModel.mutate] starts with
+     *  `if (_state.value.mutatingId != null) return`, so only ONE mutation can be in
+     *  flight for the whole screen regardless of which row it targets. If a row NOT
+     *  being mutated stayed enabled, tapping it would silently drop the click — the
+     *  exact "live-looking button that does nothing" this test exists to catch. So this
+     *  asserts both the mutating row (s2) AND an unrelated row (s1) are disabled; s1
+     *  alone would pass under a (wrong) per-row lock too, since s2 != s1. */
     @Test
     fun aRowBeingMutated_disablesItsActions() {
         render(ready().copy(mutatingId = "s2"))
         compose.onNodeWithTag("voice_sample_delete_s2").assertIsNotEnabled()
+        compose.onNodeWithTag("voice_sample_delete_s1").assertIsNotEnabled()
+        compose.onNodeWithTag("voice_sample_label_s1").assertIsNotEnabled()
     }
 
     @Test
