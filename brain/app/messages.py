@@ -67,3 +67,23 @@ class MessageStore:
         rows = [snap.to_dict() for snap in query.stream()]
         rows.reverse()
         return [{"role": r["role"], "text": r["text"], "ts": r["ts"]} for r in rows]
+
+    def delete_session(self, user_id: str, session_id: str) -> int:
+        """Delete every message row for (user_id, session_id). Returns the
+        count deleted (for logging; callers don't need to act on it).
+
+        Firestore has no `DELETE WHERE`: this queries for the matching rows
+        and deletes each doc individually via its snapshot's `.reference`
+        (the standard delete-by-query idiom). Not atomic with the caller's
+        other write (conversations.ConversationStore.delete) -- see
+        conversations.py's module docstring for the accepted failure mode."""
+        query = (
+            self.db.collection(COLLECTION)
+            .where(filter=FieldFilter("user_id", "==", user_id))
+            .where(filter=FieldFilter("session_id", "==", session_id))
+        )
+        count = 0
+        for snap in query.stream():
+            snap.reference.delete()
+            count += 1
+        return count
