@@ -2,11 +2,13 @@ package com.jarvis
 
 import android.app.Application
 import android.content.Context
+import com.jarvis.data.auth.AndroidBiometricGate
 import com.jarvis.data.auth.AuthManager
+import com.jarvis.data.auth.BiometricGate
 import com.jarvis.data.chat.ChatRepository
 import com.jarvis.data.chat.DataStoreSessionStore
-import com.jarvis.data.net.JarvisApi
 import com.jarvis.data.net.NetworkModule
+import com.jarvis.data.voice.VoiceProfileRepository
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -18,13 +20,15 @@ class AppContainer(context: Context) {
 
     val authManager = AuthManager(appContext)
 
-    private val api: JarvisApi = NetworkModule.create(
+    private val apis = NetworkModule.createApis(
         tokenProvider = { authManager.currentToken() },
         // Runs on OkHttp's background thread, so blocking here is fine.
         tokenRefresher = { runBlocking { authManager.silentSignIn().getOrNull() } },
     )
 
-    val chatRepository = ChatRepository(api, DataStoreSessionStore(appContext))
+    val chatRepository = ChatRepository(apis.chat, DataStoreSessionStore(appContext))
+    val voiceProfileRepository = VoiceProfileRepository(apis.voice)
+    val biometricGate: BiometricGate = AndroidBiometricGate(appContext)
 }
 
 class JarvisApp : Application() {

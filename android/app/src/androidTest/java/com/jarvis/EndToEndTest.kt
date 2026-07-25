@@ -16,8 +16,11 @@ import com.jarvis.data.net.HistoryMessage
 import com.jarvis.data.net.HistoryResponse
 import com.jarvis.data.net.JarvisApi
 import com.jarvis.ui.Nav
+import com.jarvis.ui.Route
+import com.jarvis.ui.VoiceActions
 import com.jarvis.ui.chat.ChatViewModel
 import com.jarvis.ui.theme.JarvisTheme
+import com.jarvis.ui.voice.VoiceProfileUiState
 import org.junit.Rule
 import org.junit.Test
 
@@ -49,10 +52,21 @@ class EndToEndTest {
                 val state by vm.state.collectAsState()
                 Nav(
                     state = state,
+                    // This test never opens the voice screen; it only needs Nav's
+                    // wiring to compile after Task 9 added the route parameters.
+                    route = Route.CHAT,
+                    voiceState = VoiceProfileUiState(),
+                    voiceActions = VoiceActions(
+                        onRetryUnlock = {}, onRetryLoad = {}, onSetLabel = { _, _ -> },
+                        onDeleteSample = {}, onConfirm = {}, onReject = {},
+                        onDeleteProfile = {}, onDismissError = {},
+                    ),
                     onSignIn = { vm.onSignedIn() },
                     onInput = vm::onInputChange,
                     onSend = vm::send,
                     onRetry = vm::refreshHistory,
+                    onOpenVoiceProfile = {},
+                    onBack = {},
                 )
             }
         }
