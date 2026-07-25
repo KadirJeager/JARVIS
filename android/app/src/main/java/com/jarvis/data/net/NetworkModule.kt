@@ -9,6 +9,9 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 /** Deployed jarvis-brain base URL (Katman 2b backend). */
 const val BASE_URL = "https://jarvis-brain-000000000000.europe-west1.run.app"
 
+/** Deployed jarvis-voice live-call WebSocket (same endpoint the web PWA uses). */
+const val VOICE_WS_URL = "wss://jarvis-voice-000000000000.europe-west1.run.app/ws/voice"
+
 /** Both API surfaces, sharing one OkHttp client and one Retrofit instance. */
 class ApiSet(val chat: JarvisApi, val voice: VoiceApi, val conversations: ConversationsApi)
 

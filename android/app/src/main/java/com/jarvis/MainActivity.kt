@@ -1,8 +1,13 @@
 package com.jarvis
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -16,8 +21,11 @@ import com.jarvis.ui.Nav
 import com.jarvis.ui.Route
 import com.jarvis.ui.VoiceActions
 import com.jarvis.ui.chat.ChatViewModel
+import com.jarvis.data.voice.session.VoicePhase
 import com.jarvis.ui.theme.JarvisTheme
 import com.jarvis.ui.voice.VoiceProfileViewModel
+import com.jarvis.ui.voicecall.VoiceCallOverlay
+import com.jarvis.ui.voicecall.VoiceCallViewModel
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
@@ -73,6 +81,33 @@ class MainActivity : FragmentActivity() {
                 // this, the system Back button exits the app from the voice screen
                 // instead of returning to chat.
                 BackHandler(enabled = route == Route.VOICE_PROFILE) { route = Route.CHAT }
+
+                val voiceCallVm: VoiceCallViewModel =
+                    viewModel { VoiceCallViewModel(container.voiceSessionFactory) }
+                val voiceCallState by voiceCallVm.state.collectAsState()
+
+                // The system permission dialog resolves asynchronously; a denial must
+                // surface as a visible error, not a button that silently does nothing.
+                val micPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) { granted ->
+                    if (granted) voiceCallVm.start() else voiceCallVm.onMicPermissionDenied()
+                }
+
+                fun startVoice() {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (granted) voiceCallVm.start()
+                    else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+
+                // While a call (or its error) owns the screen, Back hangs up instead of
+                // exiting the app under a live microphone.
+                BackHandler(enabled = voiceCallState.phase != VoicePhase.IDLE) {
+                    voiceCallVm.stop()
+                }
 
                 // Boot.
                 //
@@ -138,12 +173,24 @@ class MainActivity : FragmentActivity() {
                     onSend = vm::send,
                     onRetry = vm::refreshHistory,
                     onOpenVoiceProfile = { openVoiceProfile() },
+                    onStartVoice = { startVoice() },
                     onBack = { route = Route.CHAT },
                     onToggleConversations = vm::toggleConversations,
                     onNewConversation = vm::startNewConversation,
                     onOpenConversation = vm::openConversation,
                     onDeleteConversation = vm::deleteConversation,
                 )
+
+                // Drawn AFTER (= on top of) Nav: while a call is anything but IDLE the
+                // overlay owns the screen. Dismissing an error is also just stop() —
+                // the session is already torn down, this only returns the state to IDLE.
+                if (voiceCallState.phase != VoicePhase.IDLE) {
+                    VoiceCallOverlay(
+                        state = voiceCallState,
+                        onStop = voiceCallVm::stop,
+                        onDismissError = voiceCallVm::stop,
+                    )
+                }
             }
         }
     }
