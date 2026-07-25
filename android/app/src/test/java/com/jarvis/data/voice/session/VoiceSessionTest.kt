@@ -1,0 +1,390 @@
+package com.jarvis.data.voice.session
+
+import com.jarvis.data.voice.protocol.TranscriptLine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * [VoiceSession] is the frame-routing state machine described in the Katman 3b spec: it
+ * owns no Android type directly (audio and the socket are behind [MicSource]/[SpeakerSink]/
+ * [VoiceTransport]), so every transition here is driven through fakes and is fully
+ * JVM-testable, unlike the real AudioRecord/AudioTrack/OkHttp glue.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class VoiceSessionTest {
+
+    private val voiceUrl = "wss://jarvis-voice.example/ws/voice"
+
+    private class FakeVoiceTransport : VoiceTransport {
+        var connectCalls = 0
+        var connectedUrl: String? = null
+        var listener: VoiceTransportListener? = null
+        val sentTexts = mutableListOf<String>()
+        val sentBinaries = mutableListOf<ByteArray>()
+        var closeCalls = 0
+
+        override fun connect(url: String, listener: VoiceTransportListener) {
+            connectCalls++
+            connectedUrl = url
+            this.listener = listener
+        }
+
+        override fun sendText(text: String): Boolean {
+            sentTexts += text
+            return true
+        }
+
+        override fun sendBinary(bytes: ByteArray): Boolean {
+            sentBinaries += bytes
+            return true
+        }
+
+        override fun close() {
+            closeCalls++
+        }
+    }
+
+    private class FakeMicSource : MicSource {
+        var startedRate: Int? = null
+        var stopCalls = 0
+        val frames = mutableListOf<ByteArray>()
+
+        override fun start(sampleRateHz: Int) {
+            startedRate = sampleRateHz
+        }
+
+        override suspend fun readFrame(): ByteArray? =
+            if (frames.isNotEmpty()) frames.removeAt(0) else null
+
+        override fun stop() {
+            stopCalls++
+        }
+    }
+
+    private class FakeSpeakerSink : SpeakerSink {
+        var startedRate: Int? = null
+        val written = mutableListOf<ByteArray>()
+        var stopCalls = 0
+
+        override fun start(sampleRateHz: Int) {
+            startedRate = sampleRateHz
+        }
+
+        override fun write(pcm: ByteArray) {
+            written += pcm
+        }
+
+        override fun stop() {
+            stopCalls++
+        }
+    }
+
+    private class Fixture(scope: CoroutineScope, token: String? = "tok-xyz") {
+        val transport = FakeVoiceTransport()
+        val mic = FakeMicSource()
+        val speaker = FakeSpeakerSink()
+        val session = VoiceSession(
+            transport = transport,
+            mic = mic,
+            speaker = speaker,
+            tokenProvider = { token },
+            deviceHint = "android-phone",
+            scope = scope,
+            voiceUrl = "wss://jarvis-voice.example/ws/voice",
+        )
+    }
+
+    // -- start() / connection lifecycle -------------------------------------------------
+
+    @Test
+    fun start_movesToConnecting_andConnectsTheGivenUrl() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        assertEquals(VoicePhase.CONNECTING, f.session.state.value.phase)
+        assertEquals(1, f.transport.connectCalls)
+        assertEquals(voiceUrl, f.transport.connectedUrl)
+    }
+
+    @Test
+    fun start_withNoToken_reportsTurkishError_andNeverConnects() = runTest {
+        val f = Fixture(backgroundScope, token = null)
+        f.session.start()
+        assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
+        assertNotNull(f.session.state.value.errorMessage)
+        assertEquals(0, f.transport.connectCalls)
+    }
+
+    @Test
+    fun start_whileAlreadyActive_isIgnored() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.session.start()
+        assertEquals(1, f.transport.connectCalls)
+    }
+
+    @Test
+    fun onOpen_sendsHelloFrame_withTokenAndDeviceHint() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        assertEquals(1, f.transport.sentTexts.size)
+        val hello = Json.parseToJsonElement(f.transport.sentTexts[0]).jsonObject
+        assertEquals("tok-xyz", hello.getValue("token").jsonPrimitive.content)
+        assertEquals("android-phone", hello.getValue("device_hint").jsonPrimitive.content)
+        assertEquals("foreground", hello.getValue("presence").jsonPrimitive.content)
+    }
+
+    @Test
+    fun onOpen_movesToListening() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+    }
+
+    /**
+     * Mutation-check target #1: swapping which constant feeds which fake here (16000 <->
+     * 24000) must fail this test. Literal numbers on purpose, not the AUDIO_*_RATE_HZ
+     * constants -- so a mutation of the constants themselves would ALSO be caught, not
+     * just a self-consistent swap of both.
+     */
+    @Test
+    fun onOpen_startsCaptureAt16000Hz_andPlaybackAt24000Hz() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        assertEquals(16000, f.mic.startedRate)
+        assertEquals(24000, f.speaker.startedRate)
+    }
+
+    // -- server -> client events ----------------------------------------------------------
+
+    @Test
+    fun transcriptEvents_accumulate_inOrder_bothRoles() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"merhaba"}""")
+        f.transport.listener!!.onText("""{"type":"transcript","role":"model","text":"selam"}""")
+
+        assertEquals(
+            listOf(TranscriptLine("user", "merhaba"), TranscriptLine("model", "selam")),
+            f.session.state.value.transcript,
+        )
+    }
+
+    @Test
+    fun binaryFrame_isWrittenToSpeaker_andMovesToSpeaking() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        val chunk = byteArrayOf(1, 2, 3, 4)
+        f.transport.listener!!.onBinary(chunk)
+
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+        assertEquals(1, f.speaker.written.size)
+        assertTrue(chunk.contentEquals(f.speaker.written[0]))
+    }
+
+    /**
+     * Mutation-check target #2: making the session ignore `turn_complete` must fail this
+     * test -- phase would stay SPEAKING forever instead of reverting to LISTENING.
+     */
+    @Test
+    fun turnComplete_revertsFromSpeakingBackToListening() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onBinary(byteArrayOf(9))
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+
+        f.transport.listener!!.onText("""{"type":"turn_complete"}""")
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+    }
+
+    @Test
+    fun speakerEvent_updatesLastSpeakerVerified() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        assertNull(f.session.state.value.lastSpeakerVerified)
+
+        f.transport.listener!!.onText("""{"type":"speaker","role":"user","verified":true,"score":0.83}""")
+        assertEquals(true, f.session.state.value.lastSpeakerVerified)
+
+        f.transport.listener!!.onText("""{"type":"speaker","role":"user","verified":false,"score":0.1}""")
+        assertEquals(false, f.session.state.value.lastSpeakerVerified)
+    }
+
+    @Test
+    fun errorEvent_endsTheSession_withTheServersMessage() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"error","message":"model kullanilamiyor"}""")
+
+        assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
+        assertTrue(f.session.state.value.errorMessage!!.contains("model kullanilamiyor"))
+        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.speaker.stopCalls)
+        assertEquals(1, f.transport.closeCalls)
+    }
+
+    @Test
+    fun unknownOrMalformedTextFrame_isIgnored_sessionStaysListening() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.transport.listener!!.onText("""{"type":"future_event","payload":1}""")
+        f.transport.listener!!.onText("not json at all {{{")
+
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+        assertTrue(f.session.state.value.transcript.isEmpty())
+        assertNull(f.session.state.value.errorMessage)
+    }
+
+    @Test
+    fun transportFailure_setsErrorPhase_andStopsAudio() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onFailure("soket koptu")
+
+        assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
+        assertTrue(f.session.state.value.errorMessage!!.contains("soket koptu"))
+        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.speaker.stopCalls)
+    }
+
+    @Test
+    fun transportClosed_withoutAPriorError_returnsToIdle() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onClosed()
+
+        assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
+        assertNull(f.session.state.value.errorMessage)
+    }
+
+    // -- mic capture loop -----------------------------------------------------------------
+
+    @Test
+    fun micFrames_areForwardedAsBinary_toTheTransport() = runTest {
+        // UnconfinedTestDispatcher, not backgroundScope: the fake's readFrame() never
+        // truly suspends, so an Unconfined launch runs the whole read/send loop eagerly
+        // and synchronously inside onOpen() -- no scheduler-advance ambiguity.
+        val loopScope = CoroutineScope(UnconfinedTestDispatcher())
+        val f = Fixture(loopScope)
+        f.mic.frames += byteArrayOf(1, 2, 3)
+        f.mic.frames += byteArrayOf(4, 5, 6)
+
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        advanceUntilIdle()
+
+        assertEquals(2, f.transport.sentBinaries.size)
+        assertTrue(byteArrayOf(1, 2, 3).contentEquals(f.transport.sentBinaries[0]))
+        assertTrue(byteArrayOf(4, 5, 6).contentEquals(f.transport.sentBinaries[1]))
+    }
+
+    // -- stop() / teardown ordering ---------------------------------------------------------
+
+    @Test
+    fun stop_whileIdle_isANoOp() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.stop()
+        assertEquals(0, f.transport.closeCalls)
+        assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
+    }
+
+    @Test
+    fun stop_whileConnecting_closesTransport_andReturnsToIdle() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.session.stop()
+
+        assertEquals(1, f.transport.closeCalls)
+        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.speaker.stopCalls)
+        assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
+        assertNull(f.session.state.value.errorMessage)
+    }
+
+    @Test
+    fun stop_whileListening_stopsAudio_andClosesTransport() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.session.stop()
+
+        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.speaker.stopCalls)
+        assertEquals(1, f.transport.closeCalls)
+        assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
+    }
+
+    /**
+     * Mirrors app.js's `voiceGen` guard: a callback from a socket that belonged to a
+     * PREVIOUS start()/stop() cycle must not clobber the state of whatever is happening
+     * now. Without this guard, a late `onBinary` from an already-stopped socket would
+     * silently resurrect SPEAKING after the user explicitly stopped voice mode.
+     */
+    @Test
+    fun lateCallbackFromAStoppedGeneration_isIgnored() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        val staleListener = f.transport.listener!!
+
+        f.session.stop()
+        staleListener.onBinary(byteArrayOf(1))
+        staleListener.onText("""{"type":"transcript","role":"model","text":"gec gelen"}""")
+
+        assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
+        assertTrue(f.session.state.value.transcript.isEmpty())
+        assertTrue(f.speaker.written.isEmpty())
+    }
+
+    // -- reportError() (used for permission-denied, before any socket exists) -------------
+
+    @Test
+    fun reportError_whileIdle_setsErrorPhase() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.reportError("Mikrofon izni verilmedi.")
+        assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
+        assertEquals("Mikrofon izni verilmedi.", f.session.state.value.errorMessage)
+    }
+
+    @Test
+    fun reportError_whileASessionIsActive_isIgnored() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.session.reportError("izin reddedildi")
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+    }
+
+    @Test
+    fun stop_afterAnError_clearsIt_backToIdle() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.reportError("gecici hata")
+        assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
+        f.session.stop()
+        assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
+        assertNull(f.session.state.value.errorMessage)
+    }
+}
