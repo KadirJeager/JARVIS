@@ -9,6 +9,7 @@ import com.jarvis.data.voice.protocol.parseVoiceServerEvent
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -75,6 +76,12 @@ class VoiceSession(
     // Only touched under [lock] (onText/endSession), no extra synchronization needed.
     private var turnBoundary = false
 
+    // A barged-into model turn can end with NO turn_complete (voice.py), which would
+    // leave the label stuck on "Konuşuyor…". Every binary frame re-arms this; when
+    // model audio stays quiet for [QUIET_WINDOW_MS], SPEAKING settles to LISTENING.
+    // Only touched under [lock].
+    private var quietJob: Job? = null
+
     /** Starts a call. No-op if one is already connecting/live. */
     fun start() {
         val phase = _state.value.phase
@@ -121,6 +128,15 @@ class VoiceSession(
                     if (gen != generation.get()) return
                     speaker.write(bytes)
                     _state.update { it.copy(phase = VoicePhase.SPEAKING) }
+                    quietJob?.cancel()
+                    quietJob = scope.launch {
+                        delay(QUIET_WINDOW_MS)
+                        synchronized(lock) {
+                            if (gen == generation.get() && _state.value.phase == VoicePhase.SPEAKING) {
+                                _state.update { it.copy(phase = VoicePhase.LISTENING) }
+                            }
+                        }
+                    }
                 }
 
                 override fun onClosed() {
@@ -195,6 +211,8 @@ class VoiceSession(
         if (!generation.compareAndSet(gen, gen + 1)) return
         micJob?.cancel()
         micJob = null
+        quietJob?.cancel()
+        quietJob = null
         mic.stop()
         speaker.stop()
         transport.close()
@@ -214,5 +232,11 @@ class VoiceSession(
                 transport.sendBinary(frame)
             }
         }
+    }
+
+    private companion object {
+        /** How long model audio must stay quiet before SPEAKING settles to LISTENING.
+         *  Longer than any intra-utterance streaming gap, far shorter than a turn. */
+        const val QUIET_WINDOW_MS = 1_200L
     }
 }

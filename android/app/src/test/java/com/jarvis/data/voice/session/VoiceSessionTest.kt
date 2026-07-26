@@ -4,6 +4,7 @@ import com.jarvis.data.voice.protocol.TranscriptLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -316,6 +317,31 @@ class VoiceSessionTest {
             listOf(TranscriptLine("user", "merhaba"), TranscriptLine("model", "selam")),
             f.session.state.value.transcript,
         )
+    }
+
+    /**
+     * Review Minor #9: a barged-into model turn may end with NO turn_complete (voice.py's
+     * own comments), which left the label stuck on "Konuşuyor…" until the next turn. When
+     * model audio goes quiet, the phase must settle back to LISTENING on its own.
+     */
+    @Test
+    fun speakingPhase_settlesBackToListening_whenModelAudioGoesQuiet() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.transport.listener!!.onBinary(byteArrayOf(1, 2))
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+
+        // More audio keeps it SPEAKING past one quiet window's worth of time.
+        advanceTimeBy(500)
+        f.transport.listener!!.onBinary(byteArrayOf(3, 4))
+        advanceTimeBy(500)
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+
+        // True quiet: no frames for the full window -> back to LISTENING, no event needed.
+        advanceTimeBy(2_000)
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
     }
 
     @Test
