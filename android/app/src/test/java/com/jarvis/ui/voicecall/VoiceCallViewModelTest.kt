@@ -100,10 +100,37 @@ class VoiceCallViewModelTest {
         return vm to store
     }
 
+    /**
+     * Saha (26 Tem 03:30): the hello frame has no 401-refresh-retry path like HTTP does,
+     * so dialing with the cached (possibly hour-old, dead) token failed every call with
+     * "Giriş doğrulanamadı". A fresh token must be minted BEFORE the socket dials.
+     */
+    @Test
+    fun start_refreshesAuth_beforeDialing() {
+        val order = mutableListOf<String>()
+        val store = ViewModelStore()
+        val factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : androidx.lifecycle.ViewModel> create(
+                modelClass: KClass<T>,
+                extras: CreationExtras,
+            ): T = VoiceCallViewModel(::sessionFor, refreshAuth = { order.add("refresh") }) as T
+        }
+        val vm = ViewModelProvider.create(store, factory)[VoiceCallViewModel::class]
+
+        vm.start()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(1, transport.connectCalls)
+        assertEquals(listOf("refresh"), order)
+        assertEquals(VoicePhase.CONNECTING, vm.state.value.phase)
+    }
+
     @Test
     fun start_opensTheSession() {
         val (vm, _) = buildInStore()
         vm.start()
+        dispatcher.scheduler.advanceUntilIdle()
         assertEquals(1, transport.connectCalls)
         assertEquals(VoicePhase.CONNECTING, vm.state.value.phase)
     }
@@ -120,6 +147,7 @@ class VoiceCallViewModelTest {
     fun clearingTheViewModel_endsALiveCall() {
         val (vm, store) = buildInStore()
         vm.start()
+        dispatcher.scheduler.advanceUntilIdle()
         transport.listener!!.onOpen()
         assertEquals(VoicePhase.LISTENING, vm.state.value.phase)
 
@@ -134,6 +162,7 @@ class VoiceCallViewModelTest {
     fun stop_returnsToIdle() {
         val (vm, _) = buildInStore()
         vm.start()
+        dispatcher.scheduler.advanceUntilIdle()
         transport.listener!!.onOpen()
         vm.stop()
         assertEquals(VoicePhase.IDLE, vm.state.value.phase)
