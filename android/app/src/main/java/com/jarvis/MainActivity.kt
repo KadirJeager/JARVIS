@@ -131,19 +131,38 @@ class MainActivity : FragmentActivity() {
 
                 // The system permission dialog resolves asynchronously; a denial must
                 // surface as a visible error, not a button that silently does nothing.
-                val micPermissionLauncher = rememberLauncherForActivityResult(
-                    ActivityResultContracts.RequestPermission(),
-                ) { granted ->
-                    if (granted) voiceCallVm.start() else voiceCallVm.onMicPermissionDenied()
+                // POST_NOTIFICATIONS rides along on Android 13+ so the in-call
+                // foreground-service notification is actually visible — but only the
+                // MIC decides the call: a denied notification never blocks dialing.
+                val voicePermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions(),
+                ) { grants ->
+                    // The mic may not be IN this result at all (already held, only the
+                    // notification permission was asked) — absent means "check current
+                    // state", not "denied".
+                    val micOk = grants[Manifest.permission.RECORD_AUDIO]
+                        ?: (ContextCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == PackageManager.PERMISSION_GRANTED)
+                    if (micOk) voiceCallVm.start() else voiceCallVm.onMicPermissionDenied()
                 }
 
                 fun startVoice() {
-                    val granted = ContextCompat.checkSelfPermission(
-                        this@MainActivity,
-                        Manifest.permission.RECORD_AUDIO,
-                    ) == PackageManager.PERMISSION_GRANTED
-                    if (granted) voiceCallVm.start()
-                    else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    fun missing(permission: String) = ContextCompat.checkSelfPermission(
+                        this@MainActivity, permission,
+                    ) != PackageManager.PERMISSION_GRANTED
+
+                    val wanted = buildList {
+                        if (missing(Manifest.permission.RECORD_AUDIO)) add(Manifest.permission.RECORD_AUDIO)
+                        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                            missing(Manifest.permission.POST_NOTIFICATIONS)
+                        ) {
+                            add(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                    if (wanted.isEmpty()) voiceCallVm.start()
+                    else voicePermissionLauncher.launch(wanted.toTypedArray())
                 }
 
                 // While a call (or its error) owns the screen, Back hangs up instead of
