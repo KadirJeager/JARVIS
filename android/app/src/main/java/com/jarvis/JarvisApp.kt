@@ -2,6 +2,7 @@ package com.jarvis
 
 import android.app.Application
 import android.content.Context
+import android.os.Build
 import com.jarvis.data.auth.AndroidBiometricGate
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthManager
@@ -13,7 +14,13 @@ import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.DataStoreSessionStore
 import com.jarvis.data.net.ApiSet
 import com.jarvis.data.net.NetworkModule
+import com.jarvis.data.net.VOICE_WS_URL
 import com.jarvis.data.voice.VoiceProfileRepository
+import com.jarvis.data.voice.session.AndroidMicSource
+import com.jarvis.data.voice.session.AndroidSpeakerSink
+import com.jarvis.data.voice.session.OkHttpVoiceTransport
+import com.jarvis.data.voice.session.VoiceSession
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -45,6 +52,21 @@ class AppContainer(
     // path actually skips the splash — otherwise only the ViewModel would be pinned, and
     // deleting the call from MainActivity would leave the suite green.
     val authStateStore: AuthStateStore = DataStoreAuthStateStore(context.applicationContext),
+    // Swappable so the wiring test can drive a live call without a real socket or mic —
+    // and so no instrumented test ever opens a WebSocket to the deployed voice gateway.
+    val voiceSessionFactory: (CoroutineScope) -> VoiceSession = { scope ->
+        VoiceSession(
+            transport = OkHttpVoiceTransport(),
+            mic = AndroidMicSource(),
+            speaker = AndroidSpeakerSink(),
+            tokenProvider = { authManager.currentToken() },
+            // Feeds the server's channel-adaptive speaker gallery (spec §6): the tablet
+            // and the phone are different acoustic channels and should be labeled apart.
+            deviceHint = "android-" + Build.MODEL,
+            scope = scope,
+            voiceUrl = VOICE_WS_URL,
+        )
+    },
 ) {
     private val appContext = context.applicationContext
 

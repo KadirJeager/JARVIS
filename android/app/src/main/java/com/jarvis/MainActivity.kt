@@ -1,8 +1,18 @@
 package com.jarvis
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -16,8 +26,11 @@ import com.jarvis.ui.Nav
 import com.jarvis.ui.Route
 import com.jarvis.ui.VoiceActions
 import com.jarvis.ui.chat.ChatViewModel
+import com.jarvis.data.voice.session.VoicePhase
 import com.jarvis.ui.theme.JarvisTheme
 import com.jarvis.ui.voice.VoiceProfileViewModel
+import com.jarvis.ui.voicecall.VoiceCallOverlay
+import com.jarvis.ui.voicecall.VoiceCallViewModel
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
@@ -53,14 +66,13 @@ class MainActivity : FragmentActivity() {
                 // route flipping alone would otherwise render the previous visit's whole
                 // profile for as long as the prompt sheet takes to appear, since
                 // BiometricPrompt is a translucent bottom sheet, not an opaque cover.
-                fun openVoiceProfile() {
+                // isAvailable() is not checked here: BiometricPrompt.authenticate()
+                // already fails closed via onAuthenticationError when no device lock
+                // is configured, landing on the same DENIED state through
+                // onUnlockFailed — a separate isAvailable() branch would just be a
+                // second path to the same user-visible outcome.
+                fun armGate() {
                     voiceVm.onGateRequested()
-                    route = Route.VOICE_PROFILE
-                    // isAvailable() is not checked here: BiometricPrompt.authenticate()
-                    // already fails closed via onAuthenticationError when no device lock
-                    // is configured, landing on the same DENIED state through
-                    // onUnlockFailed — a separate isAvailable() branch would just be a
-                    // second path to the same user-visible outcome.
                     container.biometricGate.prompt(this@MainActivity) { result ->
                         result.fold(
                             onSuccess = { voiceVm.onUnlocked() },
@@ -69,10 +81,81 @@ class MainActivity : FragmentActivity() {
                     }
                 }
 
+                fun openVoiceProfile() {
+                    armGate()
+                    route = Route.VOICE_PROFILE
+                }
+
+                // FLAG_SECURE rides exactly with the voice screen: its content must not
+                // land in screenshots or the recents preview, while the chat stays
+                // screenshotable (Kadir screenshots his own chats).
+                LaunchedEffect(route) {
+                    if (route == Route.VOICE_PROFILE) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                }
+
+                // Returning from the BACKGROUND onto the voice screen re-runs the gate.
+                // ON_START, not ON_RESUME: BiometricPrompt's sheet only PAUSES the
+                // activity, so a resume-keyed gate would loop prompt→pause→resume→prompt
+                // forever. addObserver replays lifecycle up to the current state, so the
+                // first replayed ON_START fires while route is still CHAT and no-ops.
+                val currentRoute by rememberUpdatedState(route)
+                DisposableEffect(Unit) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_START && currentRoute == Route.VOICE_PROFILE) {
+                            armGate()
+                        }
+                    }
+                    lifecycle.addObserver(observer)
+                    onDispose { lifecycle.removeObserver(observer) }
+                }
+
                 // Hand-rolled Nav is invisible to the platform back dispatcher: without
                 // this, the system Back button exits the app from the voice screen
                 // instead of returning to chat.
                 BackHandler(enabled = route == Route.VOICE_PROFILE) { route = Route.CHAT }
+
+                val voiceCallVm: VoiceCallViewModel =
+                    viewModel { VoiceCallViewModel(container.voiceSessionFactory) }
+                val voiceCallState by voiceCallVm.state.collectAsState()
+
+                // The system permission dialog resolves asynchronously; a denial must
+                // surface as a visible error, not a button that silently does nothing.
+                val micPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) { granted ->
+                    if (granted) voiceCallVm.start() else voiceCallVm.onMicPermissionDenied()
+                }
+
+                fun startVoice() {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (granted) voiceCallVm.start()
+                    else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+
+                // While a call (or its error) owns the screen, Back hangs up instead of
+                // exiting the app under a live microphone.
+                BackHandler(enabled = voiceCallState.phase != VoicePhase.IDLE) {
+                    voiceCallVm.stop()
+                }
+
+                // A LIVE call (not an already-dead ERROR screen) holds the mic
+                // foreground service, so screen-off or another app in front cannot
+                // kill the capture or the socket. Keyed on a Boolean, not the phase:
+                // CONNECTING→LISTENING→SPEAKING must not restart the service.
+                val callLive = voiceCallState.phase == VoicePhase.CONNECTING ||
+                    voiceCallState.phase == VoicePhase.LISTENING ||
+                    voiceCallState.phase == VoicePhase.SPEAKING
+                LaunchedEffect(callLive) {
+                    if (callLive) VoiceCallService.start(this@MainActivity)
+                    else VoiceCallService.stop(this@MainActivity)
+                }
 
                 // Boot.
                 //
@@ -138,12 +221,24 @@ class MainActivity : FragmentActivity() {
                     onSend = vm::send,
                     onRetry = vm::refreshHistory,
                     onOpenVoiceProfile = { openVoiceProfile() },
+                    onStartVoice = { startVoice() },
                     onBack = { route = Route.CHAT },
                     onToggleConversations = vm::toggleConversations,
                     onNewConversation = vm::startNewConversation,
                     onOpenConversation = vm::openConversation,
                     onDeleteConversation = vm::deleteConversation,
                 )
+
+                // Drawn AFTER (= on top of) Nav: while a call is anything but IDLE the
+                // overlay owns the screen. Dismissing an error is also just stop() —
+                // the session is already torn down, this only returns the state to IDLE.
+                if (voiceCallState.phase != VoicePhase.IDLE) {
+                    VoiceCallOverlay(
+                        state = voiceCallState,
+                        onStop = voiceCallVm::stop,
+                        onDismissError = voiceCallVm::stop,
+                    )
+                }
             }
         }
     }

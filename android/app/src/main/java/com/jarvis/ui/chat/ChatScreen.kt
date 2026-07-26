@@ -62,6 +62,7 @@ fun ChatScreen(
     onSend: () -> Unit,
     onRetry: () -> Unit,
     onOpenVoiceProfile: () -> Unit = {},
+    onStartVoice: () -> Unit = {},
     onToggleConversations: () -> Unit = {},
     onNewConversation: () -> Unit = {},
     onOpenConversation: (String) -> Unit = {},
@@ -95,7 +96,13 @@ fun ChatScreen(
             }
         }
         state.error?.let { ErrorBanner(it, onRetry) }
-        InputBar(input = state.input, sending = state.sending, onInput = onInput, onSend = onSend)
+        InputBar(
+            input = state.input,
+            sending = state.sending,
+            onInput = onInput,
+            onSend = onSend,
+            onStartVoice = onStartVoice,
+        )
 
         // Popup, not a sibling Box: an overlay that participates in this Column's layout
         // changes its geometry, and with imePadding on the Column that pushed the newest
@@ -213,6 +220,7 @@ private fun InputBar(
     sending: Boolean,
     onInput: (String) -> Unit,
     onSend: () -> Unit,
+    onStartVoice: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
@@ -237,6 +245,18 @@ private fun InputBar(
                 unfocusedIndicatorColor = Color.Transparent,
             ),
         )
+        Spacer(Modifier.size(8.dp))
+        IconButton(
+            onClick = onStartVoice,
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(JarvisSurface)
+                .testTag("voice_call_button")
+                .semantics { contentDescription = "Sesli konuşma" },
+        ) {
+            Text("🎤", style = MaterialTheme.typography.titleMedium)
+        }
         Spacer(Modifier.size(8.dp))
         IconButton(
             onClick = onSend,

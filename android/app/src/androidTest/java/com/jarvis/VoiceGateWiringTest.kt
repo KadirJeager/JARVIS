@@ -1,7 +1,9 @@
 package com.jarvis
 
 import android.content.Context
+import android.view.WindowManager
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -160,6 +162,62 @@ class VoiceGateWiringTest {
             assertEquals(2, fakeGate.promptCount)
             compose.onNodeWithTag("voice_locked").assertIsDisplayed()
             compose.onNodeWithTag("voice_list").assertDoesNotExist()
+        }
+    }
+
+    /**
+     * Saha açığı (handoff, 26 Tem 2026): backgrounding the app on the voice screen and
+     * coming back showed the whole profile WITHOUT a new prompt, and the recents
+     * preview snapshotted the content. Coming back must re-lock + re-prompt, and the
+     * window must carry FLAG_SECURE while this screen is showing (and only then).
+     */
+    @Test
+    fun backgroundingTheVoiceScreen_reLocksReprompts_andWindowIsSecureOnlyThere() {
+        val app = ApplicationProvider.getApplicationContext<JarvisApp>()
+        val fakeGate = RecordingBiometricGate()
+        app.container = AppContainer(
+            app,
+            authManager = FakeAuthClient(),
+            biometricGate = fakeGate,
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+        )
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            fun windowSecure(): Boolean {
+                var secure = false
+                scenario.onActivity {
+                    secure = (it.window.attributes.flags and
+                        WindowManager.LayoutParams.FLAG_SECURE) != 0
+                }
+                return secure
+            }
+
+            compose.waitForIdle()
+            assertEquals(false, windowSecure()) // chat must stay screenshotable
+
+            compose.onNodeWithTag("open_voice_profile").performClick()
+            compose.waitForIdle()
+            assertEquals(1, fakeGate.promptCount)
+            assertEquals(true, windowSecure()) // recents preview must be blank here
+            fakeGate.resolveSuccess()
+            compose.waitForIdle()
+
+            // Backgrounding and returning — the exact saha gesture.
+            scenario.moveToState(Lifecycle.State.CREATED)
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            compose.waitForIdle()
+
+            // A fresh prompt was demanded and the content is locked until it resolves.
+            assertEquals(2, fakeGate.promptCount)
+            compose.onNodeWithTag("voice_locked").assertIsDisplayed()
+            compose.onNodeWithTag("voice_list").assertDoesNotExist()
+
+            // Leaving the screen drops FLAG_SECURE, chat is normal again.
+            fakeGate.resolveSuccess()
+            compose.waitForIdle()
+            compose.onNodeWithTag("voice_back").performClick()
+            compose.waitForIdle()
+            assertEquals(false, windowSecure())
         }
     }
 }

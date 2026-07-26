@@ -68,6 +68,7 @@ class EndToEndTest {
                     onSend = vm::send,
                     onRetry = vm::refreshHistory,
                     onOpenVoiceProfile = {},
+                    onStartVoice = {},
                     onBack = {},
                 )
             }
