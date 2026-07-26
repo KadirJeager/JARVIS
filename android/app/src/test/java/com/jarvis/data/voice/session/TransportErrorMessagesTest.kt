@@ -47,13 +47,17 @@ class TransportErrorMessagesTest {
         )
     }
 
+    /** Unknown classes must NOT leak raw JVM prose ("Expected HTTP 101...", SSL chains)
+     *  to the user — generic Turkish, with the class name for the bug report. */
     @Test
-    fun unknownThrowable_fallsBackToItsOwnMessage() {
-        assertEquals("weird", humanizeTransportError(IllegalStateException("weird")))
-    }
-
-    @Test
-    fun unknownThrowableWithoutMessage_fallsBackToClassName() {
-        assertEquals("IllegalStateException", humanizeTransportError(IllegalStateException()))
+    fun unknownThrowable_getsGenericTurkish_withClassNameForDiagnosis() {
+        assertEquals(
+            "Bağlantı kurulamadı (IllegalStateException)",
+            humanizeTransportError(IllegalStateException("Expected HTTP 101 response but was '403 Forbidden'")),
+        )
+        assertEquals(
+            "Bağlantı kurulamadı (IllegalStateException)",
+            humanizeTransportError(IllegalStateException()),
+        )
     }
 }

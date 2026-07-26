@@ -85,5 +85,7 @@ fun humanizeTransportError(t: Throwable): String = when (t) {
     // After the two subclasses above so they win; SocketException covers the broad
     // "network dropped underneath us" family ("Software caused connection abort" etc.).
     is SocketException -> "Ağ bağlantısı koptu"
-    else -> t.message ?: t.javaClass.simpleName
+    // Never leak raw JVM prose ("Expected HTTP 101...", SSL chains) to the user; the
+    // class name rides along so a screenshot is still diagnosable.
+    else -> "Bağlantı kurulamadı (${t.javaClass.simpleName})"
 }
