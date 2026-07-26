@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,12 +52,28 @@ fun VoiceCallOverlay(
     onStop: () -> Unit,
     onDismissError: () -> Unit,
 ) {
+    // Surface, not a bare Column: Material3 Surface blocks touch propagation, so a tap
+    // beside the hang-up button cannot fall through to the chat underneath and focus
+    // the input bar mid-call (review Important #4, pinned by
+    // overlay_swallowsTouches_underlyingUiNeverFires).
+    Surface(
+        color = JarvisBg,
+        modifier = Modifier.fillMaxSize().testTag("voice_call_overlay"),
+    ) {
+        OverlayContent(state, onStop, onDismissError)
+    }
+}
+
+@Composable
+private fun OverlayContent(
+    state: VoiceUiState,
+    onStop: () -> Unit,
+    onDismissError: () -> Unit,
+) {
     Column(
         Modifier
             .fillMaxSize()
-            .background(JarvisBg)
-            .systemBarsPadding()
-            .testTag("voice_call_overlay"),
+            .systemBarsPadding(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         LazyColumn(

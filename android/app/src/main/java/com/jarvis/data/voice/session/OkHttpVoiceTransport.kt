@@ -26,21 +26,6 @@ import okio.ByteString.Companion.toByteString
  * to [VoiceTransportListener] is the documented contract of that interface, and
  * [VoiceSession] is written to be called from any thread.
  */
-/**
- * Maps a transport failure to plain-Turkish user-facing text. Keyed on the exception
- * CLASS, never the message string — socket message prose varies by vendor and Android
- * version, the class hierarchy does not. (TransportErrorMessagesTest)
- */
-fun humanizeTransportError(t: Throwable): String = when (t) {
-    is EOFException -> "Sunucu bağlantıyı beklenmedik şekilde kapattı"
-    is SocketTimeoutException -> "Bağlantı zaman aşımına uğradı"
-    is ConnectException, is UnknownHostException -> "Sunucuya ulaşılamadı"
-    // After the two subclasses above so they win; SocketException covers the broad
-    // "network dropped underneath us" family ("Software caused connection abort" etc.).
-    is SocketException -> "Ağ bağlantısı koptu"
-    else -> t.message ?: t.javaClass.simpleName
-}
-
 class OkHttpVoiceTransport(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
@@ -86,4 +71,19 @@ class OkHttpVoiceTransport(
         webSocket?.close(1000, null)
         webSocket = null
     }
+}
+
+/**
+ * Maps a transport failure to plain-Turkish user-facing text. Keyed on the exception
+ * CLASS, never the message string — socket message prose varies by vendor and Android
+ * version, the class hierarchy does not. (TransportErrorMessagesTest)
+ */
+fun humanizeTransportError(t: Throwable): String = when (t) {
+    is EOFException -> "Sunucu bağlantıyı beklenmedik şekilde kapattı"
+    is SocketTimeoutException -> "Bağlantı zaman aşımına uğradı"
+    is ConnectException, is UnknownHostException -> "Sunucuya ulaşılamadı"
+    // After the two subclasses above so they win; SocketException covers the broad
+    // "network dropped underneath us" family ("Software caused connection abort" etc.).
+    is SocketException -> "Ağ bağlantısı koptu"
+    else -> t.message ?: t.javaClass.simpleName
 }

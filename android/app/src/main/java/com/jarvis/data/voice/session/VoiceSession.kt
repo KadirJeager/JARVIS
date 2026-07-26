@@ -55,11 +55,25 @@ class VoiceSession(
     // teardown-claiming compareAndSet below must be atomic across both.
     private val generation = AtomicInteger(0)
 
+    // The generation guard alone leaves a TOCTOU window the JS reference never had (it
+    // is single-threaded): a callback can pass its gen check, LOSE the CPU while
+    // endSession completes a full teardown, then resume -- starting the mic after
+    // teardown and resurrecting dead state (review Critical #1, pinned by
+    // stop_racingOnOpen_neverLeavesTheMicRunning_orResurrectsState). Every callback
+    // body and endSession run under this monitor, so check-then-act is atomic. Bodies
+    // hold it only for ms-scale device calls; the mic READ loop stays outside.
+    private val lock = Any()
+
     // Written only from inside a transport callback (onOpen) and read/cancelled from
     // endSession, which can itself run on either that thread or the UI thread (stop()).
     // @Volatile guarantees a write on one thread is visible when the other reads it.
     @Volatile
     private var micJob: Job? = null
+
+    // True right after a turn_complete: the NEXT transcript fragment starts a new line
+    // even for the same role — two consecutive user turns are separate utterances.
+    // Only touched under [lock] (onText/endSession), no extra synchronization needed.
+    private var turnBoundary = false
 
     /** Starts a call. No-op if one is already connecting/live. */
     fun start() {
@@ -81,21 +95,29 @@ class VoiceSession(
         transport.connect(
             voiceUrl,
             object : VoiceTransportListener {
-                override fun onOpen() {
+                override fun onOpen(): Unit = synchronized(lock) {
                     if (gen != generation.get()) return
                     transport.sendText(buildVoiceHello(token = token, deviceHint = deviceHint))
-                    mic.start(AUDIO_IN_RATE_HZ)
-                    speaker.start(AUDIO_OUT_RATE_HZ)
+                    try {
+                        // Both can throw on real hardware (mic held by an actual phone
+                        // call, AudioTrack init failure) — and this runs on OkHttp's
+                        // reader thread, where an escape kills the process.
+                        mic.start(AUDIO_IN_RATE_HZ)
+                        speaker.start(AUDIO_OUT_RATE_HZ)
+                    } catch (t: RuntimeException) {
+                        endSession(gen, "Mikrofon veya hoparlör açılamadı. Aramayı yeniden başlatmayı dene.")
+                        return
+                    }
                     startMicLoop(gen)
                     _state.update { it.copy(phase = VoicePhase.LISTENING) }
                 }
 
-                override fun onText(text: String) {
+                override fun onText(text: String): Unit = synchronized(lock) {
                     if (gen != generation.get()) return
                     handleServerEvent(gen, parseVoiceServerEvent(text))
                 }
 
-                override fun onBinary(bytes: ByteArray) {
+                override fun onBinary(bytes: ByteArray): Unit = synchronized(lock) {
                     if (gen != generation.get()) return
                     speaker.write(bytes)
                     _state.update { it.copy(phase = VoicePhase.SPEAKING) }
@@ -133,13 +155,16 @@ class VoiceSession(
 
     private fun handleServerEvent(gen: Int, event: VoiceServerEvent?) {
         when (event) {
-            is VoiceServerEvent.Transcript ->
+            is VoiceServerEvent.Transcript -> {
+                val boundary = turnBoundary
+                turnBoundary = false
                 _state.update {
                     // The server streams transcription word by word; consecutive
                     // fragments from the same role merge into one line, or the UI
-                    // renders one bubble per word (saha, 26 Tem 2026).
+                    // renders one bubble per word (saha, 26 Tem 2026). A turn boundary
+                    // breaks the merge even for the same role.
                     val last = it.transcript.lastOrNull()
-                    val merged = if (last != null && last.role == event.role) {
+                    val merged = if (!boundary && last != null && last.role == event.role) {
                         it.transcript.dropLast(1) +
                             TranscriptLine(last.role, last.text + " " + event.text)
                     } else {
@@ -147,8 +172,11 @@ class VoiceSession(
                     }
                     it.copy(transcript = merged)
                 }
-            is VoiceServerEvent.TurnComplete ->
+            }
+            is VoiceServerEvent.TurnComplete -> {
+                turnBoundary = true
                 _state.update { it.copy(phase = VoicePhase.LISTENING) }
+            }
             is VoiceServerEvent.Error ->
                 endSession(gen, errorMessage = "Hata: ${event.message}")
             is VoiceServerEvent.Speaker ->
@@ -163,7 +191,7 @@ class VoiceSession(
      * this for the same live call, only the first actually stops the mic/speaker/socket
      * and updates state -- the second sees `generation` already moved and no-ops.
      */
-    private fun endSession(gen: Int, errorMessage: String?) {
+    private fun endSession(gen: Int, errorMessage: String?): Unit = synchronized(lock) {
         if (!generation.compareAndSet(gen, gen + 1)) return
         micJob?.cancel()
         micJob = null

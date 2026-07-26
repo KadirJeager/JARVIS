@@ -45,6 +45,14 @@ class AndroidMicSource : MicSource {
             AudioFormat.ENCODING_PCM_16BIT,
             internalBufferBytes,
         )
+        // Construction "succeeds" even when the mic is unavailable (held by a real
+        // phone call); the failure only shows in state. startRecording() on such a
+        // record throws from OkHttp's reader thread — fail here with a release instead,
+        // and let VoiceSession turn it into a user-visible Turkish error.
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            throw IllegalStateException("AudioRecord failed to initialize (mic busy or unavailable)")
+        }
         record.startRecording()
         audioRecord = record
     }

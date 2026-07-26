@@ -169,6 +169,96 @@ class VoiceSessionTest {
         assertEquals(24000, f.speaker.startedRate)
     }
 
+    // -- teardown races (review Critical #1, 26 Tem 2026) --------------------------------
+
+    /**
+     * The one interleaving the generation guard alone cannot stop: onOpen (OkHttp reader
+     * thread) passes the gen check, then stop() (UI thread) completes a FULL teardown,
+     * then onOpen resumes — starting the mic AFTER teardown with nothing left to stop it,
+     * and resurrecting the state out of IDLE. The session must serialize callback bodies
+     * against endSession so this window does not exist.
+     */
+    @Test(timeout = 10_000)
+    fun stop_racingOnOpen_neverLeavesTheMicRunning_orResurrectsState() {
+        val scope = CoroutineScope(UnconfinedTestDispatcher())
+        val transport = FakeVoiceTransport()
+        val speaker = FakeSpeakerSink()
+
+        val micEntered = java.util.concurrent.CountDownLatch(1)
+        val micRelease = java.util.concurrent.CountDownLatch(1)
+        val callLog = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val mic = object : MicSource {
+            override fun start(sampleRateHz: Int) {
+                callLog.add("start")
+                micEntered.countDown()
+                micRelease.await() // hold onOpen mid-body while stop() races it
+            }
+            override suspend fun readFrame(): ByteArray? = null
+            override fun stop() {
+                callLog.add("stop")
+            }
+        }
+        val session = VoiceSession(
+            transport = transport,
+            mic = mic,
+            speaker = speaker,
+            tokenProvider = { "tok" },
+            deviceHint = "test",
+            scope = scope,
+            voiceUrl = voiceUrl,
+        )
+
+        session.start()
+        val opener = Thread { transport.listener!!.onOpen() }
+        opener.start()
+        assertTrue(micEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        val stopper = Thread { session.stop() }
+        stopper.start()
+        // Give stop() time to reach the contended section, then let onOpen finish.
+        Thread.sleep(200)
+        micRelease.countDown()
+        opener.join(5_000)
+        stopper.join(5_000)
+
+        // Whatever the interleaving, the LAST word on the microphone must be "stop",
+        // and the call must end IDLE — not resurrect to LISTENING.
+        assertEquals("stop", callLog.last())
+        assertEquals(VoicePhase.IDLE, session.state.value.phase)
+    }
+
+    /**
+     * Review Important #3: AudioRecord/AudioTrack construction can throw (mic held by a
+     * real phone call, device init failure) — and it throws INSIDE onOpen on OkHttp's
+     * reader thread. Uncaught, that kills the process. It must instead end the session
+     * with a Turkish error the overlay can show.
+     */
+    @Test
+    fun micFailingToOpen_endsTheCallWithError_insteadOfCrashing() = runTest {
+        val transport = FakeVoiceTransport()
+        val speaker = FakeSpeakerSink()
+        val mic = object : MicSource {
+            override fun start(sampleRateHz: Int) = throw IllegalStateException("startRecording() called on an uninitialized AudioRecord")
+            override suspend fun readFrame(): ByteArray? = null
+            override fun stop() {}
+        }
+        val session = VoiceSession(
+            transport = transport,
+            mic = mic,
+            speaker = speaker,
+            tokenProvider = { "tok" },
+            deviceHint = "test",
+            scope = backgroundScope,
+            voiceUrl = voiceUrl,
+        )
+        session.start()
+        transport.listener!!.onOpen() // must not throw out of the callback
+
+        assertEquals(VoicePhase.ERROR, session.state.value.phase)
+        assertEquals("Mikrofon veya hoparlör açılamadı. Aramayı yeniden başlatmayı dene.", session.state.value.errorMessage)
+        assertEquals(1, transport.closeCalls)
+    }
+
     // -- server -> client events ----------------------------------------------------------
 
     /**
@@ -194,6 +284,24 @@ class VoiceSessionTest {
         assertEquals("jarvis" to "Merhaba Kadir!", lines[0].role to lines[0].text)
         assertEquals("user" to "selam jarvis", lines[1].role to lines[1].text)
         assertEquals("jarvis" to "Buyur", lines[2].role to lines[2].text)
+    }
+
+    /** Review Minor #8: two consecutive USER turns are separate utterances — a
+     *  turn_complete between same-role fragments must break the merge. */
+    @Test
+    fun turnComplete_breaksTheMerge_betweenSameRoleTurns() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"saat kaç"}""")
+        f.transport.listener!!.onText("""{"type":"turn_complete"}""")
+        f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"hava nasıl"}""")
+
+        val lines = f.session.state.value.transcript
+        assertEquals(2, lines.size)
+        assertEquals("saat kaç", lines[0].text)
+        assertEquals("hava nasıl", lines[1].text)
     }
 
     @Test

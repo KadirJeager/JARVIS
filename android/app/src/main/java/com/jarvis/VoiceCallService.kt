@@ -40,10 +40,18 @@ class VoiceCallService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Tapping the notification (screen was off, user wants back in) reopens the app.
+        val contentIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.logo_kj)
             .setContentTitle("Jarvis ile canlı konuşma")
             .setContentText("Mikrofon açık — konuşma sürüyor")
+            .setContentIntent(contentIntent)
             .setOngoing(true)
             .build()
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
@@ -56,6 +64,16 @@ class VoiceCallService : Service() {
                 .apply { acquire(MAX_CALL_MS) }
         }
         return START_NOT_STICKY // a killed process has no call to resume — do not resurrect
+    }
+
+    /**
+     * The user swiping the task away destroys the Activity (ViewModel.onCleared ends the
+     * call correctly) — but nothing recomposes to call stop(), so without this the
+     * service would idle on for up to MAX_CALL_MS holding a wake lock and a stale
+     * "microphone on" notification (review Important #2).
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopSelf()
     }
 
     override fun onDestroy() {
