@@ -171,6 +171,31 @@ class VoiceSessionTest {
 
     // -- server -> client events ----------------------------------------------------------
 
+    /**
+     * Saha bulgusu (26 Tem 2026): the model's output transcription arrives word by word
+     * ("Merhaba", "Kadir!", "Sesini"...), and appending each fragment as its own line
+     * rendered ONE BUBBLE PER WORD. Consecutive fragments from the same role must merge
+     * into one line; a role change starts a new line.
+     */
+    @Test
+    fun transcriptFragments_fromSameRole_mergeIntoOneLine() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"Merhaba"}""")
+        f.transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"Kadir!"}""")
+        f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"selam"}""")
+        f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"jarvis"}""")
+        f.transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"Buyur"}""")
+
+        val lines = f.session.state.value.transcript
+        assertEquals(3, lines.size)
+        assertEquals("jarvis" to "Merhaba Kadir!", lines[0].role to lines[0].text)
+        assertEquals("user" to "selam jarvis", lines[1].role to lines[1].text)
+        assertEquals("jarvis" to "Buyur", lines[2].role to lines[2].text)
+    }
+
     @Test
     fun transcriptEvents_accumulate_inOrder_bothRoles() = runTest {
         val f = Fixture(backgroundScope)

@@ -134,7 +134,19 @@ class VoiceSession(
     private fun handleServerEvent(gen: Int, event: VoiceServerEvent?) {
         when (event) {
             is VoiceServerEvent.Transcript ->
-                _state.update { it.copy(transcript = it.transcript + TranscriptLine(event.role, event.text)) }
+                _state.update {
+                    // The server streams transcription word by word; consecutive
+                    // fragments from the same role merge into one line, or the UI
+                    // renders one bubble per word (saha, 26 Tem 2026).
+                    val last = it.transcript.lastOrNull()
+                    val merged = if (last != null && last.role == event.role) {
+                        it.transcript.dropLast(1) +
+                            TranscriptLine(last.role, last.text + " " + event.text)
+                    } else {
+                        it.transcript + TranscriptLine(event.role, event.text)
+                    }
+                    it.copy(transcript = merged)
+                }
             is VoiceServerEvent.TurnComplete ->
                 _state.update { it.copy(phase = VoicePhase.LISTENING) }
             is VoiceServerEvent.Error ->
