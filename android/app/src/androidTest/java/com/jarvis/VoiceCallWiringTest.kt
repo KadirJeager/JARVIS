@@ -59,8 +59,12 @@ class VoiceCallWiringTest {
     val compose = createEmptyComposeRule()
 
     @get:Rule
-    val micPermission: GrantPermissionRule =
-        GrantPermissionRule.grant(android.Manifest.permission.RECORD_AUDIO)
+    val micPermission: GrantPermissionRule = GrantPermissionRule.grant(
+        android.Manifest.permission.RECORD_AUDIO,
+        // Without this, startVoice() opens the system POST_NOTIFICATIONS dialog and
+        // the whole class deadlocks behind it (the mic tap never reaches the session).
+        android.Manifest.permission.POST_NOTIFICATIONS,
+    )
 
     private class FakeAuthClient(private val token: String = "fake-token") : AuthClient {
         override fun currentToken(): String? = token
@@ -195,6 +199,56 @@ class VoiceCallWiringTest {
             org.junit.Assert.assertTrue(
                 "call ended but the mic foreground service is still running",
                 waitUntil { !micServiceForeground() },
+            )
+        }
+    }
+
+    /**
+     * Regression pin (review #11c): rotating mid-call must not drop it. The ViewModel
+     * (and the session in it) survives recreation, the new composition re-observes the
+     * same state, and the idempotent service start must not tear anything down. A
+     * second connect would mean the session got rebuilt — that's the failure this pins.
+     */
+    @Test
+    fun rotationMidCall_keepsTheCallAndTheService_withoutReconnecting() {
+        val app = ApplicationProvider.getApplicationContext<JarvisApp>()
+        val transport = FakeTransport()
+        app.container = AppContainer(
+            app,
+            authManager = FakeAuthClient(),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            authStateStore = FakeAuthStateStore(),
+            voiceSessionFactory = { scope ->
+                VoiceSession(
+                    transport = transport,
+                    mic = FakeMic(),
+                    speaker = FakeSpeaker(),
+                    tokenProvider = { "fake-token" },
+                    deviceHint = "android-test",
+                    scope = scope,
+                    voiceUrl = "wss://voice.example/ws/voice",
+                )
+            },
+        )
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            compose.waitForIdle()
+            compose.onNodeWithTag("voice_call_button").performClick()
+            compose.waitForIdle()
+            transport.listener!!.onOpen()
+            compose.waitForIdle()
+            compose.onNodeWithText("Dinliyorum").assertIsDisplayed()
+            assertEquals(1, transport.connectCalls)
+
+            scenario.recreate()
+            compose.waitForIdle()
+
+            compose.onNodeWithTag("voice_call_overlay").assertIsDisplayed()
+            compose.onNodeWithText("Dinliyorum").assertIsDisplayed()
+            assertEquals(1, transport.connectCalls) // same live socket, no redial
+            org.junit.Assert.assertTrue(
+                "mic foreground service must survive recreation",
+                waitUntil { micServiceForeground() },
             )
         }
     }
