@@ -65,6 +65,14 @@ class AuthManager(private val appContext: Context) : AuthClient {
             .setServerClientId(WEB_CLIENT_ID)
             .setFilterByAuthorizedAccounts(filterByAuthorized)
             .setAutoSelectEnabled(autoSelect)
+            // Without a nonce, Play Services serves the SAME cached ID token until it
+            // expires — a "silent re-sign-in" one hour into a session then returns a
+            // DEAD token forever and every request 401s (saha, tablet, 26 Tem 2026
+            // 03:30: chat and voice both down exactly 1h after first sign-in). The
+            // nonce is embedded in the JWT, so a fresh random one forces a fresh mint
+            // every time. The backend does not validate nonce; uniqueness is all it's
+            // for here.
+            .setNonce(java.util.UUID.randomUUID().toString())
             .build()
         val request = GetCredentialRequest.Builder()
             .addCredentialOption(option)

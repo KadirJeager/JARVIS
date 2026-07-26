@@ -118,8 +118,15 @@ class MainActivity : FragmentActivity() {
                 // instead of returning to chat.
                 BackHandler(enabled = route == Route.VOICE_PROFILE) { route = Route.CHAT }
 
-                val voiceCallVm: VoiceCallViewModel =
-                    viewModel { VoiceCallViewModel(container.voiceSessionFactory) }
+                val voiceCallVm: VoiceCallViewModel = viewModel {
+                    VoiceCallViewModel(
+                        container.voiceSessionFactory,
+                        // Result deliberately dropped: on refresh failure the session
+                        // dials with whatever token is cached and the server's own
+                        // rejection reaches the overlay as a visible error.
+                        refreshAuth = { container.authManager.silentSignIn() },
+                    )
+                }
                 val voiceCallState by voiceCallVm.state.collectAsState()
 
                 // The system permission dialog resolves asynchronously; a denial must
