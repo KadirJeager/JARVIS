@@ -406,6 +406,12 @@ def production_init(monkeypatch):
     monkeypatch.setattr(firestore, "Client", lambda *a, **k: db)
     monkeypatch.setattr(memory_mod, "make_embed_fn", lambda: (lambda text: [0.0]))
     monkeypatch.setattr(main_mod.config, "resolve_live_model", lambda: "fake-live-model")
+    # The text runner's model now comes from main._build_text_model() (proxy
+    # support): pin the proxy OFF and text resolution deterministic, exactly
+    # like the live resolution above, so a developer shell exporting
+    # JARVIS_LLM_BASE_URL/JARVIS_TEXT_MODEL can't leak into this fixture.
+    monkeypatch.setattr(main_mod.config, "LLM_BASE_URL", "")
+    monkeypatch.setattr(main_mod.config, "resolve_text_model", lambda: "fake-text-model")
     capturing = _CapturingBuildAgent(agent_mod.build_agent)
     monkeypatch.setattr(agent_mod, "build_agent", capturing)
     for name in ("_runner", "_voice_runner", "_memory", "_messages", "_speaker_service"):
@@ -436,7 +442,7 @@ def test_init_voice_passes_the_trust_provider_and_init_passes_none(production_in
     assert text_call["trust_provider"] is None, (
         "main._init() gave the TEXT agent a trust provider: /api/chat's policy "
         "callback must be structurally incapable of seeing voice signals")
-    assert text_call["model"] is None                    # defaults to config.MODEL_NAME
+    assert text_call["model"] == "fake-text-model"      # via _build_text_model, not live
 
 
 def test_production_runners_behave_as_wired(production_init):

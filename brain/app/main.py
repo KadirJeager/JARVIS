@@ -33,6 +33,29 @@ _voice_runner: Runner | None = None
 _speaker_service: "speaker.SpeakerService | None" = None
 
 
+def _build_text_model():
+    """Decide the model for the TEXT-chat runner.
+
+    Two shapes, both valid for ADK's Agent (str or BaseLlm):
+    - config.LLM_BASE_URL empty: the resolved model NAME string (which is
+      config.MODEL_NAME unless JARVIS_TEXT_MODEL pins one) -- the genai SDK
+      then talks to AI Studio directly, exactly as before the proxy existed.
+    - config.LLM_BASE_URL set: a google.adk.models.google_llm.Gemini INSTANCE
+      bound to the proxy's base_url with the catalog-resolved model id. The
+      base_url must NOT carry a "/v1beta" suffix (the genai SDK appends it;
+      suffixing 404s every request) and auth needs no code (GOOGLE_API_KEY
+      is sent as x-goog-api-key regardless) -- see app/text_model.py's
+      module docstring for the live-verified details.
+
+    The VOICE path (_init_voice below) is deliberately untouched: live audio
+    keeps its own resolve_live_model() string, a separate phase."""
+    if not config.LLM_BASE_URL:
+        return config.resolve_text_model()
+    from google.adk.models.google_llm import Gemini
+
+    return Gemini(model=config.resolve_text_model(), base_url=config.LLM_BASE_URL)
+
+
 def _init() -> None:
     """Lazy init so tests can import the module without GCP credentials."""
     global _runner, _memory, _messages, _conversations
@@ -49,7 +72,7 @@ def _init() -> None:
     _conversations = conversations.ConversationStore(db)
     _runner = Runner(
         app_name=APP_NAME,
-        agent=build_agent(_memory, FirestoreAudit(db)),
+        agent=build_agent(_memory, FirestoreAudit(db), model=_build_text_model()),
         session_service=_session_service,
     )
 

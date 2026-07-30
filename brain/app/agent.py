@@ -1,4 +1,5 @@
 from google.adk.agents import Agent
+from google.adk.models.base_llm import BaseLlm
 
 from . import config, tools
 from .memory import Memory
@@ -27,10 +28,16 @@ diyebilirsin ama "ikinci faktörle doğruladım" gibi iddialarda bulunma.
 - Türkçe konuş; samimi ama profesyonel ol."""
 
 
-def build_agent(memory: Memory, audit, model: str | None = None, trust_provider=None) -> Agent:
+def build_agent(
+    memory: Memory, audit, model: "str | BaseLlm | None" = None, trust_provider=None
+) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
     (text chat); voice sessions pass config.resolve_live_model() instead -- same
     instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory).
+    ADK's Agent accepts either a model NAME (str) or a BaseLlm instance: the
+    text runner passes whatever main._build_text_model() decided -- a plain
+    string for the direct AI Studio path, or a Gemini instance bound to the
+    local proxy's base_url when config.LLM_BASE_URL is set.
 
     `trust_provider` is passed ONLY by the voice runner (main._init_voice): it
     is how the voice bridge's identity/trust signals reach the policy matrix

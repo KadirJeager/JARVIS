@@ -1,7 +1,7 @@
 import logging
 import os
 
-from . import live_model, voice_protocol
+from . import live_model, text_model, voice_protocol
 
 MODEL_NAME = os.environ.get("JARVIS_MODEL", "gemini-flash-latest")
 # NOT a "-latest" native-audio alias on purpose: confirmed via live smoke test
@@ -49,6 +49,53 @@ def resolve_live_model() -> str:
             LIVE_MODEL_FALLBACK,
         )
         return LIVE_MODEL_FALLBACK
+
+
+# Local LLM proxy (CLIProxyAPI) for the TEXT-chat path. Empty means the old
+# behaviour: talk to AI Studio directly via the genai SDK default endpoint
+# with MODEL_NAME. Set means main._build_text_model() binds the ADK Gemini
+# object to this base_url instead -- and the model id is auto-resolved from
+# the proxy's own catalog (see app/text_model.py for the "always newest
+# usable flash" rule and the base_url "/v1beta" trap). Auth needs no code:
+# the genai Client sends GOOGLE_API_KEY as x-goog-api-key either way, so in
+# production the secret's CONTENT is simply the proxy key when this is set.
+LLM_BASE_URL = os.environ.get("JARVIS_LLM_BASE_URL", "")
+# NOT a pin -- the last-resort model id used only when catalog resolution
+# fails for any reason (proxy down, empty/filtered-out catalog, unexpected
+# exception). Same role LIVE_MODEL_FALLBACK plays for voice.
+TEXT_MODEL_FALLBACK = "gemini-3.6-flash-high"
+
+
+def resolve_text_model() -> str:
+    """Resolve the model to use for the text-chat runner.
+
+    JARVIS_TEXT_MODEL, if set, is an absolute pin (testing/emergencies) that
+    overrides auto-resolution entirely -- the same role JARVIS_LIVE_MODEL
+    plays for voice. Otherwise, when LLM_BASE_URL is empty (no proxy
+    configured) the resolution is trivial: MODEL_NAME, i.e. the direct AI
+    Studio path keeps its "-latest" alias. When a proxy IS configured this
+    delegates to text_model.resolve() -- fetch the proxy catalog, filter to
+    usable flash candidates, pick the newest -- and falls back to
+    TEXT_MODEL_FALLBACK on ANY failure (network, empty result, unexpected
+    exception), logging the failure so it's visible without breaking
+    text-mode startup.
+    """
+    env_override = os.environ.get("JARVIS_TEXT_MODEL")
+    if env_override:
+        return env_override
+    if not LLM_BASE_URL:
+        return MODEL_NAME
+    try:
+        # Pass the same fallback so both failure branches (resolve()'s internal
+        # empty/fetch-error path and this outer catch-all) stay in sync if the
+        # pin is ever changed after an incident.
+        return text_model.resolve(fallback=TEXT_MODEL_FALLBACK)
+    except Exception:
+        logging.exception(
+            "config.resolve_text_model: text_model.resolve() failed, using fallback %s",
+            TEXT_MODEL_FALLBACK,
+        )
+        return TEXT_MODEL_FALLBACK
 
 
 DRY_RUN = os.environ.get("JARVIS_DRY_RUN", "0") == "1"
