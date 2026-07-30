@@ -181,6 +181,33 @@ def test_releases_404_means_repo_has_no_releases_not_an_error():
 
     assert summary == {"kontrol": 1, "olay": 0, "hata": 0}
     assert _doc(db)["last_error"] is None
+    # "Kontrol edildi, release yok" damgası: None değil "" — bir sonraki
+    # testin ön koşulu.
+    assert _doc(db)["last_release_tag"] == ""
+
+
+def test_first_release_after_no_release_baseline_produces_event():
+    """Release'siz repo izlenmeye başlandıktan SONRA ilk release'ini çıkarırsa
+    bu bir olaydır — sessizce baseline olmamalı (None yerine "" damgasının
+    varlık sebebi)."""
+    db = FakeDB()
+    _seed_repo(db, last_release_tag="", last_commit_sha="abc")
+    client = FakeGitHubClient({
+        RELEASES: (200, "rel-etag", {
+            "tag_name": "v0.1.0", "body": "ilk release",
+            "html_url": "https://github.com/owner/repo/releases/tag/v0.1.0",
+        }),
+        COMMITS: (304, None, None),
+    })
+
+    summary = repo_watch.poll_once(db, client, now_fn)
+
+    assert summary == {"kontrol": 1, "olay": 1, "hata": 0}
+    events = _events(db)
+    assert len(events) == 1
+    assert events[0]["kind"] == "release"
+    assert events[0]["title"] == "v0.1.0"
+    assert _doc(db)["last_release_tag"] == "v0.1.0"
 
 
 def test_commits_error_writes_last_error_and_round_continues():

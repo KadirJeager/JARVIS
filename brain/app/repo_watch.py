@@ -125,6 +125,11 @@ def _poll_repo(client: GitHubClient, repo: str, doc: dict, now: str) -> tuple[li
         status, etag, data = 404, None, None
     if etag:
         updates["release_etag"] = etag
+    if status == 404 and doc.get("last_release_tag") is None:
+        # Release'siz repo: "" = "kontrol edildi, release yok". None bırakılsaydı
+        # repo'nun İLK release'i (sonradan çıkan) sessizce baseline olurdu;
+        # "" sayesinde ilk release de olay üretir.
+        updates["last_release_tag"] = ""
     if status == 200 and data:
         tag = data.get("tag_name", "")
         if doc.get("last_release_tag") is None:
