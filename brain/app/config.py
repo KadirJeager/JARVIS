@@ -69,6 +69,10 @@ TOOL_ZONES = {
     "add_lesson": ZONE_GREEN,
     "update_user_profile": ZONE_YELLOW,
     "get_speaker_status": ZONE_GREEN,
+    "watch_repo": ZONE_YELLOW,
+    "unwatch_repo": ZONE_YELLOW,
+    "list_watched_repos": ZONE_GREEN,
+    "get_repo_updates": ZONE_GREEN,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 
