@@ -34,3 +34,24 @@ def require_user(authorization: str = Header(default="")) -> str:
     except PermissionError as exc:
         status_code = 401 if str(exc) == "Geçersiz oturum" else 403
         raise HTTPException(status_code=status_code, detail=str(exc))
+
+
+def require_scheduler(authorization: str = Header(default="")) -> str:
+    """Cloud Scheduler OIDC token'ını doğrular ve SA e-postasını döner.
+
+    require_user'ın servis ikizi (spec §4): audience = config.SCHEDULER_AUD,
+    email claim'i config.SCHEDULER_SA'ya eşit olmalı. Cloud Run invoker-IAM'ına
+    EK uygulama içi kontrol (derinlikli savunma). Yapılandırılmamışsa 503."""
+    if not config.SCHEDULER_SA or not config.SCHEDULER_AUD:
+        raise HTTPException(status_code=503, detail="Scheduler yapılandırılmamış")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Giriş gerekli")
+    token = authorization.removeprefix("Bearer ")
+    try:
+        info = id_token.verify_oauth2_token(token, grequests.Request(), config.SCHEDULER_AUD)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Geçersiz oturum")
+    email = info.get("email", "")
+    if email != config.SCHEDULER_SA:
+        raise HTTPException(status_code=403, detail="Bu hesap yetkili değil")
+    return email
