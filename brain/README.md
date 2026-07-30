@@ -321,3 +321,42 @@ projection, and tests pin the absence of `vec` anywhere in any response body);
 and no "biyometri yaptım" header exists — the client biometric gate is
 Android-side UX, the server never trusts it (spec §7). The Android biometric
 prompt is tracked as a separate future plan (3d-3), not part of this slice.
+
+## GitHub repo takibi (repo-watch)
+
+Jarvis, Kadir'in ilginç bulduğu GitHub repo'larını saatlik kontrol eder; yeni
+release ve default-branch commit'lerini olay olarak biriktirir ve sohbet
+başında Türkçe özetler. Poller `app/repo_watch.py`, ajan araçları
+(`watch_repo` / `unwatch_repo` / `list_watched_repos` / `get_repo_updates`)
+`app/tools.py`'de, scheduler ucu `POST /api/jobs/repo-watch` olarak
+`app/main.py`'de.
+
+**Firestore koleksiyonları** (tekil, kullanıcı bazlı değil):
+
+- `repo_watch` (doc id = `owner/repo`): `note`, `added_at`, poller durumu
+  (`last_check`, `last_error`, `release_etag`, `commits_etag`,
+  `last_release_tag`, `last_commit_sha`). Yeni eklenen repo ilk turda olay
+  ÜRETMEZ — mevcut durum baseline olur.
+- `repo_watch_events` (auto-id): `repo`, `kind` (`release`/`commits`),
+  `title`, `detail`, `url`, `ts`, `surfaced`. Olaylar silinmez; `surfaced`
+  "Kadir'e gösterildi" demektir.
+
+**Kota:** her uç koşullu istek (ETag/`If-None-Match`) atar — değişmeyen repo
+304 döner ve 0 kota harcar. `GITHUB_TOKEN` opsiyoneldir; yoksa anonim kota
+(60 istek/saat/IP, ~10 repo için yeterli).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GITHUB_TOKEN` | _(boş)_ | GitHub API token'ı (opsiyonel; Secret Manager'dan). Yoksa anonim kota |
+| `JARVIS_SCHEDULER_SA` | _(boş)_ | Scheduler job'unun OIDC service account e-postası; boşsa uç 503 döner |
+| `JARVIS_SCHEDULER_AUD` | _(boş)_ | OIDC token audience'ı (servis URL'i, örn. `https://<brain-url>`) |
+
+**Scheduler kurulumu** (deploy sonrası, ayrı onayla — spec §6):
+
+```bash
+gcloud scheduler jobs create http repo-watch \
+  --schedule="17 * * * *" --time-zone=Europe/Istanbul \
+  --uri="https://<brain-url>/api/jobs/repo-watch" --http-method=POST \
+  --oidc-service-account-email="$JARVIS_SCHEDULER_SA" \
+  --oidc-token-audience="https://<brain-url>"
+```
