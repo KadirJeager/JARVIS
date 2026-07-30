@@ -53,6 +53,10 @@ def resolve_live_model() -> str:
 
 DRY_RUN = os.environ.get("JARVIS_DRY_RUN", "0") == "1"
 OAUTH_CLIENT_ID = os.environ.get("JARVIS_OAUTH_CLIENT_ID", "")
+# Cloud Scheduler OIDC (repo-watch job'u): service account e-postası + token
+# audience'ı (servis URL'i). Boşsa /api/jobs/repo-watch 503 döner.
+SCHEDULER_SA = os.environ.get("JARVIS_SCHEDULER_SA", "")
+SCHEDULER_AUD = os.environ.get("JARVIS_SCHEDULER_AUD", "")
 ALLOWED_EMAILS = set(
     filter(None, os.environ.get("JARVIS_ALLOWED_EMAILS", "owner@example.com").split(","))
 )

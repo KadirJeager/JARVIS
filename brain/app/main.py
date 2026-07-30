@@ -12,9 +12,9 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, conversations, messages, speaker, voice, voice_manage, voice_trust
+from . import config, conversations, messages, repo_watch, speaker, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
-from .auth import require_user
+from .auth import require_scheduler, require_user
 
 if TYPE_CHECKING:
     from .memory import Memory
@@ -341,6 +341,25 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
     return {"anchors": total}
+
+
+@app.post("/api/jobs/repo-watch")
+async def repo_watch_job(email: str = Depends(require_scheduler)):
+    """Cloud Scheduler'ın saatlik tetiklediği repo kontrol turu; poller özetini döner."""
+    try:
+        _init()
+        # asyncio.to_thread, enroll'daki gerekçenin aynısı: poll_once senkron
+        # Firestore + GitHub ağ I/O'su yapar; loop'ta koşarsa /api/chat ve
+        # /ws/voice'i de dondurur. make_client() de thread içinde (env okuma).
+        return await asyncio.to_thread(
+            lambda: repo_watch.poll_once(_memory.db, repo_watch.make_client())
+        )
+    except Exception:
+        logging.exception("repo-watch job: poll_once failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Repo kontrolü şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
 
 
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web")
