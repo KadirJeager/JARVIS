@@ -34,7 +34,7 @@ _speaker_service: "speaker.SpeakerService | None" = None
 
 
 def _build_text_model():
-    """Decide the model for the TEXT-chat runner.
+    """Decide the model for the text runners -- BOTH of them.
 
     Two shapes, both valid for ADK's Agent (str or BaseLlm):
     - config.LLM_BASE_URL empty: the resolved model NAME string (which is
@@ -47,8 +47,10 @@ def _build_text_model():
       is sent as x-goog-api-key regardless) -- see app/text_model.py's
       module docstring for the live-verified details.
 
-    The VOICE path (_init_voice below) is deliberately untouched: live audio
-    keeps its own resolve_live_model() string, a separate phase."""
+    The VOICE runner (_init_voice below) uses this same factory since the v2
+    voice protocol: with STT/TTS on the device the server no longer opens a
+    Gemini Live session at all -- voice turns are plain text turns
+    (run_async), so there is no separate live model to resolve."""
     if not config.LLM_BASE_URL:
         return config.resolve_text_model()
     from google.adk.models.google_llm import Gemini
@@ -112,16 +114,20 @@ def get_speaker_service() -> "speaker.SpeakerService":
 
 
 def _init_voice() -> None:
-    """Lazy init for the voice-mode Runner: a SEPARATE Runner/Agent bound to
-    config.resolve_live_model() (config.MODEL_NAME is not live-capable),
-    sharing the SAME _session_service and _memory instances as the text-chat
-    runner -- same memory, same audit trail, same tools/policy, only the
-    model differs. See app/live_model.py + task-2a4-report.md /
-    task-2a6-report.md for why the live model can't just be
-    config.MODEL_NAME and how it's auto-resolved to the newest usable one.
-    Resolution happens once, at first init, for the lifetime of this
-    process -- the `if _voice_runner is not None: return` guard below
-    covers that."""
+    """Lazy init for the voice-mode Runner: a SEPARATE Runner/Agent built on
+    the SAME model factory as text chat (_build_text_model), sharing the SAME
+    _session_service and _memory instances as the text-chat runner -- same
+    memory, same audit trail, same tools/policy.
+
+    Why a separate runner at all, if the model no longer differs? Because of
+    trust_provider: only the voice agent gets one. Identity signals exist
+    only for voice connections (the WS bridge publishes them per connection),
+    and keeping the text runner provider-less makes it structurally unable to
+    see them (app/voice_trust.py). There is no live model anymore -- the v2
+    voice protocol moved STT/TTS onto the device, so voice turns arrive as
+    text and run through run_async like any chat turn. The
+    `if _voice_runner is not None: return` guard below makes this a
+    once-per-process init."""
     global _voice_runner
     if _voice_runner is not None:
         return
@@ -135,7 +141,7 @@ def _init_voice() -> None:
     _voice_runner = Runner(
         app_name=APP_NAME,
         agent=build_agent(
-            _memory, FirestoreAudit(db), model=config.resolve_live_model(),
+            _memory, FirestoreAudit(db), model=_build_text_model(),
             # ONLY the voice agent gets a trust provider: identity signals exist
             # only for live voice connections, and this keeps the text runner
             # structurally unable to see them (app/voice_trust.py).
@@ -146,8 +152,9 @@ def _init_voice() -> None:
 
 
 def get_voice_runner_sessions_memory() -> "tuple[Runner, InMemorySessionService, Memory | None]":
-    """Accessor for voice.py: dedicated live-model Runner + the same Katman 1
-    session_service/memory instances as text chat, no privates touched."""
+    """Accessor for voice.py: the dedicated voice Runner (trust-provider
+    wiring, see _init_voice) + the same Katman 1 session_service/memory
+    instances as text chat, no privates touched."""
     _init_voice()
     return _voice_runner, _session_service, _memory
 

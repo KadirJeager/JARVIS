@@ -2,8 +2,7 @@
 text-chat model from a local CLIProxyAPI proxy catalog (and the
 config.resolve_text_model / main._build_text_model wiring around it).
 
-Same style as test_live_model.py: fetch is ALWAYS injected -- no test here
-touches a real proxy.
+Fetch is ALWAYS injected -- no test here touches a real proxy.
 """
 
 import logging

@@ -1,54 +1,9 @@
 import logging
 import os
 
-from . import live_model, text_model, voice_protocol
+from . import text_model, voice_protocol
 
 MODEL_NAME = os.environ.get("JARVIS_MODEL", "gemini-flash-latest")
-# NOT a "-latest" native-audio alias on purpose: confirmed via live smoke test
-# (task-2a4-report.md) that ADK 1.36.2's live connection layer
-# (google/adk/models/gemini_llm_connection.py) buffers tool_call messages and
-# only flushes them at turn_complete for any model where
-# google.adk.utils.model_name_utils._is_gemini_3_x_live() is False -- which
-# includes every gemini-2.x native-audio live model. Since turn_complete
-# itself never arrives until the (buffered, never-yielded) tool call gets a
-# response, every live turn that triggers a tool call deadlocks forever.
-# Gemini 3.x Live models take the "yield tool calls immediately" fast path
-# instead, so they don't hit this.
-#
-# No "-latest" alias exists yet for a Gemini 3.x Live model, so unlike
-# MODEL_NAME above we can't just point at a Google-maintained alias.
-# resolve_live_model() (task-2a6) does the equivalent job by hand: it fetches
-# the live model catalog at voice-runner init and picks the newest usable
-# one, so Jarvis follows Google's releases automatically instead of staying
-# pinned to this dated preview forever. This constant is now ONLY the
-# last-resort fallback used when resolution fails for any reason.
-LIVE_MODEL_FALLBACK = os.environ.get("JARVIS_LIVE_MODEL", "gemini-3.1-flash-live-preview")
-
-
-def resolve_live_model() -> str:
-    """Resolve the live model to use for the voice runner.
-
-    JARVIS_LIVE_MODEL, if set, is an absolute pin (testing/emergencies) that
-    overrides auto-resolution entirely. Otherwise this delegates to
-    live_model.resolve() -- fetch the live catalog, filter to usable
-    candidates, pick the newest -- and falls back to LIVE_MODEL_FALLBACK on
-    ANY failure (network, empty result, unexpected exception), logging the
-    failure so it's visible without breaking voice-mode startup.
-    """
-    env_override = os.environ.get("JARVIS_LIVE_MODEL")
-    if env_override:
-        return env_override
-    try:
-        # Pass the same fallback so both failure branches (resolve()'s internal
-        # empty/fetch-error path and this outer catch-all) stay in sync if the
-        # pin is ever changed after an incident.
-        return live_model.resolve(fallback=LIVE_MODEL_FALLBACK)
-    except Exception:
-        logging.exception(
-            "config.resolve_live_model: live_model.resolve() failed, using fallback %s",
-            LIVE_MODEL_FALLBACK,
-        )
-        return LIVE_MODEL_FALLBACK
 
 
 # Local LLM proxy (CLIProxyAPI) for the TEXT-chat path. Empty means the old
@@ -62,23 +17,24 @@ def resolve_live_model() -> str:
 LLM_BASE_URL = os.environ.get("JARVIS_LLM_BASE_URL", "")
 # NOT a pin -- the last-resort model id used only when catalog resolution
 # fails for any reason (proxy down, empty/filtered-out catalog, unexpected
-# exception). Same role LIVE_MODEL_FALLBACK plays for voice.
+# exception).
 TEXT_MODEL_FALLBACK = "gemini-3.6-flash-high"
 
 
 def resolve_text_model() -> str:
-    """Resolve the model to use for the text-chat runner.
+    """Resolve the model to use for the text-chat runner (and, since the v2
+    voice protocol moved STT/TTS onto the device, for the voice runner too --
+    see main._init_voice).
 
     JARVIS_TEXT_MODEL, if set, is an absolute pin (testing/emergencies) that
-    overrides auto-resolution entirely -- the same role JARVIS_LIVE_MODEL
-    plays for voice. Otherwise, when LLM_BASE_URL is empty (no proxy
-    configured) the resolution is trivial: MODEL_NAME, i.e. the direct AI
-    Studio path keeps its "-latest" alias. When a proxy IS configured this
-    delegates to text_model.resolve() -- fetch the proxy catalog, filter to
-    usable flash candidates, pick the newest -- and falls back to
-    TEXT_MODEL_FALLBACK on ANY failure (network, empty result, unexpected
-    exception), logging the failure so it's visible without breaking
-    text-mode startup.
+    overrides auto-resolution entirely. Otherwise, when LLM_BASE_URL is empty
+    (no proxy configured) the resolution is trivial: MODEL_NAME, i.e. the
+    direct AI Studio path keeps its "-latest" alias. When a proxy IS
+    configured this delegates to text_model.resolve() -- fetch the proxy
+    catalog, filter to usable flash candidates, pick the newest -- and falls
+    back to TEXT_MODEL_FALLBACK on ANY failure (network, empty result,
+    unexpected exception), logging the failure so it's visible without
+    breaking text-mode startup.
     """
     env_override = os.environ.get("JARVIS_TEXT_MODEL")
     if env_override:
@@ -169,60 +125,15 @@ SPEAKER_UTTERANCE_SECONDS = _effective_utterance_seconds(
     float(os.environ.get("JARVIS_SPEAKER_UTTERANCE_SECONDS", _DEFAULT_UTTERANCE_SECONDS))
 )
 SPEAKER_UTTERANCE_MAX_BYTES = _utterance_bytes(SPEAKER_UTTERANCE_SECONDS)
-# FLOOR for the turn_complete FALLBACK verification only (voice.py). That path
-# fires when no finished input transcription arrived, so it has no positive
-# signal that the buffer holds a whole utterance -- it can be room noise picked
-# up after the real utterance was already scored and drained. Scoring a
-# fragment against thresholds calibrated on ~3 s clips yields an arbitrary
-# verdict, and an unverified verdict is not neutral: it fuses to LOW under
-# locked/ambient. The transcription path deliberately has NO floor -- there
-# Gemini has told us the utterance is complete, and short commands ("evet")
-# must still be verified.
-_DEFAULT_MIN_UTTERANCE_SECONDS = 0.5
-
-
-def _effective_min_utterance_seconds(seconds: float) -> float:
-    """Keep the floor inside [0, the rolling window], loudly.
-
-    Its sibling JARVIS_SPEAKER_UTTERANCE_SECONDS is validated at load, and this
-    one needs it for the same reason -- both ends misbehave silently:
-    a negative value is a floor no buffer can be below (the guard is simply
-    gone), and a value ABOVE the mic window is a floor no buffer can ever
-    REACH, which kills the fallback outright: every turn whose finished
-    transcription never arrives then passes unverified. That second one fails
-    OPEN, so it must not be reachable by a typo."""
-    if seconds < 0:
-        logging.warning(
-            "config: JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS=%r is negative, which "
-            "removes the fallback's fragment guard; falling back to %.1f s",
-            seconds, _DEFAULT_MIN_UTTERANCE_SECONDS,
-        )
-        return _DEFAULT_MIN_UTTERANCE_SECONDS
-    if _utterance_bytes(seconds) > SPEAKER_UTTERANCE_MAX_BYTES:
-        logging.warning(
-            "config: JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS=%r exceeds the %.1f s mic "
-            "window, so the turn_complete fallback could never fire; clamping to "
-            "the window",
-            seconds, SPEAKER_UTTERANCE_SECONDS,
-        )
-        return SPEAKER_UTTERANCE_SECONDS
-    return seconds
-
-
-SPEAKER_MIN_UTTERANCE_SECONDS = _effective_min_utterance_seconds(
-    float(os.environ.get("JARVIS_SPEAKER_MIN_UTTERANCE_SECONDS",
-                         _DEFAULT_MIN_UTTERANCE_SECONDS))
-)
-SPEAKER_MIN_UTTERANCE_BYTES = _utterance_bytes(SPEAKER_MIN_UTTERANCE_SECONDS)
-# How much of the mic buffer a BARGE-IN keeps. A different concept from the
-# floor above -- that one asks "is this enough audio to score?", this one asks
-# "where did the barge-in utterance start?" -- and deliberately NOT derived from
-# it, nor operator-tunable. The floor may legitimately be set to 0 (an opt-out),
-# and voice.py trims with `del buf[:-onset]`, where `del buf[:-0]` is a NO-OP:
-# sharing the constant would silently retire the trim and leave the model's
-# whole speaking time in front of the utterance being scored. Same trap the mic
-# window carries a guard for; it must not come back through a coupling. Clamped
-# into (0, the mic window] so it is always both positive and reachable.
+# How much of the mic buffer a SPEECH ONSET (the client's speech_start frame)
+# keeps. Its own constant, deliberately NOT operator-tunable and NOT derived
+# from any other knob: voice.py trims with `del buf[:-onset]`, and
+# `del buf[:-0]` is `del buf[:0]` -- a NO-OP, so any coupling to a tunable
+# value would silently retire the trim and leave whatever preceded the
+# utterance (room noise, the interval since the last turn) in front of the
+# audio being scored. Same trap the mic window carries a guard for; it must
+# not come back through a coupling. Clamped into (0, the mic window] so it is
+# always both positive and reachable.
 SPEAKER_BARGE_IN_ONSET_BYTES = min(
     max(1, _utterance_bytes(0.5)), SPEAKER_UTTERANCE_MAX_BYTES
 )

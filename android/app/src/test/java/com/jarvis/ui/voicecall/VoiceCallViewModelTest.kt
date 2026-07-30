@@ -4,7 +4,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewmodel.CreationExtras
 import com.jarvis.data.voice.session.MicSource
-import com.jarvis.data.voice.session.SpeakerSink
+import com.jarvis.data.voice.session.SpeechSynthesis
+import com.jarvis.data.voice.session.SpeechSynthesisListener
+import com.jarvis.data.voice.session.SpeechToText
+import com.jarvis.data.voice.session.SpeechToTextListener
 import com.jarvis.data.voice.session.VoicePhase
 import com.jarvis.data.voice.session.VoiceSession
 import com.jarvis.data.voice.session.VoiceTransport
@@ -58,19 +61,30 @@ class VoiceCallViewModelTest {
         }
     }
 
-    private class FakeSpeaker : SpeakerSink {
-        var stopCalls = 0
-        override fun start(sampleRateHz: Int) {}
-        override fun write(pcm: ByteArray) {}
-        override fun stop() {
-            stopCalls++
+    private class FakeStt : SpeechToText {
+        var destroyCalls = 0
+        override fun start(listener: SpeechToTextListener) {}
+        override fun listen() {}
+        override fun destroy() {
+            destroyCalls++
+        }
+    }
+
+    private class FakeTts : SpeechSynthesis {
+        var destroyCalls = 0
+        override fun start(listener: SpeechSynthesisListener) {}
+        override fun speak(text: String) {}
+        override fun stop() {}
+        override fun destroy() {
+            destroyCalls++
         }
     }
 
     private val dispatcher = StandardTestDispatcher()
     private val transport = FakeTransport()
     private val mic = FakeMic()
-    private val speaker = FakeSpeaker()
+    private val stt = FakeStt()
+    private val tts = FakeTts()
 
     @Before fun setUp() = Dispatchers.setMain(dispatcher)
 
@@ -79,7 +93,8 @@ class VoiceCallViewModelTest {
     private fun sessionFor(scope: CoroutineScope) = VoiceSession(
         transport = transport,
         mic = mic,
-        speaker = speaker,
+        stt = stt,
+        tts = tts,
         tokenProvider = { "token" },
         deviceHint = "android_test",
         scope = scope,
@@ -155,7 +170,8 @@ class VoiceCallViewModelTest {
 
         assertEquals(1, transport.closeCalls)
         assertEquals(1, mic.stopCalls)
-        assertEquals(1, speaker.stopCalls)
+        assertEquals(1, stt.destroyCalls)
+        assertEquals(1, tts.destroyCalls)
     }
 
     @Test

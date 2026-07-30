@@ -99,6 +99,26 @@ private fun OverlayContent(
                     )
                 }
             }
+            // The recognizer's interim hypothesis rides as a dimmed, italic user bubble
+            // below the committed lines — visibly "still being heard", replaced by the
+            // final user_text line when the utterance ends.
+            state.partialText?.let { partial ->
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        Text(
+                            text = partial,
+                            color = JarvisTextMuted,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            modifier = Modifier
+                                .widthIn(max = 320.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(JarvisSurface)
+                                .padding(horizontal = 14.dp, vertical = 9.dp),
+                        )
+                    }
+                }
+            }
         }
 
         if (state.phase == VoicePhase.ERROR) {

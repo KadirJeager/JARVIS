@@ -2,30 +2,18 @@ import json
 
 import pytest
 
-from app import config
 from app.voice_protocol import (
-    AUDIO_IN_RATE, AUDIO_MIME_IN, AUDIO_OUT_RATE, evt_error, evt_speaker,
+    AUDIO_IN_RATE, AUDIO_MIME_IN, evt_error, evt_jarvis_text, evt_speaker,
     evt_transcript, evt_turn_complete, parse_hello,
 )
 
 
 def test_rates_fixed_by_contract():
-    assert AUDIO_IN_RATE == 16000 and AUDIO_OUT_RATE == 24000
+    """v2: only the INPUT rate survives -- mic PCM still flows in for
+    speaker-ID. There is no server->client audio rate anymore: the server
+    never sends binary frames (device TTS speaks jarvis_text locally)."""
+    assert AUDIO_IN_RATE == 16000
     assert AUDIO_MIME_IN == "audio/pcm;rate=16000"
-
-
-def test_live_model_fallback_is_gemini_3_x_live():
-    """The last-resort fallback (used when auto-resolution fails or
-    JARVIS_LIVE_MODEL is unset) must itself be a Gemini 3.x Live model, NOT a
-    "-latest" native-audio alias: confirmed via live smoke test
-    (task-2a4-report.md) that ADK 1.36.2 buffers tool_call messages until
-    turn_complete for any model where
-    google.adk.utils.model_name_utils._is_gemini_3_x_live() is False -- which
-    deadlocks forever, since turn_complete never arrives until the buffered
-    (never-yielded) tool call gets a response."""
-    from google.adk.utils import model_name_utils
-
-    assert model_name_utils._is_gemini_3_x_live(config.LIVE_MODEL_FALLBACK)
 
 
 def test_events_shape():
@@ -34,9 +22,15 @@ def test_events_shape():
     assert evt_error("x")["type"] == "error"
 
 
+def test_evt_jarvis_text_shape():
+    """The v2 reply channel: the device TTS speaks exactly this text."""
+    assert evt_jarvis_text("merhaba") == {"type": "jarvis_text", "text": "merhaba"}
+
+
 def test_parse_hello_roundtrip_and_reject():
     assert parse_hello(json.dumps({"token": "abc"})) == {
         "token": "abc", "device_hint": "unknown", "presence": "foreground",
+        "client_caps": None,
     }
     with pytest.raises(ValueError):
         parse_hello("not json")
@@ -49,13 +43,29 @@ def test_parse_hello_roundtrip_and_reject():
 
 
 def test_parse_hello_full():
-    h = parse_hello('{"token":"t","device_hint":"headset","presence":"locked"}')
-    assert h == {"token": "t", "device_hint": "headset", "presence": "locked"}
+    h = parse_hello('{"token":"t","device_hint":"headset","presence":"locked",'
+                    '"client_caps":{"stt":"device","tts":"device","proto":2}}')
+    assert h == {
+        "token": "t", "device_hint": "headset", "presence": "locked",
+        "client_caps": {"stt": "device", "tts": "device", "proto": 2},
+    }
 
 
 def test_parse_hello_backward_compatible_defaults():
+    """A caps-less hello still PARSES (v1 client) -- the 4409 rejection is the
+    handshake's decision, not the parser's. client_caps surfaces as None."""
     h = parse_hello('{"token":"t"}')
-    assert h == {"token": "t", "device_hint": "unknown", "presence": "foreground"}
+    assert h == {
+        "token": "t", "device_hint": "unknown", "presence": "foreground",
+        "client_caps": None,
+    }
+
+
+def test_parse_hello_non_dict_client_caps_surfaces_as_none():
+    """A malformed caps value must not crash the parser nor masquerade as a
+    v2 client: treat it as absent."""
+    h = parse_hello(json.dumps({"token": "t", "client_caps": "device"}))
+    assert h["client_caps"] is None
 
 
 def test_parse_hello_missing_token_raises():

@@ -6,13 +6,12 @@ the SAME session from get_session() and create_session(), and fakes a runner
 that ignores the session entirely -- so none of them can observe the real ADK
 behaviour. This test uses the REAL InMemorySessionService and the REAL
 policy_callback (the one app.agent.build_agent installs on the production
-agent), and reproduces exactly what Runner.run_live does with the session,
+agent), and reproduces exactly what Runner.run_async does with the session,
 verified against installed google-adk 1.36.2:
 
-  * Runner.run_live(user_id=..., session_id=...) fetches its OWN session via
-    _get_or_create_session -> session_service.get_session (runners.py:1049-1054
-    and runners.py:401), and builds the invocation context on that object
-    (runners.py:1055-1059).
+  * Runner.run_async(user_id=..., session_id=...) fetches its OWN session via
+    _get_or_create_session -> session_service.get_session (runners.py:401),
+    and builds the invocation context on that object.
   * InMemorySessionService.get_session returns a COPY, never the stored object
     (in_memory_session_service.py:186-202 -> _copy_session at :54-58, whose
     light-copy branch does `copied_session.state = copy.copy(session.state)`
@@ -67,13 +66,13 @@ class _Tool:
 class _WS:
     """Duck-type of the fastapi WebSocket surface VoiceBridge.run uses. receive()
     yields to the event loop first, the way a real ASGI socket read always does,
-    so the concurrently running _pump_events task gets scheduled.
+    so concurrently running turn tasks get scheduled.
 
     Once the scripted messages run out it waits on `gate` and then reports a
     disconnect. That models a real client (which keeps the socket open while the
     turn is being served) and, crucially, makes the test deterministic: without
-    it, run()'s teardown can cancel _pump_events while it is still awaiting the
-    off-thread speaker inference, so the turn's tool call never happens."""
+    it, run()'s teardown can cancel the turn task before the fake runner reached
+    the policy callback."""
 
     def __init__(self, incoming, gate):
         self.incoming = list(incoming)
@@ -94,31 +93,14 @@ class _WS:
         self.sent.append(("bytes", b))
 
 
-def _transcription_event(text, finished):
-    class T:
-        pass
-
-    t = T()
-    t.text = text
-    t.finished = finished
-
-    class E:
-        pass
-
-    e = E()
-    e.content = None
-    e.turn_complete = False
-    e.input_transcription = t
-    e.output_transcription = None
-    return e
-
-
 class _RunnerThatCallsATool:
     """Stands in for ADK's Runner ONLY in the two respects that matter here:
-    it yields the user's finished input transcription, then obtains its own
-    session copy from the session service the way Runner._get_or_create_session
-    does (runners.py:401) and invokes the policy callback with a ToolContext
-    built on it (runners.py:1055-1059 + agents/context.py:69-72)."""
+    its run_async is called by the bridge AFTER the utterance's verification
+    has published trust (that ordering is the bridge's own guarantee, pinned
+    in tests/test_voice.py), and it obtains its own session copy from the
+    session service the way Runner._get_or_create_session does
+    (runners.py:401) before invoking the policy callback with a ToolContext
+    built on it (agents/context.py:69-72)."""
 
     def __init__(self, sessions, agent, policy_cb, bridge_box, decisions, gate):
         self.sessions = sessions
@@ -128,21 +110,10 @@ class _RunnerThatCallsATool:
         self.decisions = decisions
         self.gate = gate
 
-    def run_live(self, *, user_id, session_id, live_request_queue, run_config=None):
+    def run_async(self, *, user_id, session_id, new_message):
         async def events():
-            bridge = self.bridge_box["bridge"]
-            # Wait for the concurrently running mic loop to have buffered this
-            # turn's audio. Bounded by a fixed number of event-loop turns (not
-            # wall clock) so this is deterministic; if it never fills, the
-            # caller's asyncio.wait_for turns it into a clean failure.
-            for _ in range(200):
-                if bridge._utterance:
-                    break
-                await asyncio.sleep(0)
-            yield _transcription_event("profilimi guncelle", finished=True)
-            # Resuming here means _pump_events already finished awaiting
-            # _verify_utterance for the event above -- the trust level for this
-            # turn is published by now.
+            # The bridge runs verification inline before spawning this turn,
+            # so the trust level for this utterance is already published.
             session = await self.sessions.get_session(
                 app_name=APP_NAME, user_id=user_id, session_id=session_id
             )
@@ -158,6 +129,8 @@ class _RunnerThatCallsATool:
                 self.policy_cb(_Tool("update_user_profile"), {"patch": {}}, tool_context)
             )
             self.gate.set()             # the turn is served; the client may go away
+            return
+            yield  # pragma: no cover   # async-generator shape
 
         return events()
 
@@ -174,7 +147,7 @@ def _voice_agent(audit):
     as main._init_voice wires it. The text runner passes no provider, which is
     what keeps /api/chat unaffected."""
     return build_agent(
-        memory=object(), audit=audit, model="fake-live-model",
+        memory=object(), audit=audit, model="fake-text-model",
         trust_provider=voice_trust.lookup,
     )
 
@@ -184,7 +157,16 @@ async def _drive(sessions, agent, bridge, decisions, timeout=5):
     bridge.runner = _RunnerThatCallsATool(
         sessions, agent, agent.before_tool_callback, {"bridge": bridge}, decisions, gate
     )
-    ws = _WS([{"type": "websocket.receive", "bytes": b"\x00\x01" * 8}], gate)
+    # Mic PCM first (feeds the speaker-ID buffer), then the v2 boundary: the
+    # device's final STT text -- which triggers verify -> trust publish -> turn.
+    ws = _WS(
+        [
+            {"type": "websocket.receive", "bytes": b"\x00\x01" * 8},
+            {"type": "websocket.receive", "text": json.dumps(
+                {"type": "user_text", "text": "profilimi guncelle", "utterance_final": True})},
+        ],
+        gate,
+    )
     await asyncio.wait_for(bridge.run(ws, user_id=USER), timeout=timeout)
     return ws
 
@@ -393,11 +375,9 @@ def production_init(monkeypatch):
     """Runs main._init()/main._init_voice() FOR REAL -- nothing about the code
     under test is stubbed. Only their external dependencies are faked: Firestore
     (ONE shared FakeDB, as in production both clients point at the same
-    project), the e5 embedder factory (a model load at first embed), and
-    live-model resolution (a network
-    call at voice-runner init). The module's process-lifetime singletons are
-    reset through monkeypatch so the init really runs cold and is restored for
-    every other test."""
+    project) and the e5 embedder factory (a model load at first embed). The
+    module's process-lifetime singletons are reset through monkeypatch so the
+    init really runs cold and is restored for every other test."""
     import types as _types
 
     import app.agent as agent_mod
@@ -414,10 +394,9 @@ def production_init(monkeypatch):
         embed_passage=lambda text: [0.0], embed_query=lambda text: [0.0]
     )
     monkeypatch.setattr(memory_mod, "make_e5_embedders", lambda: fake_embedders)
-    monkeypatch.setattr(main_mod.config, "resolve_live_model", lambda: "fake-live-model")
-    # The text runner's model now comes from main._build_text_model() (proxy
-    # support): pin the proxy OFF and text resolution deterministic, exactly
-    # like the live resolution above, so a developer shell exporting
+    # BOTH runners' models now come from main._build_text_model() (proxy
+    # support; protocol v2 retired the separate live model): pin the proxy OFF
+    # and text resolution deterministic, so a developer shell exporting
     # JARVIS_LLM_BASE_URL/JARVIS_TEXT_MODEL can't leak into this fixture.
     monkeypatch.setattr(main_mod.config, "LLM_BASE_URL", "")
     monkeypatch.setattr(main_mod.config, "resolve_text_model", lambda: "fake-text-model")
@@ -447,11 +426,11 @@ def test_init_voice_passes_the_trust_provider_and_init_passes_none(production_in
         "main._init_voice() built the production VOICE agent without "
         "trust_provider=voice_trust.lookup: the trust level the bridge computes "
         "can never reach policy_callback. This IS the C1 Critical defect.")
-    assert voice_call["model"] == "fake-live-model"      # the live runner, not text
+    assert voice_call["model"] == "fake-text-model"      # same factory as text (v2)
     assert text_call["trust_provider"] is None, (
         "main._init() gave the TEXT agent a trust provider: /api/chat's policy "
         "callback must be structurally incapable of seeing voice signals")
-    assert text_call["model"] == "fake-text-model"      # via _build_text_model, not live
+    assert text_call["model"] == "fake-text-model"      # via _build_text_model
 
 
 def test_production_runners_behave_as_wired(production_init):

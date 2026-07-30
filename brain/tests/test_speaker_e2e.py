@@ -1,15 +1,15 @@
-"""End-to-end proof for Katman 2b Dilim 3a (Kadir ses-kimligi): drives the REAL
-/ws/voice endpoint (FastAPI TestClient websocket) through the REAL VoiceBridge
-concurrency -- the concurrently running mic-pump loop (run()'s while loop) and
-_pump_events task -- with only the ADK runner, session service, and speaker
-service faked. Proves hello(device/presence) -> mic PCM -> evt_speaker AND that
-identity verification tightens session.state's trust level for a locked+match
+"""End-to-end proof for Katman 2b Dilim 3a (Kadir ses-kimligi), protocol v2:
+drives the REAL /ws/voice endpoint (FastAPI TestClient websocket) through the
+REAL VoiceBridge -- the receive loop (run()'s while loop), the inline
+verification at the user_text boundary, and the spawned turn task -- with only
+the ADK runner, session service, and speaker service faked. Proves
+hello(caps/device/presence) -> mic PCM -> user_text -> evt_speaker AND that
+identity verification tightens the published trust level for a locked+match
 utterance (spec's risk-based trust fusion, spec section 6/11).
 
-This test also answers spec section 15's open "run_live ordering" question --
-see task-11-report.md for the full writeup of what the real event ordering
-turned out to be under TestClient's thread+event-loop scheduling."""
-import asyncio
+v2 note: the hello MUST carry client_caps -- a v1 (caps-less) hello is
+rejected with 4409 by the real handshake.
+"""
 import contextlib
 import json
 import queue
@@ -21,54 +21,37 @@ from fastapi.testclient import TestClient
 from app.speaker_store import enroll_anchors
 from tests.fakes import FakeDB
 
+_HELLO = json.dumps({
+    "token": "t", "device_hint": "tablet", "presence": "locked",
+    "client_caps": {"stt": "device", "tts": "device", "proto": 2},
+})
+_USER_TEXT = json.dumps(
+    {"type": "user_text", "text": "merhaba", "utterance_final": True})
 
-class _OneShotRunner:
-    """Fake ADK live runner: yields exactly one input_transcription event, after
-    a short real delay.
 
-    The delay is NOT a test-timing hack layered on top of an otherwise-correct
-    zero-latency fake -- it is what makes this fake REALISTIC. A real live
-    Gemini transcription always arrives after a network round-trip, so by the
-    time it lands, the mic-pump loop has already had time to receive and
-    buffer the PCM for that utterance. A zero-delay fake claims a transcript
-    exists before the audio that produced it has even been read off the
-    socket, which cannot happen for real -- and, proven empirically (see
-    task-11-report.md's RED-phase run), races ahead of VoiceBridge.run()'s
-    concurrent mic-pump task under TestClient's thread+event-loop scheduling:
-    asyncio.create_task(self._pump_events(...)) is scheduled but not yet
-    running when run() reaches its own first checkpoint (awaiting the client's
-    next message), and a zero-await fake generator lets _pump_events reach
-    _verify_utterance before the mic loop's task gets a turn to buffer
-    anything -- _verify_utterance then sees an empty buffer, returns early
-    without sending evt_speaker, and the client's receive() loop blocks
-    forever waiting for an event that will never come."""
+class _FinalResponse:
+    """Mirrors the ADK Event surface the bridge's turn reads (is_final_response
+    + content.parts[0].text)."""
 
-    def run_live(self, **kwargs):
+    def __init__(self, text):
+        from google.genai import types
+
+        self.content = types.Content(role="model", parts=[types.Part(text=text)])
+
+    def is_final_response(self):
+        return True
+
+
+class _OneTurnRunner:
+    """Fake ADK text runner: answers every run_async turn with one
+    final-response event. Deterministic by construction -- no timing hacks:
+    the v2 bridge verifies the buffered PCM INLINE at the user_text frame
+    (same receive loop, same ordering as the bytes that fed the buffer), so
+    unlike the v1 live-events fake this one cannot race the mic path."""
+
+    def run_async(self, **kwargs):
         async def events():
-            # TODO(debt): wall-clock sleep standing in for the network
-            # round-trip a real Gemini live transcript always has (see the
-            # class docstring above for why a zero-delay fake races
-            # VoiceBridge.run()'s concurrent mic-pump task and breaks this
-            # test). 0.05s has been reliable so far but is a wall-clock
-            # assumption, not a guarantee -- raise it if this ever flakes
-            # under CI load.
-            await asyncio.sleep(0.05)
-
-            class T:
-                text = "merhaba"
-                # finished=True marks the whole-utterance boundary -- the only
-                # kind of input transcription the bridge verifies on (ADK yields
-                # partial fragments with finished=False,
-                # models/gemini_llm_connection.py:283-323).
-                finished = True
-
-            class E:
-                content = None
-                turn_complete = False
-                input_transcription = T()
-                output_transcription = None
-
-            yield E()
+            yield _FinalResponse("selam")
 
         return events()
 
@@ -88,9 +71,7 @@ def _receive_with_timeout(ws, timeout=5.0):
     """starlette's WebSocketTestSession.receive() has no built-in timeout -- if
     the server-side ordering is wrong and no more messages are ever sent, this
     call blocks forever. A daemon thread + bounded queue.get turns that failure
-    mode into a clean pytest FAILURE instead of a hung test run (verified this
-    matters: see task-11-report.md's RED-phase evidence, where exactly this
-    happened)."""
+    mode into a clean pytest FAILURE instead of a hung test run."""
     q: "queue.Queue" = queue.Queue(maxsize=1)
 
     def _target():
@@ -118,7 +99,7 @@ def wired(monkeypatch):
     enroll_anchors(db, "kadir@example.com", [[1.0, 0.0, 0.0]])
     sessions = _Sessions()
     monkeypatch.setattr(main, "get_voice_runner_sessions_memory",
-                         lambda: (_OneShotRunner(), sessions, None))
+                         lambda: (_OneTurnRunner(), sessions, None))
     # speaker service with a fake embed: any pcm -> matching vector
     from app.speaker import SpeakerService
     svc = SpeakerService(db, embed_fn=lambda pcm: [1.0, 0.0, 0.0], now_fn=lambda: "t",
@@ -139,16 +120,22 @@ def test_ws_voice_emits_speaker_event_and_publishes_locked_trust(wired, monkeypa
 
     client = TestClient(main.app)
     with client.websocket_connect("/ws/voice") as ws:
-        ws.send_text(json.dumps({"token": "t", "device_hint": "tablet", "presence": "locked"}))
+        ws.send_text(_HELLO)
         ws.send_bytes(b"\x00\x01\x00\x01")            # mic audio -> buffered
-        # drain events until we see the speaker event
-        seen = None
-        for _ in range(5):
+        ws.send_text(_USER_TEXT)                      # the v2 utterance boundary
+        # drain events until we have both the speaker event and the reply
+        seen = {}
+        for _ in range(6):
             msg = _receive_with_timeout(ws)
-            if "text" in msg and '"speaker"' in msg["text"]:
-                seen = json.loads(msg["text"])
+            if "text" in msg:
+                event = json.loads(msg["text"])
+                seen.setdefault(event["type"], event)
+            if "turn_complete" in seen:
                 break
-        assert seen == {"type": "speaker", "role": "user", "verified": True, "score": 1.0}
+        assert seen["speaker"] == {
+            "type": "speaker", "role": "user", "verified": True, "score": 1.0}
+        assert seen["jarvis_text"] == {"type": "jarvis_text", "text": "selam"}
+        assert "turn_complete" in seen
 
     key = voice_trust.key_for(voice.APP_NAME, "kadir@example.com", "voice-kadir@example.com")
     # locked + match -> MEDIUM, published under this connection's session key
@@ -161,6 +148,24 @@ def test_ws_voice_emits_speaker_event_and_publishes_locked_trust(wired, monkeypa
     assert voice_trust.peek(key) is None               # cleared at teardown
 
 
+def test_ws_voice_rejects_a_v1_client_with_4409(wired):
+    """End-to-end through the REAL handshake: a caps-less hello (a client
+    still expecting the retired Gemini Live bridge) gets the upgrade error and
+    the distinct close code -- after authenticating fine."""
+    main, sessions = wired
+
+    client = TestClient(main.app)
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_text(json.dumps({"token": "t"}))       # no client_caps
+        msg = _receive_with_timeout(ws)
+        assert json.loads(msg["text"]) == {"type": "error", "message": "Uygulamayı güncelle"}
+        # After the error frame the server closes with 4409; starlette surfaces
+        # the close on the next receive.
+        msg = _receive_with_timeout(ws)
+        assert msg["type"] == "websocket.close"
+        assert msg["code"] == 4409
+
+
 def test_e2e_verified_utterance_lands_in_the_verification_history(wired):
     """Wiring proof at the outermost seam: after the WS-driven utterance the
     history doc must hold the fused presence/trust_level -- the fields only
@@ -170,9 +175,10 @@ def test_e2e_verified_utterance_lands_in_the_verification_history(wired):
 
     client = TestClient(main.app)
     with client.websocket_connect("/ws/voice") as ws:
-        ws.send_text(json.dumps({"token": "t", "device_hint": "tablet", "presence": "locked"}))
+        ws.send_text(_HELLO)
         ws.send_bytes(b"\x00\x01\x00\x01")            # mic audio -> buffered
-        for _ in range(5):
+        ws.send_text(_USER_TEXT)
+        for _ in range(6):
             msg = _receive_with_timeout(ws)
             if "text" in msg and '"speaker"' in msg["text"]:
                 break

@@ -17,7 +17,8 @@ import com.jarvis.data.net.NetworkModule
 import com.jarvis.data.net.VOICE_WS_URL
 import com.jarvis.data.voice.VoiceProfileRepository
 import com.jarvis.data.voice.session.AndroidMicSource
-import com.jarvis.data.voice.session.AndroidSpeakerSink
+import com.jarvis.data.voice.session.AndroidSpeechToText
+import com.jarvis.data.voice.session.AndroidTextToSpeech
 import com.jarvis.data.voice.session.OkHttpVoiceTransport
 import com.jarvis.data.voice.session.VoiceSession
 import kotlinx.coroutines.CoroutineScope
@@ -57,8 +58,12 @@ class AppContainer(
     val voiceSessionFactory: (CoroutineScope) -> VoiceSession = { scope ->
         VoiceSession(
             transport = OkHttpVoiceTransport(),
+            // Mic PCM keeps flowing for server-side speaker-ID; the conversation itself
+            // is text: on-device SpeechRecognizer up (user_text), on-device TTS down
+            // (jarvis_text). No server audio is played back anymore (protocol v2).
             mic = AndroidMicSource(),
-            speaker = AndroidSpeakerSink(),
+            stt = AndroidSpeechToText(context.applicationContext),
+            tts = AndroidTextToSpeech(context.applicationContext),
             tokenProvider = { authManager.currentToken() },
             // Feeds the server's channel-adaptive speaker gallery (spec §6): the tablet
             // and the phone are different acoustic channels and should be labeled apart.

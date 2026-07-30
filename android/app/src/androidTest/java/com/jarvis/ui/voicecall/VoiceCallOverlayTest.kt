@@ -69,6 +69,21 @@ class VoiceCallOverlayTest {
         rule.onNodeWithText("buyur kadir").assertIsDisplayed()
     }
 
+    /** Protocol v2: the recognizer's interim hypothesis shows as a dimmed user bubble,
+     *  below the committed lines and alongside them. */
+    @Test
+    fun partialText_isRenderedAlongsideCommittedLines() {
+        show(
+            VoiceUiState(
+                phase = VoicePhase.LISTENING,
+                transcript = listOf(TranscriptLine("jarvis", "buyur kadir")),
+                partialText = "merh",
+            ),
+        )
+        rule.onNodeWithText("buyur kadir").assertIsDisplayed()
+        rule.onNodeWithText("merh").assertIsDisplayed()
+    }
+
     @Test
     fun endButton_firesOnStop() {
         var stopped = false

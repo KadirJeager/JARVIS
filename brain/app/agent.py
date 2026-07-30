@@ -32,10 +32,10 @@ def build_agent(
     memory: Memory, audit, model: "str | BaseLlm | None" = None, trust_provider=None
 ) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
-    (text chat); voice sessions pass config.resolve_live_model() instead -- same
-    instruction/tools/policy, different model (see main.get_voice_runner_sessions_memory).
-    ADK's Agent accepts either a model NAME (str) or a BaseLlm instance: the
-    text runner passes whatever main._build_text_model() decided -- a plain
+    (text chat); the voice runner passes whatever main._build_text_model()
+    decided -- same instruction/tools/policy, same model factory (voice turns
+    are plain text turns since protocol v2; see main.get_voice_runner_sessions_memory).
+    ADK's Agent accepts either a model NAME (str) or a BaseLlm instance: a plain
     string for the direct AI Studio path, or a Gemini instance bound to the
     local proxy's base_url when config.LLM_BASE_URL is set.
 

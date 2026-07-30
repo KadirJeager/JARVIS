@@ -15,6 +15,10 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 sealed interface VoiceServerEvent {
     data class Transcript(val role: String, val text: String) : VoiceServerEvent
+
+    /** Protocol v2: the server's reply TEXT. The client voices it with the on-device TTS
+     *  instead of receiving 24kHz model PCM. One reply may arrive as several events. */
+    data class JarvisText(val text: String) : VoiceServerEvent
     data object TurnComplete : VoiceServerEvent
     data class Error(val message: String) : VoiceServerEvent
     data class Speaker(val role: String, val verified: Boolean, val score: Double) : VoiceServerEvent
@@ -29,12 +33,11 @@ sealed interface VoiceServerEvent {
  */
 data class TranscriptLine(val role: String, val text: String)
 
-/** Mic capture (client -> server) and model playback (server -> client) rates in Hz.
- *  Mirrors brain/app/voice_protocol.py's AUDIO_IN_RATE / AUDIO_OUT_RATE -- the names carry
- *  the unit here because swapping which rate feeds which audio path is the single most
- *  likely bug in this slice (chipmunk / slow-motion audio). */
+/** Mic capture (client -> server) rate in Hz. Mirrors brain/app/voice_protocol.py's
+ *  AUDIO_IN_RATE. There is no AUDIO_OUT rate anymore: protocol v2 keeps the mic PCM
+ *  stream only for server-side speaker-ID, and replies arrive as text (jarvis_text)
+ *  voiced by the on-device TTS. */
 const val AUDIO_IN_RATE_HZ = 16000
-const val AUDIO_OUT_RATE_HZ = 24000
 
 private val json = Json { ignoreUnknownKeys = true }
 
@@ -51,6 +54,10 @@ fun parseVoiceServerEvent(raw: String): VoiceServerEvent? {
             val role = obj["role"]?.jsonPrimitive?.contentOrNull ?: return null
             val text = obj["text"]?.jsonPrimitive?.contentOrNull ?: return null
             VoiceServerEvent.Transcript(role, text)
+        }
+        "jarvis_text" -> {
+            val text = obj["text"]?.jsonPrimitive?.contentOrNull ?: return null
+            VoiceServerEvent.JarvisText(text)
         }
         "turn_complete" -> VoiceServerEvent.TurnComplete
         "error" -> {

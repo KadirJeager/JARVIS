@@ -4,10 +4,10 @@ CLIProxyAPI proxy catalog.
 Kadir's "always latest" rule, carried into the proxy world: when the text
 path talks to a local LLM proxy (config.LLM_BASE_URL set) instead of AI
 Studio, Google's `gemini-flash-latest` alias no longer applies -- the proxy
-serves its own catalog of explicitly versioned models. This module does the
-same job live_model.py does for voice: fetch the catalog at runner init,
-filter to what is actually usable for general-purpose text chat, and pick
-the newest, so Jarvis follows the proxy's model upgrades automatically.
+serves its own catalog of explicitly versioned models. This module fetches
+the catalog at runner init, filters to what is actually usable for
+general-purpose text chat, and picks the newest, so Jarvis follows the
+proxy's model upgrades automatically.
 
 A model is USABLE here iff all four hold:
   1. Its id starts with "gemini-" (the proxy also serves OTHER providers'
@@ -56,7 +56,7 @@ _VARIANT_RANK_PLAIN = 2
 
 
 def _strip_models_prefix(name: str) -> str:
-    """Same shape as live_model: the catalog returns "models/<id>"."""
+    """The catalog returns "models/<id>"; strip the resource prefix."""
     if name.startswith("models/"):
         return name[len("models/") :]
     return name
@@ -64,8 +64,7 @@ def _strip_models_prefix(name: str) -> str:
 
 def version_key(name: str) -> tuple:
     """Extract (major, minor) from a "gemini-<major>.<minor>..." model name
-    for sort ordering -- the same regex pattern live_model.version_key uses.
-    Unparseable input sorts lowest via (0, 0)."""
+    for sort ordering. Unparseable input sorts lowest via (0, 0)."""
     model_name = _strip_models_prefix(name) if name else ""
     match = re.match(r"^gemini-(\d+)\.(\d+)", model_name)
     if not match:
@@ -94,11 +93,10 @@ def fetch_models(base_url: str = "", api_key: str = "") -> list:
     proxy key in the x-goog-api-key header.
 
     Both arguments default to the process environment (JARVIS_LLM_BASE_URL /
-    GOOGLE_API_KEY) so resolve()'s default fetch works unwired, exactly like
-    live_model.fetch_models() reads GOOGLE_API_KEY. Returns the raw list of
-    model dicts from the response's "models" field (each shaped like
-    {"name": "models/...", "supportedGenerationMethods": [...]}). Raises on
-    network/HTTP/JSON failure -- callers (resolve(),
+    GOOGLE_API_KEY) so resolve()'s default fetch works unwired. Returns the
+    raw list of model dicts from the response's "models" field (each shaped
+    like {"name": "models/...", "supportedGenerationMethods": [...]}). Raises
+    on network/HTTP/JSON failure -- callers (resolve(),
     config.resolve_text_model()) are responsible for falling back.
     """
     base_url = (base_url or os.environ.get("JARVIS_LLM_BASE_URL", "")).rstrip("/")
@@ -159,7 +157,7 @@ def resolve(fetch_models=fetch_models, fallback: str = "gemini-3.6-flash-high") 
     def sort_key(name: str) -> tuple:
         # Higher version wins (max() picks the largest tuple); among equal
         # versions the higher variant rank wins ("-high" > plain > "-low" >
-        # "-extra-low"); the final tiebreak is lexical, as in live_model.
+        # "-extra-low"); the final tiebreak is lexical.
         return (version_key(name), _variant_rank(name), name)
 
     chosen = max(candidates, key=sort_key)

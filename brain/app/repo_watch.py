@@ -1,6 +1,6 @@
 """GitHub repo takibi: izlenen repo'ların yeni release/commit'lerini olaya çevirir.
 
-Saf mantık + ince HTTP katmanı (stdlib urllib — live_model.py deseni, yeni
+Saf mantık + ince HTTP katmanı (stdlib urllib — text_model.py deseni, yeni
 bağımlılık yok). Kota dostu: her uç ETag ile koşullu istek atar, değişmeyen
 repo 304 döner ve GitHub tarafında 0 kota harcar. Scheduler log'u için özet
 dict Türkçe anahtarlı: {"kontrol", "olay", "hata"}.

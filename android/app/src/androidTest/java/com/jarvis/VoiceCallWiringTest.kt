@@ -31,7 +31,10 @@ import com.jarvis.data.net.VoiceApi
 import com.jarvis.data.net.VoiceProfileResponse
 import com.jarvis.data.net.VoiceSampleDto
 import com.jarvis.data.voice.session.MicSource
-import com.jarvis.data.voice.session.SpeakerSink
+import com.jarvis.data.voice.session.SpeechSynthesis
+import com.jarvis.data.voice.session.SpeechSynthesisListener
+import com.jarvis.data.voice.session.SpeechToText
+import com.jarvis.data.voice.session.SpeechToTextListener
 import com.jarvis.data.voice.session.VoiceSession
 import com.jarvis.data.voice.session.VoiceTransport
 import com.jarvis.data.voice.session.VoiceTransportListener
@@ -122,10 +125,17 @@ class VoiceCallWiringTest {
         override fun stop() {}
     }
 
-    private class FakeSpeaker : SpeakerSink {
-        override fun start(sampleRateHz: Int) {}
-        override fun write(pcm: ByteArray) {}
+    private class FakeStt : SpeechToText {
+        override fun start(listener: SpeechToTextListener) {}
+        override fun listen() {}
+        override fun destroy() {}
+    }
+
+    private class FakeTts : SpeechSynthesis {
+        override fun start(listener: SpeechSynthesisListener) {}
+        override fun speak(text: String) {}
         override fun stop() {}
+        override fun destroy() {}
     }
 
     @After
@@ -173,7 +183,8 @@ class VoiceCallWiringTest {
                 VoiceSession(
                     transport = transport,
                     mic = FakeMic(),
-                    speaker = FakeSpeaker(),
+                    stt = FakeStt(),
+                    tts = FakeTts(),
                     tokenProvider = { "fake-token" },
                     deviceHint = "android-test",
                     scope = scope,
@@ -222,7 +233,8 @@ class VoiceCallWiringTest {
                 VoiceSession(
                     transport = transport,
                     mic = FakeMic(),
-                    speaker = FakeSpeaker(),
+                    stt = FakeStt(),
+                    tts = FakeTts(),
                     tokenProvider = { "fake-token" },
                     deviceHint = "android-test",
                     scope = scope,
@@ -266,7 +278,8 @@ class VoiceCallWiringTest {
                 VoiceSession(
                     transport = transport,
                     mic = FakeMic(),
-                    speaker = FakeSpeaker(),
+                    stt = FakeStt(),
+                    tts = FakeTts(),
                     tokenProvider = { "fake-token" },
                     deviceHint = "android-test",
                     scope = scope,

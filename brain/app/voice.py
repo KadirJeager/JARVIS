@@ -1,38 +1,31 @@
-"""Voice gateway: bridges a WebSocket to an ADK live session (North Star §4.2).
+"""Voice gateway: bridges a WebSocket to ADK TEXT turns (protocol v2).
 
-Contract: see voice_protocol.py (frozen). Same policy/audit/tools/memory as text
-chat, but a DEDICATED live runner: the bridge is handed a runner built on
-config.resolve_live_model() via main.get_voice_runner_sessions_memory(), sharing
-the text path's session_service and memory instances (see main._init_voice for
-why the live model differs — an ADK 1.36.2 tool-call deadlock on non-3.x live
-models — and app/live_model.py for how it's auto-resolved to the newest usable
-one).
+Contract: see voice_protocol.py. v1 bridged mic PCM to a Gemini Live session
+(run_live) and streamed model audio back; v2 moved STT/TTS onto the device.
+The client's on-device SpeechRecognizer sends FINAL text as `user_text`
+frames; the mic PCM keeps flowing ONLY so the speaker-ID machine has audio to
+score; the server runs each utterance as a plain text turn
+(runner.run_async, same final-response collection pattern as main.run_turn)
+and answers with an evt_jarvis_text event the device's TTS speaks. No binary
+frame ever leaves the server.
 
-ADK's run_live is EXPERIMENTAL (google-adk 1.36.2). Field names below were
-verified by reading the installed source (see task-2a2-report.md):
-  - google/adk/agents/live_request_queue.py: LiveRequestQueue.send_realtime(blob),
-    .close() (no args)
-  - google/adk/agents/run_config.py: RunConfig.response_modalities: list[str],
-    RunConfig.output_audio_transcription / input_audio_transcription:
-    Optional[types.AudioTranscriptionConfig] (default_factory'li, yani
-    varsayılan olarak zaten açık)
-  - google/adk/runners.py: Runner.run_live(*, user_id, session_id,
-    live_request_queue, run_config=None, session=None) -> AsyncGenerator[Event]
-  - google/adk/models/llm_response.py (Event extends LlmResponse):
-    turn_complete: Optional[bool], input_transcription / output_transcription:
-    Optional[types.Transcription]
-  - google/genai/types.py: Blob(data=bytes, mime_type=str);
-    Transcription(text=Optional[str], finished=Optional[bool], ...);
-    Part.inline_data: Optional[Blob]
+The bridge is handed a runner built by main._init_voice: the SAME model
+factory as text chat (_build_text_model -- there is no live model to resolve
+anymore), but wired with trust_provider=voice_trust.lookup so the identity
+signals below reach the policy layer, and sharing the text path's
+session_service and memory instances.
 
-Speaker identity (Katman 2b Dilim 3a): mic PCM is buffered in a BOUNDED rolling
-window, verified ONCE per turn at the utterance boundary (input_transcription
-with finished=True, or turn_complete as the fallback ADK's own flush implies --
-models/gemini_llm_connection.py:283-323 and :349-367), off the event loop via
-asyncio.to_thread, and the resulting trust level is published through
-app/voice_trust.py. It is NOT written into session.state: ADK 1.36.2 hands the
-bridge and the runner independent session copies, so such a write never reaches
-the policy callback -- see voice_trust.py for the source-verified detail.
+Speaker identity (Katman 2b Dilim 3a): mic PCM is buffered in a BOUNDED
+rolling window and verified ONCE per utterance, at the utterance boundary --
+which in v2 is the client's `user_text` frame with utterance_final=true (the
+device's own STT endpointer decides where utterances end; the server no
+longer infers boundaries from live transcriptions or turn_complete). The
+verification runs off the event loop via asyncio.to_thread, and the resulting
+trust level is published through app/voice_trust.py BEFORE the text turn is
+started: the policy callback reads it during that turn's tool calls. It is
+NOT written into session.state: ADK 1.36.2 hands the bridge and the runner
+independent session copies, so such a write never reaches the policy
+callback -- see voice_trust.py for the source-verified detail.
 """
 import asyncio
 import contextlib
@@ -41,8 +34,6 @@ import logging
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from google.adk.agents.live_request_queue import LiveRequestQueue
-from google.adk.agents.run_config import RunConfig
 from google.genai import types
 
 from . import config, trust, voice_trust
@@ -64,34 +55,30 @@ class VoiceBridge:
         self.device_hint = device_hint
         self.presence = presence
         self.transcript: list[dict] = []
-        self._utterance = bytearray()   # accumulates this turn's mic PCM
+        self._utterance = bytearray()   # accumulates this utterance's mic PCM
         self._user_id = ""
+        self._session_id = ""
         self._trust_key: voice_trust.SessionKey | None = None
-        self._verified_this_turn = False
-        # What the buffer MEANS, not which event last fired. True from a
-        # barge-in until a verification consumes the buffer: the audio in it
-        # belongs to an utterance that has started but not reached its boundary,
-        # so a turn ending must neither score it nor drop it.
-        #
-        # This is deliberately keyed on the buffer's meaning rather than on
-        # "the previous turn was interrupted". A per-turn barge-in flag has to
-        # be reset by some later event, and the one event that would do it --
-        # turn_complete -- is exactly the one a barged-into turn may never get
-        # (that is why `interrupted` is handled at all). Such a flag therefore
-        # leaks into the next turn and disarms ITS drain and fallback. Only a
-        # verification clears this one, and a verification is the only thing
-        # that can prove the utterance ended.
-        #
-        # Read the name as the INTENT, not as an invariant the code enforces:
-        # what is actually maintained is "no verification has happened since the
-        # last barge-in". Those differ when a barge-in lands on an already-empty
-        # buffer, which is ordinary -- for one server message ADK yields the
-        # final input_transcription first (gemini_llm_connection.py:283-296) and
-        # the standalone `interrupted` second (:417-426), so the drain happens
-        # and then the flag is stamped on nothing. Harmless, because everything
-        # downstream only asks "may I touch the buffer?" -- but do not build on
-        # the stronger reading.
-        self._buffer_holds_pending_utterance = False
+        # The speech_start ONSET latch. A speech_start frame means "the device
+        # heard speech begin"; the first one of an utterance trims the buffer
+        # to the onset window (see _handle_text_frame). Reset when the
+        # utterance reaches its boundary (its user_text final), so the NEXT
+        # utterance's first speech_start trims again. Repeats within the same
+        # utterance must NOT trim: the audio in front of the window is by then
+        # the user's own speech, already accumulating.
+        self._speech_open = False
+        # SERIALIZES text turns: run one run_async turn at a time, queue the
+        # rest FIFO. Why queue (via the lock) instead of dropping: with STT on
+        # the device a user_text final can legitimately arrive while the
+        # previous turn is still generating -- a barge-in utterance, or a quick
+        # follow-up -- and dropping it would silently lose user speech, while
+        # an error frame would punish ordinary usage. asyncio.Lock wakes
+        # waiters in acquisition order, so replies keep utterance order, and
+        # no new queue machinery is needed.
+        self._turn_lock = asyncio.Lock()
+        # Strong refs to in-flight turn tasks so teardown can cancel them and
+        # the loop cannot garbage-collect them mid-run.
+        self._turn_tasks: set[asyncio.Task] = set()
         # Identifies THIS connection in the shared trust registry. The registry
         # key is per-user, so two concurrent sockets collide on it; this token
         # is what lets voice_trust.clear() compare-and-delete instead of wiping
@@ -110,39 +97,158 @@ class VoiceBridge:
             owner=self._owner,
         ))
 
-    async def _pump_mic_once(self, ws, queue) -> bool:
-        """Read one client message and forward mic audio to the live queue.
+    async def _receive_once(self, ws) -> bool:
+        """Read one client message: buffer mic PCM for speaker-ID, or handle a
+        JSON control frame (speech_start / user_text).
 
         Returns False when the client disconnected (caller should stop looping).
         """
         msg = await ws.receive()
         if msg.get("type") == "websocket.disconnect":
-            queue.close()
             return False
         if data := msg.get("bytes"):
             if self.speaker_service is not None:
-                # NOTE: the per-turn latch is deliberately NOT touched here.
-                # "The buffer is empty" looks like "a new utterance starts", but
-                # _verify_utterance drains that same buffer MID-TURN, and the
-                # mic keeps streaming while the model speaks (web/app.js
-                # forwards every worklet buffer, there is no VAD gate). Re-arming
-                # on the refill therefore let the turn_complete fallback run a
-                # SECOND identify() on post-utterance noise, whose unverified
-                # result fused to LOW and overwrote the turn's correct level.
-                # The latch is owned by the turn lifecycle alone: _pump_events
-                # clears it at turn_complete and at `interrupted`.
                 self._utterance.extend(data)
-                # BOUNDED buffer: the drain only happens at a turn boundary, and
-                # a turn boundary is not guaranteed to arrive (long silence, a
-                # model hiccup, transcription misconfigured). Unbounded, this
-                # grows at AUDIO_IN_RATE*2 = 32 KB/s (~115 MB/h) inside a
-                # process that already carries torch. Keeping only the most
-                # recent window also bounds inference time, and a window that
-                # long is far more audio than ECAPA needs.
+                # BOUNDED buffer: the drain only happens at an utterance
+                # boundary (a user_text final), and that frame is not
+                # guaranteed to arrive (the device VAD can sit through long
+                # silence without ever finalizing). Unbounded, this grows at
+                # AUDIO_IN_RATE*2 = 32 KB/s (~115 MB/h) inside a process that
+                # already carries torch. Keeping only the most recent window
+                # also bounds inference time, and a window that long is far
+                # more audio than ECAPA needs.
                 if len(self._utterance) > config.SPEAKER_UTTERANCE_MAX_BYTES:
                     del self._utterance[:-config.SPEAKER_UTTERANCE_MAX_BYTES]
-            queue.send_realtime(types.Blob(data=data, mime_type=vp.AUDIO_MIME_IN))
+        elif text := msg.get("text"):
+            await self._handle_text_frame(ws, text)
         return True
+
+    async def _handle_text_frame(self, ws, raw: str) -> None:
+        """Dispatch one client JSON frame. Unknown types and malformed JSON
+        are logged and ignored -- a stray frame must never break the audio
+        stream (same failure philosophy as _verify_utterance)."""
+        try:
+            frame = json.loads(raw)
+        except json.JSONDecodeError:
+            logging.warning("voice bridge: non-JSON text frame from %s ignored", self._user_id)
+            return
+        frame_type = frame.get("type") if isinstance(frame, dict) else None
+        if frame_type == "speech_start":
+            # The device's STT heard speech begin (barge-in included). Trim the
+            # buffer to the ONSET window: the mic never stopped, so the buffer
+            # is [audio collected since the last boundary][this utterance so
+            # far]. The device reports speech onset within a few hundred ms, so
+            # the tail is the utterance and everything before it is inter-turn
+            # room noise -- which speaker.embed would average straight into the
+            # embedding.
+            #
+            # ONLY on the FIRST speech_start of an utterance. "Where did the
+            # speech start?" is an open question once; on a repeat the audio in
+            # front of the window is the user's own speech, already
+            # accumulating, and trimming again would score whatever 0.5 s
+            # happened to be at the tail. The latch resets at the utterance
+            # boundary (_on_utterance_final).
+            if not self._speech_open:
+                self._speech_open = True
+                del self._utterance[:-config.SPEAKER_BARGE_IN_ONSET_BYTES]
+        elif frame_type == "user_text":
+            text = frame.get("text") or ""
+            if not frame.get("utterance_final") or not text.strip():
+                # NOT an error: a non-final user_text is a partial STT result
+                # (informational; the v2 contract only acts on finals), and an
+                # empty final is a false VAD trigger with nothing to answer.
+                # evt_error is user-visible alarm UI; routine partials must not
+                # trip it. Log with the DATA that would localize a misfire.
+                logging.info(
+                    "voice bridge: user_text ignored for %s (final=%s, %d chars) -- "
+                    "not an utterance boundary",
+                    self._user_id, frame.get("utterance_final"), len(text),
+                )
+                return
+            await self._on_utterance_final(ws, text)
+        else:
+            logging.info(
+                "voice bridge: unknown client frame type %r from %s ignored",
+                frame_type, self._user_id,
+            )
+
+    async def _on_utterance_final(self, ws, text: str) -> None:
+        """The utterance boundary: verify the buffered PCM, publish trust, then
+        queue the text turn.
+
+        ORDER IS LOAD-BEARING: the trust publish must land BEFORE the turn's
+        run_async starts, because the policy callback reads it during THIS
+        turn's tool calls. Verification therefore runs inline here (in the
+        receive loop), not inside the turn task: a turn queued behind the lock
+        would otherwise run its tool calls under the PREVIOUS utterance's
+        level. The cost -- the receive loop pauses on off-thread inference --
+        is acceptable: PCM frames arriving meanwhile are socket-buffered and
+        belong to the NEXT utterance anyway, and the same pause existed in v1
+        (verification was awaited inline in the event pump)."""
+        self._speech_open = False    # this utterance ended; next speech_start trims anew
+        # NO transcript("user") echo: the v2 client renders its own STT final
+        # locally the instant it produces it, so a server echo would only
+        # duplicate the row. The snapshot copy of the user's words goes into
+        # self.transcript inside the turn task, UNDER the lock: appending here
+        # would interleave a fast follow-up's user row ahead of the previous
+        # turn's jarvis row and misorder the snapshot.
+        if self.speaker_service is not None:
+            # min_bytes=0: the STT final is itself the positive signal that a
+            # whole utterance preceded it, so short commands ("evet") must
+            # still be verified. An empty buffer is a no-op inside.
+            await self._verify_utterance(ws, min_bytes=0)
+        task = asyncio.create_task(self._run_turn(ws, text))
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+
+    async def _run_turn(self, ws, text: str) -> None:
+        """One text turn, serialized by _turn_lock. Never raises: the task is
+        fire-and-forget from the receive loop, so any escape would surface as
+        asyncio's 'exception was never retrieved' and lose the failure."""
+        try:
+            async with self._turn_lock:
+                await self._serve_turn(ws, text)
+        except asyncio.CancelledError:
+            raise   # teardown cancelling an in-flight turn: propagate, don't log as failure
+        except Exception:
+            logging.exception("voice bridge: turn task failed for %s", self._user_id)
+
+    async def _serve_turn(self, ws, text: str) -> None:
+        """Run the ADK text turn and answer: jarvis_text (for the device TTS),
+        the jarvis transcript row (UI history + snapshot), and turn_complete.
+        A runner failure is answered with evt_error + turn_complete so the
+        client's 'thinking' state always terminates; the connection stays up
+        for the next utterance."""
+        self.transcript.append({"role": "user", "text": text})
+        reply = ""
+        content = types.Content(role="user", parts=[types.Part(text=text)])
+        try:
+            # Same final-response collection pattern as main.run_turn: later
+            # finals overwrite earlier ones, and a missing/empty text part
+            # stays "".
+            async for event in self.runner.run_async(
+                user_id=self._user_id, session_id=self._session_id, new_message=content
+            ):
+                if event.is_final_response() and event.content and event.content.parts:
+                    reply = event.content.parts[0].text or ""
+        except Exception:
+            logging.exception("voice bridge: text turn failed for %s", self._user_id)
+            await ws.send_text(json.dumps(vp.evt_error("İstek işlenemedi, tekrar dene")))
+            await ws.send_text(json.dumps(vp.evt_turn_complete()))
+            return
+        if reply:
+            # jarvis_text FIRST (it is what the TTS speaks), then the
+            # transcript row for the UI history; both before turn_complete.
+            await ws.send_text(json.dumps(vp.evt_jarvis_text(reply)))
+            await ws.send_text(json.dumps(vp.evt_transcript("jarvis", reply)))
+            self.transcript.append({"role": "jarvis", "text": reply})
+        else:
+            # An empty final response is a real model outcome (e.g. a turn
+            # that only called tools). Sending an empty jarvis_text would make
+            # the device TTS say nothing after a thinking pause -- log it as
+            # DATA instead and still close the turn.
+            logging.info("voice bridge: empty model reply for %s -- no jarvis_text", self._user_id)
+        await ws.send_text(json.dumps(vp.evt_turn_complete()))
 
     async def _verify_utterance(self, ws, min_bytes: int = 0) -> None:
         """Called at the user utterance boundary: run speaker identity on the
@@ -150,18 +256,16 @@ class VoiceBridge:
         and tell the client. Any failure is logged and treated as unverified --
         it must never break the audio stream.
 
-        `min_bytes` is the caller's floor: the turn_complete fallback passes
-        config.SPEAKER_MIN_UTTERANCE_BYTES because it has no positive signal
-        that the buffer holds a whole utterance, while the finished-transcription
-        path passes none because Gemini has already told us it does. Below the
+        `min_bytes` is the caller's floor. The v2 boundary (a user_text final)
+        always passes 0: the device's STT already told us the buffer holds a
+        whole utterance, and short commands must still be verified. Below the
         floor we publish NOTHING -- the per-connection baseline stands, which
         under locked/ambient is MEDIUM, never HIGH."""
         pcm = bytes(self._utterance)
         if len(pcm) < min_bytes:
             # Declined, so NOT drained: this function must not throw away audio
-            # it refused to score. Today's only floored caller (the turn_complete
-            # fallback) drains right after, but that is the turn boundary's
-            # decision to make, not this one's.
+            # it refused to score. The drain is the boundary's decision to
+            # make, not this one's.
             logging.info(
                 "voice trust: skipped verification for %s, %d bytes buffered is "
                 "below the %d-byte (%.2f s) floor -- fragment, not an utterance",
@@ -170,20 +274,15 @@ class VoiceBridge:
             )
             return
         self._utterance.clear()
-        # The buffer has been consumed, so whatever it held has now reached a
-        # boundary: any pending-utterance claim from a barge-in is settled here
-        # and nowhere else. Tying it to consumption rather than to a later event
-        # is what keeps it from leaking into the next turn.
-        self._buffer_holds_pending_utterance = False
         if not pcm:
             return
         try:
             # OFF THE EVENT LOOP: real ECAPA inference (plus the ~89 MB lazy
             # model load on the very first call) is seconds of blocking CPU. On
-            # the loop it would stall this session's audio, its mic pump, and
-            # every other WS connection this instance serves. speaker._get_model
-            # is lock-guarded precisely because this makes concurrent first
-            # calls possible.
+            # the loop it would stall this session's audio, its receive loop,
+            # and every other WS connection this instance serves.
+            # speaker._get_model is lock-guarded precisely because this makes
+            # concurrent first calls possible.
             outcome = await asyncio.to_thread(
                 self.speaker_service.identify,
                 self._user_id, pcm, self.device_hint, auth_is_kadir=True,
@@ -229,119 +328,13 @@ class VoiceBridge:
             self._user_id, verified, score, self.presence, self.device_hint, level,
         )
 
-    async def _pump_events(self, events, ws) -> None:
-        """Forward ADK live events to the client: audio bytes, turn_complete,
-        and transcript events. Field names verified against installed ADK
-        source (see module docstring)."""
-        async for event in events:
-            if getattr(event, "interrupted", False):
-                # Barge-in. ADK flushes pending transcriptions on `interrupted`
-                # exactly as it does on turn_complete
-                # (models/gemini_llm_connection.py:349-367), so a barged-into
-                # turn can end with a finished input transcription and NO
-                # turn_complete -- the latch would stick and the NEXT turn would
-                # go unverified. This is the turn-lifecycle signal that reports
-                # it; do NOT drain the buffer, what is in it is the barge-in
-                # utterance and it gets verified at its own boundary.
-                #
-                # Reaches us because RunConfig.save_live_blob is left at its
-                # default False (agents/run_config.py:258): with it enabled ADK
-                # returns early from the control-event flush branch
-                # (flows/llm_flows/base_llm_flow.py:1121-1134) and never yields
-                # this event. tests/test_voice.py guards the behaviour if that
-                # config ever changes.
-                #
-                # One ADK path can report a barge-in WITHOUT this flag: with
-                # pending text on an interrupted message it yields
-                # __build_full_text_response(text), which carries no
-                # `interrupted` (gemini_llm_connection.py:415-421). That needs
-                # accumulated text, which an AUDIO-modality session does not
-                # produce; if it ever happens the latch sticks for one turn
-                # (fail-open to the last published level, never to a false LOW).
-                self._verified_this_turn = False
-                # Read BEFORE the write: "was an utterance already pending?" is the
-                # difference between a first barge-in and a repeat, and the machine
-                # already models it -- no new flag needed.
-                already_pending = self._buffer_holds_pending_utterance
-                self._buffer_holds_pending_utterance = True
-                # Keep only the onset. The mic never stopped, so the buffer is
-                # [audio collected while the model was speaking][the barge-in
-                # speech so far]. Gemini reports the interrupt within a few
-                # hundred ms of speech onset, so the tail is the utterance and
-                # everything before it is model-time room noise -- which
-                # speaker.embed would average straight into the embedding.
-                # ONSET, not the fallback floor: they are different questions
-                # and the floor is tunable to 0, which would make this a no-op
-                # (see config.SPEAKER_BARGE_IN_ONSET_BYTES).
-                #
-                # ONLY on the FIRST barge-in of a pending utterance. "Where did
-                # the speech start?" is an open question once; on a repeat the
-                # audio in front of the window is the user's own speech, already
-                # accumulating, and trimming again would score whatever 0.5 s
-                # happened to be at the tail. ADK delivers the flag twice
-                # routinely -- gemini_llm_connection.py:398 copies `interrupted`
-                # onto the combined turn_complete response.
-                if not already_pending:
-                    del self._utterance[:-config.SPEAKER_BARGE_IN_ONSET_BYTES]
-            if getattr(event, "turn_complete", False):
-                await ws.send_text(json.dumps(vp.evt_turn_complete()))
-                # Fallback: the model never sent a finished input transcription
-                # for this turn (ADK itself flushes pending transcriptions on
-                # turn_complete/generation_complete/interrupted precisely
-                # because "the Gemini API or Vertex AI might not send a
-                # transcription finished signal" --
-                # models/gemini_llm_connection.py:349-367). Verify what we
-                # buffered rather than silently skipping the turn.
-                if (self.speaker_service is not None
-                        and not self._buffer_holds_pending_utterance):
-                    if not self._verified_this_turn:
-                        await self._verify_utterance(
-                            ws, min_bytes=config.SPEAKER_MIN_UTTERANCE_BYTES
-                        )
-                    # The turn is over, so whatever is still buffered is
-                    # inter-turn audio: room noise and silence collected while
-                    # the model was speaking (browser AEC suppresses most of the
-                    # assistant's own output, but not the room).
-                    # _verify_utterance is the only other drain, and a VERIFIED
-                    # turn skips it -- leaving that audio as a prefix of the next
-                    # utterance. speaker.embed averages the whole PCM into one
-                    # embedding with no VAD or trimming, so the prefix drags the
-                    # next score toward non-speech frames.
-                    self._utterance.clear()
-                self._verified_this_turn = False
-            for tr_attr, role in (("input_transcription", "user"), ("output_transcription", "jarvis")):
-                tr = getattr(event, tr_attr, None)
-                if tr and getattr(tr, "text", None):
-                    await ws.send_text(json.dumps(vp.evt_transcript(role, tr.text)))
-                    self.transcript.append({"role": role, "text": tr.text})
-                    # ONCE PER TURN, at the utterance boundary -- never on a
-                    # partial fragment. Verified in the installed ADK source
-                    # (models/gemini_llm_connection.py:283-323): incremental
-                    # input transcriptions are yielded with finished=False /
-                    # partial=True, and the whole-utterance one with
-                    # finished=True / partial=False (Gemini 3.x Live, which
-                    # config.resolve_live_model() selects, sends only the
-                    # latter). Embedding a fragment would score arbitrary
-                    # sub-second audio against thresholds calibrated on ~3 s
-                    # clips.
-                    if (role == "user" and self.speaker_service is not None
-                            and getattr(tr, "finished", False)
-                            and not self._verified_this_turn):
-                        self._verified_this_turn = True
-                        await self._verify_utterance(ws)
-            content = getattr(event, "content", None)
-            for part in (getattr(content, "parts", None) or []):
-                blob = getattr(part, "inline_data", None)
-                if blob and blob.data:
-                    await ws.send_bytes(blob.data)
-
     async def run(self, ws: WebSocket, user_id: str) -> None:
         session_id = f"voice-{user_id}"
-        # The session must EXIST before run_live: Runner.auto_create_session
-        # defaults to False (runners.py:142), so the runner's own
-        # _get_or_create_session would raise SessionNotFoundError otherwise.
-        # The returned object is only ADK's copy -- never a channel back to the
-        # runner (voice_trust.py) -- so nothing is kept from it.
+        # The session must EXIST before the first turn: Runner.run_async's
+        # auto_create_session defaults to False (runners.py), so the runner's
+        # own _get_or_create_session would raise SessionNotFoundError
+        # otherwise. The returned object is only ADK's copy -- never a channel
+        # back to the runner (voice_trust.py) -- so nothing is kept from it.
         session = await self.session_service.get_session(
             app_name=APP_NAME, user_id=user_id, session_id=session_id
         )
@@ -349,15 +342,14 @@ class VoiceBridge:
             await self.session_service.create_session(
                 app_name=APP_NAME, user_id=user_id, session_id=session_id
             )
+        self._session_id = session_id
         self._trust_key = voice_trust.key_for(APP_NAME, user_id, session_id)
         if self.speaker_service is not None:
             # Initialize THIS connection's trust from its own context: a new
             # connection must never inherit a previous one's level, and any
-            # tool call that lands before the first utterance is verified (ADK
-            # does not guarantee transcription arrives before tool_call --
-            # models/gemini_llm_connection.py:280-282) must already see the
-            # tightened, no-voice-evidence-yet level rather than the HIGH
-            # default.
+            # tool call that lands before the first utterance is verified must
+            # already see the tightened, no-voice-evidence-yet level rather
+            # than the HIGH default.
             self._publish_trust(
                 trust.assess(
                     trust.TrustContext(
@@ -370,46 +362,26 @@ class VoiceBridge:
                 voice_score=None,
             )
         self._user_id = user_id
-        queue = LiveRequestQueue()
-        run_config = RunConfig(
-            response_modalities=["AUDIO"],
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-        )
-        events = self.runner.run_live(
-            user_id=user_id,
-            session_id=session_id,
-            live_request_queue=queue,
-            run_config=run_config,
-        )
-        pump_out = asyncio.create_task(self._pump_events(events, ws))
         try:
-            try:
-                # LiveRequestQueue.close() (verified in live_request_queue.py) just
-                # enqueues a close sentinel on an unbounded asyncio.Queue -- it does
-                # NOT reject further send_realtime() puts. So a dead _pump_events
-                # task cannot be detected via "send raises"; instead re-check
-                # pump_out.done() every iteration so the mic loop stops pumping
-                # into a session whose event stream already ended/failed.
-                while not pump_out.done() and await self._pump_mic_once(ws, queue):
-                    pass
-            finally:
-                pump_out.cancel()
-                try:
-                    # If pump_out died with its OWN exception (not cancellation),
-                    # awaiting it re-raises that exception here — the nested
-                    # finally guarantees events.aclose() still runs, so the live
-                    # Gemini session is torn down on every exit path.
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await pump_out
-                finally:
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await events.aclose()
+            # The receive loop is the ONLY pump: mic PCM and control frames
+            # arrive on the same socket, and turns run as tasks (see
+            # _on_utterance_final) so a multi-second run_async never blocks
+            # the PCM feeding the NEXT utterance's speaker-ID buffer.
+            while await self._receive_once(ws):
+                pass
         finally:
-            # Outermost teardown. Drop this connection's trust FIRST: the socket
-            # is gone, so its identity evidence is stale, and a leftover entry
-            # would be visible to any later tool call on the same ADK session
-            # id (which is per-USER and outlives the connection).
+            # Outermost teardown. First stop in-flight turns: the socket is
+            # gone, so their answers have nowhere to go, and their transcript
+            # rows would land after the snapshot below. Then drop this
+            # connection's trust: its identity evidence is stale, and a
+            # leftover entry would be visible to any later tool call on the
+            # same ADK session id (which is per-USER and outlives the
+            # connection).
+            for task in list(self._turn_tasks):
+                task.cancel()
+            for task in list(self._turn_tasks):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             if self._trust_key is not None:
                 # Compare-and-delete: a sibling connection for the same user
                 # shares this key, so only OUR own entry may be removed.
@@ -431,10 +403,13 @@ class VoiceBridge:
 
 async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
     """Read + verify the hello frame. Returns (email, device_hint, presence),
-    or None if the handshake did not complete (bad hello -> evt_error +
-    close(4401) already sent; client disconnect -> nothing sent, the peer is
-    gone). device_hint/presence feed the risk-based trust fusion (spec §6,
-    §11) and default via vp.parse_hello when the client omits them."""
+    or None if the handshake did not complete. Failure paths: bad hello or bad
+    token -> evt_error + close(4401); a hello WITHOUT client_caps -> a v1
+    client asking for the retired Gemini Live bridge -> evt_error("Uygulamayı
+    güncelle") + close(4409) (there is no server-side audio path left to serve
+    it); client disconnect -> nothing sent, the peer is gone.
+    device_hint/presence feed the risk-based trust fusion (spec §6, §11) and
+    default via vp.parse_hello when the client omits them."""
     try:
         hello = await ws.receive_text()
     except WebSocketDisconnect:
@@ -442,11 +417,18 @@ async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
     try:
         parsed = vp.parse_hello(hello)
         email = verify_token_email(parsed["token"])
-        return email, parsed["device_hint"], parsed["presence"]
     except (ValueError, PermissionError):
         await ws.send_text(json.dumps(vp.evt_error("Giriş doğrulanamadı")))
         await ws.close(code=4401)
         return None
+    if not parsed["client_caps"]:
+        # v1 client: authenticated fine, but speaks a protocol the server no
+        # longer serves. Distinct close code (4409) so the client can tell
+        # "upgrade required" apart from "auth failed" (4401).
+        await ws.send_text(json.dumps(vp.evt_error("Uygulamayı güncelle")))
+        await ws.close(code=4409)
+        return None
+    return email, parsed["device_hint"], parsed["presence"]
 
 
 @router.websocket("/ws/voice")
@@ -460,8 +442,8 @@ async def ws_voice(ws: WebSocket) -> None:
 
     try:
         # Runner acquisition is inside the try too: a cold-start infra hiccup
-        # (Firestore client init, live-model resolution) must close the socket
-        # gracefully with an error frame, not propagate unhandled through
+        # (Firestore client init, first-init model resolution) must close the
+        # socket gracefully with an error frame, not propagate unhandled through
         # Starlette (which has no websocket exception handler) -- matching how
         # the text path wraps its _init() inside run_turn's caller.
         runner, sessions, memory = main.get_voice_runner_sessions_memory()

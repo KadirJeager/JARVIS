@@ -2,7 +2,6 @@ package com.jarvis.data.voice.protocol
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -31,6 +30,21 @@ class VoiceServerEventTest {
     fun parsesTurnCompleteEvent() {
         val raw = """{"type":"turn_complete"}"""
         assertEquals(VoiceServerEvent.TurnComplete, parseVoiceServerEvent(raw))
+    }
+
+    /** Protocol v2: the server's reply text, voiced by the on-device TTS. */
+    @Test
+    fun parsesJarvisTextEvent() {
+        val raw = """{"type":"jarvis_text","text":"Nasıl yardımcı olabilirim?"}"""
+        assertEquals(
+            VoiceServerEvent.JarvisText("Nasıl yardımcı olabilirim?"),
+            parseVoiceServerEvent(raw),
+        )
+    }
+
+    @Test
+    fun jarvisTextMissingText_isIgnored() {
+        assertNull(parseVoiceServerEvent("""{"type":"jarvis_text"}"""))
     }
 
     @Test
@@ -103,12 +117,10 @@ class VoiceServerEventTest {
     }
 
     @Test
-    fun rateConstants_matchTheFrozenProtocol() {
-        // brain/app/voice_protocol.py: AUDIO_IN_RATE = 16000, AUDIO_OUT_RATE = 24000.
-        // Mic capture goes UP at 16k; model playback comes DOWN at 24k -- swapping these
-        // is the classic chipmunk/slow-motion bug this test exists to catch.
+    fun rateConstant_matchesTheFrozenProtocol() {
+        // brain/app/voice_protocol.py: AUDIO_IN_RATE = 16000. Protocol v2 has no
+        // AUDIO_OUT counterpart -- model audio no longer comes down the socket; the
+        // mic stream remains only for server-side speaker-ID.
         assertEquals(16000, AUDIO_IN_RATE_HZ)
-        assertEquals(24000, AUDIO_OUT_RATE_HZ)
-        assertTrue(AUDIO_IN_RATE_HZ != AUDIO_OUT_RATE_HZ)
     }
 }

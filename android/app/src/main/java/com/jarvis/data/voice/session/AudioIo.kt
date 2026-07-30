@@ -3,6 +3,9 @@ package com.jarvis.data.voice.session
 /**
  * Seam over the real microphone (`AudioRecord` in [AndroidMicSource]) so [VoiceSession]'s
  * frame-routing logic is JVM-testable with a fake. No Android import here on purpose.
+ *
+ * In protocol v2 the mic PCM stream is no longer the conversation channel (STT is
+ * on-device); it keeps flowing to the server for speaker-ID only.
  */
 interface MicSource {
     /** Opens the input device at [sampleRateHz] and starts capturing. */
@@ -15,22 +18,5 @@ interface MicSource {
     suspend fun readFrame(): ByteArray?
 
     /** Stops capture and releases the input device. Safe to call even if never started. */
-    fun stop()
-}
-
-/**
- * Seam over the real speaker (`AudioTrack` in [AndroidSpeakerSink]) so [VoiceSession]'s
- * frame-routing logic is JVM-testable with a fake. No Android import here on purpose.
- */
-interface SpeakerSink {
-    /** Opens the output device at [sampleRateHz] in streaming mode. */
-    fun start(sampleRateHz: Int)
-
-    /** Queues one chunk of PCM16 mono audio for playback. May block briefly if the
-     *  device's internal buffer is full -- callers must not invoke this from the main
-     *  thread (see [com.jarvis.data.voice.session.OkHttpVoiceTransport] callback thread). */
-    fun write(pcm: ByteArray)
-
-    /** Stops playback and releases the output device. Safe to call even if never started. */
     fun stop()
 }
