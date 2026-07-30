@@ -119,8 +119,14 @@ class VoiceCallOverlayTest {
         // The vulnerable strip: bottom of the overlay BESIDE the hang-up button — plain
         // Column background there, no scrollable to consume the hit. Underneath in the
         // real app this is exactly where the chat InputBar sits.
+        // The point is anchored to the end button's bounds, not an absolute fraction:
+        // on Samsung gesture-nav devices the bottom corner-assistant swipe zones swallow
+        // injected touches (SM-X526B eats x=10% below ~85% height), so an absolute point
+        // is device-dependent and silently voids the control arm below.
+        val endBounds = rule.onNodeWithTag("voice_end_button").fetchSemanticsNode().boundsInRoot
+        val tapPoint = androidx.compose.ui.geometry.Offset(endBounds.left - 40f, endBounds.center.y)
         rule.onNodeWithTag("under_root").performTouchInput {
-            click(androidx.compose.ui.geometry.Offset(width * 0.1f, height * 0.9f))
+            click(tapPoint)
         }
         org.junit.Assert.assertFalse("tap fell through the overlay", underneathClicked)
 
@@ -129,7 +135,7 @@ class VoiceCallOverlayTest {
         rule.runOnUiThread { showOverlay.value = false }
         rule.waitForIdle()
         rule.onNodeWithTag("under_root").performTouchInput {
-            click(androidx.compose.ui.geometry.Offset(width * 0.1f, height * 0.9f))
+            click(tapPoint)
         }
         org.junit.Assert.assertTrue("control tap did not reach the button", underneathClicked)
     }
