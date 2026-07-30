@@ -2,6 +2,7 @@
 
 **Belge tarihi:** 23 Temmuz 2026
 **Revizyon:** 23 Temmuz 2026 — SIP/dış telefon hizmetleri çıkarıldı (GSM köprüsü + telesekreter modeli), Tailscale çıkarıldı (GCP-yerli connector deseni), Telegram kanal olmaktan çıkıp Kadir adına kullanılan araca dönüştü (uygulama ana kanal — Gemini benzeri tek yüzey), kademeli ajan fabrikası eklendi, bulut-öncelikli yerleşim ilkesi (İlke 12) eklendi. Nihai amaç "ikame" olarak netlendi (§1): görev döngüsü (§7.6), araç kazanım merdiveni (§8.5) ve Geliştirici ajanı eklendi; fabrika, ikame ufkunun ölçeklenme motoru olarak yeniden gerekçelendirildi.
+**Revizyon:** 30 Temmuz 2026 — "GOOGLE_API_KEY'siz mimari" geçişi: metin chat, AI Studio API anahtarı yerine abonelik-OAuth'lu yerel LLM proxy'si (CLIProxyAPI sidecar) üzerinden çalışıyor; model id'si proxy kataloğundan dinamik çözülüyor (§4.1). Bellek embedding'i yerel modele (multilingual-e5-base) taşındı. Gemini Live API tamamen kaldırıldı; ses, cihaz-üstü STT/TTS + sunucuda metin turu (protokol v2) ile çalışıyor (§4.2, §6.2). Maliyet ve açık kararlar buna göre güncellendi (§13, §15.4). Çözüm değişti, amaç ve ilkeler değişmedi.
 **Durum:** **Nihai hedef mimari ("North Star").** Bu belge adım adım yürünecek bir yol planı değil, varılacak yerin tanımıdır; ayrıntılı uygulama planlaması (görev kırılımı, zamanlama) ayrıca ve sonra yapılacaktır. Belgenin görevi, yol boyunca bu hedeften sapılmamasını sağlamaktır.
 **Sahibi:** Kadir
 
@@ -79,15 +80,15 @@ Bu ilkeler tüm mimari kararların üstündedir; bir çözüm bu ilkelerle çeli
 ## 4. Bileşenler
 
 ### 4.1 Beyin (Orkestratör)
-- **Teknoloji:** Cloud Run + Google ADK, Gemini API (ağır analiz için Pro sınıfı, hızlı işler için Flash sınıfı model). **Model adlandırma kuralı:** tüm yapılandırmalarda `-latest` alias'ları kullanılır (`gemini-flash-latest`, `gemini-pro-latest`); sabit sürüm pinlenmez — pinli sürümler yeni API kullanıcılarına kapatılabiliyor (23 Tem 2026'da `gemini-2.5-flash` ile yaşandı).
+- **Teknoloji:** Cloud Run + Google ADK; model kaynağı, Google AI Ultra aboneliğinin OAuth kotasını OpenAI/Gemini-uyumlu endpoint olarak servis eden yerel LLM proxy'sidir (CLIProxyAPI — her Cloud Run servisinde sidecar konteyner). AI Studio API anahtarı yoktur (30 Tem 2026 revizyonu; önceki karar §15.4). Sınıf kuralı aynı: ağır analiz için Pro sınıfı, hızlı işler için Flash sınıfı. **Model adlandırma kuralı korunuyor:** sabit sürüm pinlenmez, "her zaman en yeni kullanılabilir" model seçilir — uygulanışı değişti: proxy'nin `-latest` alias'ı olmadığından model id'si, runner init'te proxy kataloğundan dinamik çözülür (`app/text_model.py`; en yeni kullanılabilir flash seçilir, çözüm başarısızsa yalnızca o duruma özgü bir fallback sabiti devreye girer). Pin yoktur; katalog güncellendikçe Jarvis otomatik olarak yeni modele geçer.
 - **Yapı:** Tek orkestratör + derleme anında tanımlı statik uzman ajanlar: Sekreter (takvim/mail/hatırlatma), Operatör (tarayıcı otomasyonu), Ev Sorumlusu (HA), Araştırmacı, **Geliştirici** (yazılım projeleri: GitHub, kod durumu/geri bildirim, consult_claude, masaüstü worker), Arşivci (hafıza/özetleme/öğrenme). Her ajanın araç listesi sabittir; liste araç kazanım merdiveniyle (§8.5) onaylı büyür.
 - **Kalıcılık:** State Firestore'da, dosyalar GCS API ile okunur/yazılır. Cloud Run'a disk mount (GCSFuse vb.) yapılmaz — cold start'ı şişirir, tutarlılık sorunu getirir.
-- **API kotası gerçeği:** Google AI Pro (öğrenci) aboneliği **API kotası vermez**; API ayrı dünyadır. Ücretsiz API katmanıyla başlanır, yoğunluk artınca ücretli katmana (Tier 1) geçilir.
+- **API kotası gerçeği (30 Tem 2026 revizyonu):** Google AI aboneliğinin **API kotası vermediği** gerçeği duruyor — ama mimari artık Gemini API'sini hiç kullanmıyor. Metin chat abonelik kotasını proxy üzerinden tüketir; bellek embedding'i yerel modelde (multilingual-e5-base, cihaz/servis içi) çalışır; ses tarafında STT/TTS cihaz üstündedir (§4.2). Geriye API kotası gerektiren bir kritik yol kalmamıştır. **ToS-gri gerilimi notu (İlke 9 bağlamı):** İlke 9 "ucuzluk uğruna ToS-ihlalli çözüm seçilmez" der; abonelik OAuth kotasının proxy üzerinden üçüncü parti istemciyle tüketilmesi Google'ın hizmet şartlarının gri bölgesindedir. Bu, Kadir'in bilinçli kararıdır: hesap/kısıt riski kabul edilmiştir ve geri dönüş sigortası vardır — eski `gemini-api-key` secret'ı bir hafta saklı tutulur, proxy yolu kapanırsa AI Studio key'li mimariye dönüş ortam değişkeniyle mümkündür.
 
 ### 4.2 Ses Geçidi (Kalp)
-- **Teknoloji:** Ayrı bir Cloud Run servisi; Gemini Live API (native ses — canlı oturumda ayrı STT/TTS zinciri gerekmez).
-- **Girişler (adaptörler):** (a) Android uygulama mikrofonu (WebSocket/WebRTC), (b) Wear OS, (c) evdeki GSM köprüsü (ikinci hat — telesekreter ve dış arama sesi, connector üzerinden).
-- **Görevler:** Oturum yönetimi, canlı transkript yayını (uygulamaya), araya girme/devralma köprüsü, kayıt tee'si (§6).
+- **Teknoloji (30 Tem 2026 revizyonu):** Ayrı bir Cloud Run servisi. Konuşma hattı artık **cihaz-üstü STT/TTS** ile çalışır (Android `SpeechRecognizer` + `TextToSpeech`, tr-TR): istemci konuşmayı metne çevirip `user_text` frame'i gönderir, sunucu turu beyindeki metin koşturucusuyla yürütür ve yanıtı `jarvis_text` event'i olarak döner, cihaz bunu kendi TTS'iyle seslendirir. PCM ses sunucuya yalnızca speaker-ID (ECAPA doğrulaması) ve kayıt tee'si (§6.3) için akar. Gemini Live API **tamamen kaldırılmıştır**; önceki "native ses — canlı oturumda ayrı STT/TTS zinciri gerekmez" gerekçesi artık geçersizdir, dürüst sebebi şudur: Live API abonelik kotasında sunulmuyor ve API faturası istenmiyor — bu değişmez bir dış sınırdır, tercih değil. Eski (v1) istemciler hello'da `client_caps` gönderemediği için 4409 "Uygulamayı güncelle" ile reddedilir.
+- **Girişler (adaptörler):** (a) Android uygulama mikrofonu (WebSocket), (b) Wear OS, (c) evdeki GSM köprüsü (ikinci hat — telesekreter ve dış arama sesi, connector üzerinden). Not: (a) ve (b) akıllı istemcidir (cihaz-üstü STT/TTS vardır); (c)'nin arkasında akıllı istemci yoktur — o kanalın sunucu/Pi-taraflı bir STT+TTS hattına ihtiyacı olacaktır (§15, açık karar).
+- **Görevler:** Oturum yönetimi, canlı transkript yayını (uygulamaya), araya girme/devralma köprüsü, kayıt tee'si (§6), speaker-ID doğrulaması.
 
 ### 4.3 Politika Katmanı (Eylem Yetki Matrisi)
 - Tüm uzman ajanların ve misafir AI'ların tüm eylemleri tek policy katmanından geçer; her karar Firestore audit log'una yazılır. Detay §9.
@@ -155,7 +156,7 @@ Bu ilkeler tüm mimari kararların üstündedir; bir çözüm bu ilkelerle çeli
 ### 6.2 Gelen Arama Akışı (Screening + Devralma)
 1. Arama Kadir'in GSM'ine gelir; açmazsa/reddederse yönlendirme evdeki ikinci hatta düşer; modem açar, ses connector üzerinden buluta köprülenir.
 2. Ses geçidi oturum açar; Jarvis anons yapar: *"Merhaba, ben Kadir'in asistanı Jarvis; görüşme kayıt altındadır. Nasıl yardımcı olabilirim?"*
-3. Gemini Live konuşmayı yürütür; canlı transkript eş zamanlı olarak uygulamaya akar.
+3. Konuşmayı ses geçidinin konuşma hattı yürütür (30 Tem 2026 revizyonuyla Gemini Live değil — §4.2'deki STT/TTS + metin turu hattı); canlı transkript eş zamanlı olarak uygulamaya akar.
 4. Kadir isterse uygulamadaki **"Devral"** butonuna basar → aynı ses köprüsüne katılır → Jarvis susar, gerekirse arka planda not almaya devam eder.
 5. Arama biter → kayıt/özet pipeline'ı çalışır (§6.3).
 
@@ -292,7 +293,7 @@ Bu tablo bir takvim veya görev planı değildir (belgenin statüsü gereği —
 | Kalem | Tür | Not |
 |---|---|---|
 | Cloud Run, Firestore, Pub/Sub, Scheduler, GCS | Değişken, ~0 başlangıç | Ücretsiz katman içinde başlar; scale-to-zero |
-| Gemini API | Değişken | Ücretsiz katman → yoğunlukta ücretli Tier; Live API kullanımı ayrıca izlenir. AI Pro aboneliği API'yi **kapsamaz** |
+| LLM (Gemini modelleri, CLIProxyAPI sidecar üzerinden) | Aboneliğe dahil | Ekstra API faturası yok: metin chat Google AI Ultra aboneliğinin OAuth kotasını yerel proxy üzerinden tüketir; embedding yerel modelde bedava; STT/TTS cihaz üstünde. Tek maliyet, sidecar konteynerin Cloud Run kaynak tüketimi (CPU/bellek — ana konteyner yanında küçük) |
 | İkinci SIM tarifesi | Sabit (küçük, aylık) | Jarvis'in hattı — konuşma/SMS paketi |
 | Yönlendirme + arama dakikaları | Değişken | Yönlendirme bacağı Kadir'in tarifesinden; kullanım kadar |
 | Ses destekli GSM modülü / GoIP | Tek seferlik donanım | Telesekreter + OTP köprüsü + dış arama kimliği |
@@ -329,17 +330,18 @@ Prensip: boşta ~0; sabit giderler yalnızca telefon tarafında ve bilinçli. Fi
 1. **Ses destekli GSM modülü mü (EC25 sınıfı), GoIP mi?** İkisi de telesekreter sesini taşıyabilir; modül ucuz ve tek parça, GoIP ses işini donanım DSP'siyle denenmiş biçimde çözer. Aşama 3 pilotunda netleşir.
 2. **WhatsApp stratejisi:** Resmi Cloud API (ücretli) vs ayrı numarayla gayri resmi (riskli) vs hiç. Aşama 5 kararı.
 3. **A2A zamanlaması:** MCP yeterli olduğu sürece bekler.
-4. **AI Studio API vs Vertex AI — KARAR VERİLDİ (23 Tem 2026):** AI Studio ile başlanır (ücretsiz katman; belgedeki kademeli maliyet stratejisine uygun). Vertex'e geçiş ADK'da ortam değişkeniyle mümkün; yoğunluk artınca yeniden değerlendirilir.
+4. **AI Studio API vs Vertex AI — KARAR VERİLDİ (23 Tem 2026), REVİZE EDİLDİ (30 Tem 2026):** AI Studio ile başlanır (ücretsiz katman; belgedeki kademeli maliyet stratejisine uygun). Vertex'e geçiş ADK'da ortam değişkeniyle mümkün; yoğunluk artınca yeniden değerlendirilir. **30 Tem 2026 revizyonu:** API anahtarı tamamen kaldırıldı — model kaynağı abonelik-OAuth'lu LLM proxy'si (CLIProxyAPI sidecar) + yerel modeller (embedding: multilingual-e5-base; STT/TTS: cihaz üstü) oldu; ne AI Studio ne Vertex kritik yolda. Geri dönüş sigortası: `gemini-api-key` secret'ı bir hafta saklı tutulur (§4.1'deki ToS-gri notuyla birlikte okunmalı).
 5. **Yerel LLM deneyleri:** Masaüstünde hobi/deney olarak serbest; kritik yola girmez.
 6. **Fabrika Kademe 3 kapısı:** Kademe 2'nin kaç haftalık temiz retro'su yeterli sayılır (mevcut öneri: 8)? Kademe 2 canlıya çıkınca netleşir (§8.5).
 7. **Telegram mekanizması:** Resmi Business bot bağlantısı (Premium, ToS-temiz, sınırlı yetenek) vs MTProto kullanıcı oturumu (tam yetenek, hesap riski). Aşama 5 kararı; yetenek sınırları kurulum öncesi güncel dokümandan doğrulanacak.
-8. **Aşama 1 istemcisi — KARAR VERİLDİ (23 Tem 2026):** Web/PWA. Nihai uygulamanın API sözleşmesini şimdiden kullanır; Android kabuğu Katman 2'de gelir.
+8. **Aşama 1 istemcisi — KARAR VERİLDİ (23 Tem 2026):** Web/PWA. Nihai uygulamanın API sözleşmesini şimdiden kullanır; Android kabuğu Katman 2'de gelir. *(30 Tem 2026 notu: PWA'nın ses yolu v1 protokolde kaldığı için ses geçidinden 4409 "Uygulamayı güncelle" alır; Aşama 1'deki geçici kabuk rolünü tamamlamıştır ve artık desteklenmiyor — ana kanal Android uygulamasıdır.)*
+9. **GSM köprüsü kanalında STT/TTS (Aşama 3 kararı):** Protokol v2'de STT/TTS akıllı istemciye (Android cihaz) taşındı; GSM köprüsünün arkasında ise akıllı istemci yoktur — modem/GoIP'ten gelen ham PCM'i konuşma hattına bağlamak için sunucu-taraflı veya Pi-taraflı bir STT+TTS zinciri (ör. Pi'de veya Cloud Run'da çalışan açık STT/TTS modelleri) gerekecektir. Gemini Live bu işi eskiden tek başına yapıyordu; artık yapmadığı için bu boşluk bilinçli olarak Aşama 3'e ertelenmiştir — telefon aşamasına gelindiğinde ayrıca karar verilecek.
 
 ---
 
 ## 16. Sözlük
 
-- **Ses Geçidi:** Tüm canlı ses trafiğinin girdiği tek Cloud Run servisi (Gemini Live oturum yöneticisi).
+- **Ses Geçidi:** Tüm canlı ses trafiğinin girdiği tek Cloud Run servisi. Konuşma hattı cihaz-üstü STT/TTS + sunucuda metin turuyla çalışır (protokol v2; 30 Tem 2026'ya kadar Gemini Live oturum yöneticisiydi); PCM yalnızca speaker-ID ve kayıt tee'si için akar.
 - **Misafir Kapısı:** Dış AI'ların Jarvis'e eriştiği kimlik doğrulamalı MCP endpoint'i.
 - **OTP Köprüsü:** Evdeki ikinci SIM'in SMS'lerini Jarvis'e akıtan donanım+yazılım köprüsü.
 - **Politika Katmanı / Yetki Matrisi:** Yeşil-sarı-kırmızı eylem izin sistemi (§9).

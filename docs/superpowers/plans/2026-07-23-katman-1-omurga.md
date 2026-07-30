@@ -1,5 +1,7 @@
 # Katman 1 — Omurga Implementation Plan
 
+> **SUPERSEDED (30 Tem 2026):** Bu plandaki AI Studio API anahtarı kurulumu (Step 3: `aistudio.google.com/apikey` → `gemini-api-key` secret'ı → `GOOGLE_API_KEY`) ve `gemini-embedding-001` embedding yolu artık **geçerli değildir**. Metin chat abonelik-OAuth'lu CLIProxyAPI sidecar'ı üzerinden çalışır, embedding yerel `intfloat/multilingual-e5-base` modelindedir. Güncel operatör akışı: `brain/README.md` → "LLM proxy + yerel embedding + ses protokolü v2". Bu belge tarihsel kayıt olarak saklanıyor; diğer adımları (Firestore, politika katmanı, PWA iskeleti) o dönemin doğru kaydıdır.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cloud Run üzerinde ADK tabanlı Jarvis beyni: politika katmanı + 3 kademeli hafıza iskeleti + Firestore audit log + Google girişli Web/PWA sohbet istemcisi. "Bitti" ölçütü: Kadir kendi uygulamasından yazışıyor, Jarvis onu hatırlıyor, her eylem loglanıyor.

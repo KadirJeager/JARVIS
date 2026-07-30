@@ -23,6 +23,83 @@ before deploying a backend revision that depends on it — a missing or
 still-building index makes `/api/history` fail with a Firestore
 `FAILED_PRECONDITION` (surfaced to clients as the generic 502 infra error).
 
+## LLM proxy + yerel embedding + ses protokolü v2 (30 Temmuz 2026)
+
+"GOOGLE_API_KEY'siz mimari": beyin artık AI Studio API anahtarıyla Gemini
+API'sine değil, abonelik-OAuth'lu yerel bir LLM proxy'sine (CLIProxyAPI)
+konuşuyor; embedding yerel bir modelde çalışıyor; ses tarafında STT/TTS cihaz
+üstüne taşındı.
+
+- **Metin chat — CLIProxyAPI sidecar.** `JARVIS_LLM_BASE_URL` set ise ADK
+  `Gemini` instance'ı proxy'nin base_url'ine bağlanır
+  (`app/main.py:_build_text_model`; prod'da `http://localhost:8317`, sidecar
+  ile aynı instance). Model id'si proxy kataloğundan dinamik çözülür
+  (`app/text_model.py` — "her zaman en yeni kullanılabilir flash" kuralı; pin
+  yok, yalnızca katalog çözümü başarısız olursa devreye giren bir fallback
+  sabiti var: `gemini-3.6-flash-high`). `JARVIS_TEXT_MODEL` set ise bu bir
+  mutlak pin'dir (test/acil durum; otomatik çözümü tamamen geçersiz kılar).
+  Auth için kod yok: genai SDK `GOOGLE_API_KEY`'i `x-goog-api-key` header'ı
+  olarak gönderir — prod'da bu secret'ın **içeriği artık proxy'nin kendi
+  api-key'idir** (Google'ın değil).
+- **Bellek embedding'i — yerel e5.** `gemini-embedding-001` yerine
+  `intfloat/multilingual-e5-base` (sentence-transformers, 768-dim, lazy
+  singleton; `app/memory.py`). E5 prefix kuralı: saklanan metin
+  `embed_passage`, arama metni `embed_query` ile gömülür — ikisini takas
+  etmek sessiz yanlış sonuç demektir. Model imaja build-time'da
+  `/opt/hf-cache` altında baked edilir (Dockerfile; runtime
+  `HF_HOME=/opt/hf-cache`). Eski `gemini-embedding-001` vektörleriyle
+  uyumsuzdur — migrasyon: `python scripts/reembed_e5.py`.
+- **Ses — protokol v2, Gemini Live kaldırıldı.** `app/live_model.py` silindi;
+  sunucu artık hiç Gemini Live oturumu açmıyor. Android istemci cihaz-üstü
+  `SpeechRecognizer` (tr-TR) ile konuşmayı metne çevirip `user_text` frame'i
+  gönderir; `speech_start` frame'i utterance onset'ini işaretler. Sunucu turu
+  metin runner'ıyla koşturup `jarvis_text` event'i döner, cihaz bunu kendi
+  `TextToSpeech`'iyle seslendirir. PCM yalnızca speaker-ID (ECAPA) için
+  sunucuya akar. WS hello'da `client_caps` zorunludur; `client_caps`
+  gönderemeyen eski (v1) istemciye `evt_error("Uygulamayı güncelle")` +
+  close **4409** döner (bkz. `app/voice.py`, `app/voice_protocol.py`). PWA
+  (`web/`) v1'de kaldığı için ses yolu artık desteklenmiyor.
+
+### Operatör notları (secrets + deploy)
+
+- **Secret'lar (Secret Manager):**
+  - `cliproxy-oauth-antigravity` — CLIProxyAPI'nin Google OAuth token dosyası
+    (`antigravity-<hesap>.json`); sidecar'a read-only volume olarak mount
+    edilir, entrypoint her start'ta writable auth-dir'e kopyalar
+    (`proxy/entrypoint.sh`).
+  - `cliproxy-api-key` — proxy'nin kendi api-key'i; hem sidecar'a
+    (`CLIPROXY_API_KEY`) hem brain konteynerine (`GOOGLE_API_KEY` olarak)
+    verilir.
+  - `gemini-api-key` — eski AI Studio anahtarı; geri dönüş sigortası olarak
+    bir hafta saklı tutulur, sonra silinebilir.
+- **Sidecar deploy akışı:** proxy imajı `brain/proxy/Dockerfile`'dan
+  (`gcr.io/your-gcp-project/jarvis-llm-proxy:v7.2.111`); servis tanımları
+  `brain/deploy/jarvis-brain.yaml` ve `brain/deploy/jarvis-voice.yaml`
+  (multi-container: `brain` + `llm-proxy`, `containerDependencies` ile start
+  sırası). Deploy artık **`gcloud run deploy --source` ile değil**,
+  declarative YAML ile yapılır:
+  ```bash
+  gcloud run services replace brain/deploy/jarvis-brain.yaml --region europe-west1
+  gcloud run services replace brain/deploy/jarvis-voice.yaml --region europe-west1
+  ```
+- **OAuth token re-seed (token yenilendiğinde / hesap değişiminde):** yerelde
+  CLIProxyAPI login'i `~/.cli-proxy-api/antigravity-<hesap>.json` üretir;
+  bunu secret'a yeni versiyon olarak ekleyin:
+  ```bash
+  gcloud secrets versions add cliproxy-oauth-antigravity \
+      --data-file="$HOME/.cli-proxy-api/antigravity-<hesap>.json" \
+      --project your-gcp-project
+  ```
+  Yeni versiyonun alınması için servislerin yeni revision'a geçmesi gerekir
+  (secret volume'ları revision başına çözülür) — `services replace` ile
+  aynı YAML'ı yeniden uygulamak yeterli.
+- **Superseded — eski AI Studio kurulumu:** `docs/superpowers/plans/`
+  altındaki Katman 1/2a plan belgelerindeki "AI Studio API anahtarı üret →
+  `gemini-api-key` secret'ına yaz → `GOOGLE_API_KEY` olarak servise bağla"
+  talimatları artık **geçerli değildir** (ilgili plan belgesinin başına
+  superseded notu eklendi). Tarihsel kayıt olarak duruyorlar; yeni kurulum
+  bu bölümdeki akıştır.
+
 ## Speaker identity (Katman 2b Dilim 3a — Kadir ses-kimliği)
 
 Voice-mode utterances are verified against Kadir's enrolled voiceprint: an
@@ -187,6 +264,14 @@ server-verifiable presence/attestation signal, which this slice does not have.
 
 ### Deploy notes (for when the owner approves — not executed by this repo)
 
+- **Multi-container reality (30 Tem 2026):** both services are now
+  two-container deployments (`brain` + `llm-proxy` sidecar) defined
+  declaratively in `brain/deploy/jarvis-brain.yaml` and
+  `brain/deploy/jarvis-voice.yaml`. Deploy is **`gcloud run services replace
+  brain/deploy/<servis>.yaml --region europe-west1`** — the older
+  `gcloud run deploy --source ...` flow is gone (it cannot express
+  sidecars/secret volumes). See the "LLM proxy + yerel embedding + ses
+  protokolü v2" section above for secrets and the token re-seed procedure.
 - **The ECAPA model is baked into the image at build time**
   (`SPEAKER_MODEL_DIR=/opt/spkrec-ecapa`, set in the Dockerfile), not
   downloaded on first request. An earlier draft of this section recommended
@@ -245,14 +330,21 @@ server-verifiable presence/attestation signal, which this slice does not have.
   `uid=1000(appuser)` non-root; **torch 2.13.0+cpu** (the CPU wheel resolved,
   not the multi-GB CUDA one); `/opt/spkrec-ecapa` holds **regular files, zero
   symlinks**, all owned by `appuser` (`embedding_model.ckpt` 83.3 MB,
-  `classifier.ckpt` 5.5 MB, plus three small files); both `/opt/hf-cache` and
-  `/root/.cache/huggingface` are absent, so the weights ship once; runtime
-  `HF_HOME=/tmp/hf-cache`; and `speaker.embed()` returns a 192-dim vector with
+  `classifier.ckpt` 5.5 MB, plus three small files); at that inspection both
+  `/opt/hf-cache` and `/root/.cache/huggingface` were absent, so the weights
+  shipped once; and `speaker.embed()` returns a 192-dim vector with
   `HF_HUB_OFFLINE=1` — i.e. the model genuinely loads from the image with no
-  network. Measured weight: model **85 MB**, torch **750 MB**, which is where
-  the "~850 MB" figure above comes from. **Still a reasoned estimate, not a
-  measurement: the `2Gi` memory floor** — that needs RSS from a running
-  revision.
+  network. **Update (30 Tem 2026, e5 bake):** runtime `HF_HOME` is now
+  `/opt/hf-cache`, not `/tmp/hf-cache` — a later Dockerfile layer bakes the
+  multilingual-e5-base memory embedder (~1.1 GB) into that path and the
+  runtime `ENV HF_HOME` points there (ECAPA is untouched: it still loads from
+  `SPEAKER_MODEL_DIR=/opt/spkrec-ecapa`). Measured weight: model **85 MB**,
+  torch **750 MB**, which is where the "~850 MB" figure above comes from.
+  **Still a reasoned estimate, not a measurement: the `2Gi` memory floor** —
+  that needs RSS from a running revision. (Note: the deployed
+  `brain/deploy/*.yaml` now sets 3Gi, because the e5 embedder adds ~1.1 GB
+  weights + encode buffers in the same process — see the service YAML
+  comment.)
 - Build context: `brain/.gcloudignore` exists because `gcloud builds submit`
   does not read `.dockerignore` and does not find the repo-root `.gitignore`
   when the source directory is `brain/`. Without it the upload was 2.5 GiB

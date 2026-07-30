@@ -1,0 +1,88 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: jarvis-brain
+  namespace: '000000000000'
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '20'
+        run.googleapis.com/startup-cpu-boost: 'true'
+        run.googleapis.com/container-dependencies: '{"brain":["llm-proxy"]}'
+      labels:
+        client.knative.dev/nonce: 'fix1785453289'
+        run.googleapis.com/startupProbeType: Default
+    spec:
+      containerConcurrency: 80
+      serviceAccountName: 000000000000-compute@developer.gserviceaccount.com
+      timeoutSeconds: 300
+      containers:
+      - name: brain
+        image: gcr.io/your-gcp-project/jarvis-brain:noapi-4e05ce4
+        ports:
+        - containerPort: 8080
+          name: http1
+        env:
+        - name: JARVIS_OAUTH_CLIENT_ID
+          value: 000000000000-tmu4im1mba53dmqj1gbhgba55v3i6hmb.apps.googleusercontent.com
+        - name: JARVIS_LLM_BASE_URL
+          value: http://localhost:8317
+        # genai SDK sends this as x-goog-api-key; the sidecar proxy (not
+        # Google) is the verifier now. Content = the proxy's own api-key.
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: cliproxy-api-key
+        - name: JARVIS_SCHEDULER_SA
+          value: jarvis-scheduler@your-gcp-project.iam.gserviceaccount.com
+        - name: JARVIS_SCHEDULER_AUD
+          value: https://jarvis-brain-xxxxxxxxxx-ew.a.run.app
+        resources:
+          limits:
+            cpu: 1000m
+            # 2Gi -> 3Gi: ECAPA peak was measured ~590 MB; the e5 memory
+            # embedder adds ~1.1 GB weights + encode buffers in the same
+            # process (torch is shared). 3Gi keeps ~40% headroom.
+            memory: 3Gi
+        startupProbe:
+          failureThreshold: 1
+          periodSeconds: 240
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 240
+      - name: llm-proxy
+        image: gcr.io/your-gcp-project/jarvis-llm-proxy:v7.2.111
+        env:
+        - name: CLIPROXY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: cliproxy-api-key
+        volumeMounts:
+        - name: oauth-auth
+          mountPath: /secrets/auth
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        startupProbe:
+          failureThreshold: 12
+          periodSeconds: 5
+          tcpSocket:
+            port: 8317
+          timeoutSeconds: 3
+      volumes:
+      - name: oauth-auth
+        secret:
+          secretName: cliproxy-oauth-antigravity
+          items:
+          - key: latest
+            path: antigravity.json
+  traffic:
+  - percent: 100
+    revisionName: jarvis-brain-00016-pur
+  - tag: noapi
+    latestRevision: true
