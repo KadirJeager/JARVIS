@@ -393,10 +393,13 @@ def production_init(monkeypatch):
     """Runs main._init()/main._init_voice() FOR REAL -- nothing about the code
     under test is stubbed. Only their external dependencies are faked: Firestore
     (ONE shared FakeDB, as in production both clients point at the same
-    project), the genai embedding client, and live-model resolution (a network
+    project), the e5 embedder factory (a model load at first embed), and
+    live-model resolution (a network
     call at voice-runner init). The module's process-lifetime singletons are
     reset through monkeypatch so the init really runs cold and is restored for
     every other test."""
+    import types as _types
+
     import app.agent as agent_mod
     import app.main as main_mod
     import app.memory as memory_mod
@@ -404,7 +407,13 @@ def production_init(monkeypatch):
 
     db = FakeDB()
     monkeypatch.setattr(firestore, "Client", lambda *a, **k: db)
-    monkeypatch.setattr(memory_mod, "make_embed_fn", lambda: (lambda text: [0.0]))
+    # Fake the e5 factory, not the model: _init() wires
+    # embed_fn=embedders.embed_passage / embed_query_fn=embedders.embed_query,
+    # so the double must expose both methods (see app/memory.py E5Embedders).
+    fake_embedders = _types.SimpleNamespace(
+        embed_passage=lambda text: [0.0], embed_query=lambda text: [0.0]
+    )
+    monkeypatch.setattr(memory_mod, "make_e5_embedders", lambda: fake_embedders)
     monkeypatch.setattr(main_mod.config, "resolve_live_model", lambda: "fake-live-model")
     # The text runner's model now comes from main._build_text_model() (proxy
     # support): pin the proxy OFF and text resolution deterministic, exactly

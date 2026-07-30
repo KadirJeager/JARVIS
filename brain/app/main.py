@@ -64,10 +64,16 @@ def _init() -> None:
     from google.cloud import firestore
 
     from .agent import build_agent
-    from .memory import FirestoreAudit, Memory, make_embed_fn
+    from .memory import FirestoreAudit, Memory, make_e5_embedders
 
     db = firestore.Client()
-    _memory = Memory(db, embed_fn=make_embed_fn())
+    # e5 is asymmetric (passage vs query prefixes), so Memory gets the two
+    # roles as separate callables -- see E5Embedders / Memory.__init__.
+    # Cheap here: the model itself loads lazily on the first embed.
+    embedders = make_e5_embedders()
+    _memory = Memory(
+        db, embed_fn=embedders.embed_passage, embed_query_fn=embedders.embed_query
+    )
     _messages = messages.MessageStore(db)
     _conversations = conversations.ConversationStore(db)
     _runner = Runner(

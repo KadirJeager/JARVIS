@@ -9,6 +9,14 @@ dependencies = [
     "google-cloud-firestore>=2.16",
     "google-auth>=2.30",
     "google-genai>=1.0",
+    # Memory embeddings are a CORE feature (app/memory.py), so
+    # sentence-transformers lives here, not in the speaker extra. It needs
+    # torch, but torch deliberately stays in the speaker extra: the
+    # Dockerfile installs torch FIRST from the CPU wheel index (PyPI's
+    # default wheel is multi-GB CUDA), so by the time ".[speaker]" resolves
+    # this dep the torch pin is already satisfied. Installing the base
+    # package WITHOUT that CPU-torch-first step would pull the CUDA wheel.
+    "sentence-transformers>=3.0",
 ]
 
 [project.optional-dependencies]

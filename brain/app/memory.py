@@ -1,5 +1,6 @@
 """Tiered memory skeleton (North Star §4.5, §8): profile, facts, lessons, session snapshots."""
 import math
+import threading
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -25,35 +26,87 @@ def _merge_ranked(hits: list[tuple[float, dict]], top_k: int) -> list[dict]:
     return [hit for _, hit in hits[:top_k]]
 
 
-def make_embed_fn() -> Callable[[str], list[float]]:
-    """Real embedding factory: google-genai `gemini-embedding-001`, fixed to 768 dims
-    (matches the Firestore vector index; see task-10-brief.md Step 4 note)."""
-    from google import genai
+_E5_MODEL_NAME = "intfloat/multilingual-e5-base"
 
-    # http_options={"timeout": ...} verified against installed google-genai
-    # 2.14.0 source (google/genai/types.py HttpOptions): `timeout` is an
-    # Optional[int] in milliseconds, and genai.Client() converts a dict via
-    # HttpOptions(**http_options) -- so 30_000 == 30s.
-    client = genai.Client(http_options={"timeout": 30_000})  # GOOGLE_API_KEY env'den
+_e5_model = None
+_e5_model_lock = threading.Lock()
 
-    def embed(text: str) -> list[float]:
-        res = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text,
-            config={"output_dimensionality": 768},
-        )
-        return list(res.embeddings[0].values)
 
-    return embed
+def _get_e5_model():
+    """Lazy singleton SentenceTransformer. Loaded once per process, on the
+    first embed call -- NOT at module import and NOT at factory time: the
+    unit-test venv has no torch at all (so a top-level `import
+    sentence_transformers` would break every test that imports this module),
+    and main._init() must stay fast (the ~1.1 GB weight load belongs to the
+    first real embed, exactly like speaker._get_model()'s ECAPA pattern).
+
+    Double-checked locking, same reasoning as speaker._get_model: memory
+    writes and searches run off the event loop, so two cold callers really
+    can race here; unguarded, both would build the model. The unlocked fast
+    path keeps the warm case free of lock traffic."""
+    global _e5_model
+    if _e5_model is not None:
+        return _e5_model
+    with _e5_model_lock:
+        if _e5_model is None:
+            from sentence_transformers import SentenceTransformer
+
+            _e5_model = SentenceTransformer(_E5_MODEL_NAME)
+    return _e5_model
+
+
+class E5Embedders:
+    """The two e5 embedding entry points as SEPARATE named methods, because
+    the e5 family is asymmetric by contract: documents must be encoded with
+    a "passage: " prefix and queries with a "query: " prefix (intfloat model
+    card). One name, one meaning: `embed_passage` is ONLY for text being
+    stored, `embed_query` ONLY for search text -- swapping them silently
+    degrades recall without raising anything.
+
+    normalize_embeddings=True makes every vector unit-norm, so Firestore's
+    COSINE index and the fake-DB cosine path both see properly scaled input.
+    multilingual-e5-base is natively 768-dim -- the same dimensionality the
+    existing Firestore vector index was built for, so no index change."""
+
+    def embed_passage(self, text: str) -> list[float]:
+        vec = _get_e5_model().encode("passage: " + text, normalize_embeddings=True)
+        return vec.tolist()
+
+    def embed_query(self, text: str) -> list[float]:
+        vec = _get_e5_model().encode("query: " + text, normalize_embeddings=True)
+        return vec.tolist()
+
+
+def make_e5_embedders() -> E5Embedders:
+    """Real embedding factory: local `intfloat/multilingual-e5-base` via
+    sentence-transformers, replacing the old google-genai
+    `gemini-embedding-001` path (same 768 dims as the Firestore vector
+    index). Cheap to call -- the heavy model load is deferred to the first
+    embed (see _get_e5_model), so main._init() can wire this eagerly."""
+    return E5Embedders()
 
 
 class Memory:
     """Return strings like "kaydedildi" are intentionally Turkish: they are tool
     outputs the agent relays to the (Turkish-speaking) user, not internal API text."""
 
-    def __init__(self, db, embed_fn: Callable[[str], list[float]] | None = None):
+    def __init__(
+        self,
+        db,
+        embed_fn: Callable[[str], list[float]] | None = None,
+        embed_query_fn: Callable[[str], list[float]] | None = None,
+    ):
+        """Two embed callables, not one, because the e5 model family needs
+        DIFFERENT prefixes per role: text being stored is a "passage: ...",
+        text being searched is a "query: ..." (see E5Embedders). One name,
+        one meaning: `embed_fn` embeds passages (write path,
+        _attach_embedding), `embed_query_fn` embeds queries (read path,
+        _search_semantic). `embed_query_fn=None` falls back to `embed_fn` --
+        the pre-e5 single-function contract, which every existing test and
+        the symmetric fake embedders still rely on."""
         self.db = db
         self.embed_fn = embed_fn
+        self.embed_query_fn = embed_query_fn if embed_query_fn is not None else embed_fn
 
     # -- Tier 3 (long-term): user profile (§8.1)
     def get_profile(self) -> dict:
@@ -116,7 +169,7 @@ class Memory:
         return hits[:top_k]
 
     def _search_semantic(self, query: str, top_k: int) -> list[dict]:
-        query_vector = self.embed_fn(query)
+        query_vector = self.embed_query_fn(query)
         # Uniform-backend assumption: "facts" and "lessons" always come from the
         # same db (both real Firestore or both the fake), so probing one
         # collection is enough to decide the path for both.

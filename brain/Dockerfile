@@ -47,14 +47,27 @@ RUN python -c "from speechbrain.inference.speaker import EncoderClassifier; Enco
     && mv "${SPEAKER_MODEL_DIR}.real" "${SPEAKER_MODEL_DIR}" \
     && chown -R appuser:appuser "${SPEAKER_MODEL_DIR}"
 
-# Re-point HF_HOME for RUNTIME. The build-time value above is a root-owned path
-# that the RUN above deleted, and ENV persists into the running container: if
-# anything ever did reach for the hub at runtime (a missing savedir file, a
-# speechbrain upgrade), `appuser` would hit EACCES on /opt rather than degrade.
-# /tmp is the one path Cloud Run guarantees writable. Nothing is expected to
-# use this -- the model is baked and SPEAKER_MODEL_DIR points at it -- so this
-# is purely about failing softly instead of on a permissions error.
-ENV HF_HOME=/tmp/hf-cache
+# Bake the multilingual-e5-base memory embedding model (~1.1 GB) into the
+# image at BUILD time, for the same reasons the ECAPA layer above exists:
+# a runtime download would charge the weights against tmpfs RAM on every
+# cold start, add unbounded latency to the first memory write/search, and
+# fail outright on an HF rate-limit. Unlike ECAPA, sentence-transformers
+# reads the hub cache DIRECTLY (no savedir copy step), so the cache itself
+# is the baked artifact: this RUN downloads into HF_HOME=/opt/hf-cache
+# (still set from above, after the ECAPA layer emptied it) and the runtime
+# ENV below points HF_HOME at the same path. Separate layer so edits here
+# never invalidate the ECAPA layer's cache.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-base')" \
+    && chown -R appuser:appuser /opt/hf-cache
+
+# Re-point HF_HOME for RUNTIME -- at the e5 cache baked above, NOT the
+# build-time-deleted /tmp fallback the ECAPA-only image used. speechbrain
+# never touches HF at runtime (SPEAKER_MODEL_DIR is self-contained), and
+# sentence-transformers finds the complete e5 snapshot in the hub cache,
+# so nothing downloads in the running container. The directory is read-only
+# for appuser in practice: both models are fully baked, so a cache write
+# would only ever be a (loud, debuggable) fallback, never the happy path.
+ENV HF_HOME=/opt/hf-cache
 
 USER appuser
 ENV PORT=8080
