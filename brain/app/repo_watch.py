@@ -31,6 +31,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def doc_id(repo: str) -> str:
+    """Firestore doc id'si '/' İÇEREMEZ (path ayracı sayılır); 'owner/repo'
+    olduğu gibi id yapılırsa gerçek istemci ValueError fırlatır. '%2F'
+    kodlaması çakışmasız ve geri çevrilebilir. FakeDB bu kuralı zorlamadığı
+    için testler bunu yakalayamaz — canlı tohum kaydında yakalandı."""
+    return repo.replace("/", "%2F")
+
+
 class GitHubError(Exception):
     """GitHub API/ulaşım hatası — metni gözlem olarak last_error'a yazılır.
 
@@ -100,14 +108,14 @@ def poll_once(db, client: GitHubClient, now_fn=_now) -> dict:
         except GitHubError as exc:
             logging.warning("repo_watch: %s kontrolü hata verdi: %s", repo, exc)
             summary["hata"] += 1
-            db.collection(WATCH_COLLECTION).document(repo).set(
+            db.collection(WATCH_COLLECTION).document(doc_id(repo)).set(
                 {"last_check": now, "last_error": str(exc)}, merge=True
             )
             continue
         for event in events:
             db.collection(EVENTS_COLLECTION).add(event)
         summary["olay"] += len(events)
-        db.collection(WATCH_COLLECTION).document(repo).set(updates, merge=True)
+        db.collection(WATCH_COLLECTION).document(doc_id(repo)).set(updates, merge=True)
     return summary
 
 

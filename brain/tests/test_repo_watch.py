@@ -46,7 +46,7 @@ def _seed_repo(db, repo=REPO, **overrides):
         "last_commit_sha": None,
     }
     doc.update(overrides)
-    db.collection(repo_watch.WATCH_COLLECTION).document(repo).create(doc)
+    db.collection(repo_watch.WATCH_COLLECTION).document(repo_watch.doc_id(repo)).create(doc)
 
 
 def _events(db):
@@ -54,7 +54,7 @@ def _events(db):
 
 
 def _doc(db, repo=REPO):
-    return db.collection(repo_watch.WATCH_COLLECTION).document(repo).get().to_dict()
+    return db.collection(repo_watch.WATCH_COLLECTION).document(repo_watch.doc_id(repo)).get().to_dict()
 
 
 def _commit(sha, message):
@@ -247,3 +247,13 @@ def test_network_failure_is_also_isolated_per_repo():
 
     assert summary == {"kontrol": 1, "olay": 0, "hata": 1}
     assert "erişim" in _doc(db)["last_error"]
+
+
+def test_doc_id_encodes_slash_for_real_firestore():
+    """Firestore doc id '/' içeremez; 'owner/repo' ham id yapılırsa GERÇEK
+    istemci ValueError fırlatır (FakeDB zorlamaz — canlı tohum kaydında
+    yakalandı). Pin: doc_id kodlaması geri alınırsa bu test kırılmalı."""
+    assert repo_watch.doc_id("owner/repo") == "owner%2Frepo"
+    assert "/" not in repo_watch.doc_id("owner/repo")
+    # Çakışma yok: farklı repo'lar farklı id üretir.
+    assert repo_watch.doc_id("a/b-c") != repo_watch.doc_id("a-b/c")

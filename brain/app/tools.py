@@ -120,7 +120,7 @@ def watch_repo(repo: str, note: str = "") -> dict:
             "last_commit_sha": None,
         }
         try:
-            _memory.db.collection(repo_watch.WATCH_COLLECTION).document(repo).create(doc)
+            _memory.db.collection(repo_watch.WATCH_COLLECTION).document(repo_watch.doc_id(repo)).create(doc)
         except AlreadyExists:
             return {"hata": f"'{repo}' zaten izleniyor"}
         return {"sonuc": f"'{repo}' izlemeye alındı"}
@@ -133,7 +133,7 @@ def unwatch_repo(repo: str) -> dict:
     """Bir GitHub repo'sunu takip listesinden çıkarır; geçmiş olayları silinmez."""
     try:
         repo = repo.strip()
-        ref = _memory.db.collection(repo_watch.WATCH_COLLECTION).document(repo)
+        ref = _memory.db.collection(repo_watch.WATCH_COLLECTION).document(repo_watch.doc_id(repo))
         if not ref.get().exists:
             return {"hata": f"'{repo}' zaten izlenmiyor"}
         ref.delete()

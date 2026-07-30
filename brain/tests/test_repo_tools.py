@@ -36,7 +36,7 @@ def db(monkeypatch):
 
 
 def _watched(db, repo=REPO):
-    return db.collection(repo_watch.WATCH_COLLECTION).document(repo).get()
+    return db.collection(repo_watch.WATCH_COLLECTION).document(repo_watch.doc_id(repo)).get()
 
 
 def _seed_event(db, repo=REPO, kind="release", title="v1.0.0", ts=NOW, surfaced=False):
@@ -106,7 +106,7 @@ def test_unwatch_repo_reports_missing(db):
 
 def test_list_watched_repos_projects_status_fields(db):
     tools.watch_repo(REPO, note="not1")
-    db.collection(repo_watch.WATCH_COLLECTION).document(REPO).set(
+    db.collection(repo_watch.WATCH_COLLECTION).document(repo_watch.doc_id(REPO)).set(
         {"last_check": NOW, "last_error": "GitHub 403: rate limit"}, merge=True
     )
     tools.watch_repo("owner/other")

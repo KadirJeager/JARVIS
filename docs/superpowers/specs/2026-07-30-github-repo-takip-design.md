@@ -31,7 +31,10 @@ medya paylaşımındaki iddialar kanıt sayılmaz).
 
 ## 2. Veri modeli (Firestore)
 
-`repo_watch` (doc id = `owner/repo`, tekil):
+`repo_watch` (doc id = `owner/repo`'nin `%2F`-kodlu hali — Firestore doc id'si
+`/` içeremez; `repo_watch.doc_id()` yardımcısı üretir. FakeDB bu kuralı
+zorlamadığı için ham-id hatası testleri geçip canlıda patlamıştı, 30 Temmuz
+tohum kaydında yakalanıp düzeltildi), tekil:
 
 ```python
 {
