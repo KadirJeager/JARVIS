@@ -15,6 +15,46 @@ def check_zone(tool_name: str) -> str:
     return config.TOOL_ZONES.get(tool_name, config.DEFAULT_ZONE)
 
 
+def write_audit(
+    audit: AuditWriter,
+    *,
+    actor: str,
+    tool_name: str,
+    args: dict | None,
+    zone: str,
+    decision: str,
+    trust_level: str | None = None,
+    voice_score: float | None = None,
+    presence: str | None = None,
+    device_hint: str | None = None,
+) -> None:
+    """Append one decision entry to the audit trail (spec §7: the trail must
+    reconstruct WHY a decision was made, not just what it was).
+
+    Shared by the ADK policy callback (actor "orchestrator") and the guest
+    gate (actor "guest:<email>", app/guest_gate.py) so both paths emit the
+    SAME entry shape. Args are stringified and cut at 500 chars per value:
+    the audit is for reconstruction, not a full payload dump. The voice
+    evidence fields stay None (not a fabricated "foreground") when there is
+    no voice context -- e.g. every text-chat and every guest call."""
+    audit.write({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "actor": actor,
+        "tool": tool_name,
+        "args": {k: str(v)[:500] for k, v in (args or {}).items()},
+        "zone": zone,
+        # "trust_level", NOT "trust": one concept, one name end to end --
+        # spec §7, config.TRUST_STATE_KEY and VoiceSignals.trust_level all
+        # use this spelling, and the audit is what a past decision is
+        # reconstructed from.
+        "trust_level": trust_level,
+        "voice_score": voice_score,
+        "presence": presence,
+        "device_hint": device_hint,
+        "decision": decision,
+    })
+
+
 def _read_trust(tool_context) -> str:
     """Trust level carried in ADK session state; default HIGH when absent (the
     text path, and any voice call with no identity signals yet) so nothing is
@@ -79,25 +119,20 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
         signals = _voice_signals(trust_provider, tool_context)
         trust_level = signals.trust_level if signals else _read_trust(tool_context)
         decision = _decide(zone, trust_level)
-        # spec §7: the audit trail must be able to reconstruct WHY a decision
-        # was made, not just what it was. None (not a fabricated "foreground")
-        # when there is no voice evidence -- e.g. every text-chat call.
-        audit.write({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "actor": "orchestrator",
-            "tool": tool.name,
-            "args": {k: str(v)[:500] for k, v in (args or {}).items()},
-            "zone": zone,
-            # "trust_level", NOT "trust": one concept, one name end to end --
-            # spec §7, config.TRUST_STATE_KEY and VoiceSignals.trust_level all
-            # use this spelling, and the audit is what a past decision is
-            # reconstructed from.
-            "trust_level": trust_level,
-            "voice_score": signals.voice_score if signals else None,
-            "presence": signals.presence if signals else None,
-            "device_hint": signals.device_hint if signals else None,
-            "decision": decision,
-        })
+        write_audit(
+            audit,
+            actor="orchestrator",
+            tool_name=tool.name,
+            args=args,
+            zone=zone,
+            # None (not a fabricated "foreground") when there is no voice
+            # evidence -- e.g. every text-chat call.
+            trust_level=trust_level,
+            voice_score=signals.voice_score if signals else None,
+            presence=signals.presence if signals else None,
+            device_hint=signals.device_hint if signals else None,
+            decision=decision,
+        )
         if decision == "block":
             return {"result": (
                 f"POLİTİKA ENGELİ: '{tool.name}' kırmızı bölgede — onaysız çalıştırılamaz. "

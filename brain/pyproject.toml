@@ -17,6 +17,10 @@ dependencies = [
     # this dep the torch pin is already satisfied. Installing the base
     # package WITHOUT that CPU-torch-first step would pull the CUDA wheel.
     "sentence-transformers>=3.0",
+    # Misafir Kapısı (app/guest_gate.py, North Star §4.9): FastMCP streamable
+    # HTTP transport. 1.28.1 API'si kaynaktan doğrulandı (streamable_http_app,
+    # stateless_http, TransportSecuritySettings).
+    "mcp>=1.28",
 ]
 
 [project.optional-dependencies]

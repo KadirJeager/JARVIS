@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, conversations, messages, repo_watch, speaker, voice, voice_manage, voice_trust
+from . import config, conversations, guest_gate, messages, repo_watch, speaker, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_scheduler, require_user
 
@@ -23,6 +23,18 @@ APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
 app.include_router(voice.router)
 app.include_router(voice_manage.router)
+
+
+@app.on_event("startup")
+async def _guest_gate_start() -> None:
+    """Misafir Kapısı'nın (§4.9) MCP session manager'ını aç — request'lerden
+    önce run() context'i aktif olmalı (app/guest_gate.py docstring)."""
+    await guest_gate.start()
+
+
+@app.on_event("shutdown")
+async def _guest_gate_stop() -> None:
+    await guest_gate.stop()
 
 
 @app.on_event("startup")
@@ -61,6 +73,7 @@ async def _warm_heavy_models() -> None:
 _runner: Runner | None = None
 _session_service = InMemorySessionService()
 _memory = None
+_audit = None  # FirestoreAudit; Misafir Kapısı (guest_gate) da bunu paylaşır
 _messages: "messages.MessageStore | None" = None
 _conversations: "conversations.ConversationStore | None" = None
 _voice_runner: Runner | None = None
@@ -97,7 +110,7 @@ def _build_text_model(voice: bool = False):
 
 def _init() -> None:
     """Lazy init so tests can import the module without GCP credentials."""
-    global _runner, _memory, _messages, _conversations
+    global _runner, _memory, _audit, _messages, _conversations
     if _runner is not None:
         return
     from google.cloud import firestore
@@ -113,11 +126,14 @@ def _init() -> None:
     _memory = Memory(
         db, embed_fn=embedders.embed_passage, embed_query_fn=embedders.embed_query
     )
+    # Single audit instance shared by the orchestrator's policy callback AND
+    # the guest gate (app/guest_gate.py) -- one trail, one Firestore client.
+    _audit = FirestoreAudit(db)
     _messages = messages.MessageStore(db)
     _conversations = conversations.ConversationStore(db)
     _runner = Runner(
         app_name=APP_NAME,
-        agent=build_agent(_memory, FirestoreAudit(db), model=_build_text_model()),
+        agent=build_agent(_memory, _audit, model=_build_text_model()),
         session_service=_session_service,
     )
 
@@ -433,6 +449,22 @@ async def repo_watch_job(email: str = Depends(require_scheduler)):
             status_code=502,
             detail="Repo kontrolü şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
         )
+
+
+# Misafir Kapısı (North Star §4.9): kimlik-doğrulamalı MCP endpoint'i.
+# "/" StaticFiles mount'undan ÖNCE kaydedilmeli, yoksa statik dosya yakalayıcısı
+# /mcp isteklerini de yutar.
+app.mount("/mcp", guest_gate.asgi, name="guest-gate")
+
+
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], include_in_schema=False)
+async def _mcp_trailing_slash_redirect():
+    """Starlette Mount yalnızca "/mcp/..." ile eşleşir; tam "/mcp" isteği web
+    StaticFiles yakalayıcısına düşer (POST'a 405 verir). MCP client'larının
+    çoğu slash'siz adresi kullanır — 307 ile "/mcp/"'e taşı (method korunur)."""
+    from starlette.responses import RedirectResponse
+
+    return RedirectResponse("/mcp/", status_code=307)
 
 
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web")
