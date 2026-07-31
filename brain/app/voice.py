@@ -79,6 +79,14 @@ class VoiceBridge:
         # Strong refs to in-flight turn tasks so teardown can cancel them and
         # the loop cannot garbage-collect them mid-run.
         self._turn_tasks: set[asyncio.Task] = set()
+        # Set when the peer is gone (receive reported disconnect, or a send
+        # hit a closed socket). Every send goes through _safe_send, which
+        # flips this and swallows the RuntimeError uvicorn raises on
+        # 'websocket.send' after 'websocket.close' -- seen live as ERROR
+        # tracebacks (2026-07-31) when the client hung up mid-turn: the turn
+        # task's jarvis_text/turn_complete then crashed the whole connection
+        # handler. A dead peer is not a server error.
+        self._closed = False
         # Identifies THIS connection in the shared trust registry. The registry
         # key is per-user, so two concurrent sockets collide on it; this token
         # is what lets voice_trust.clear() compare-and-delete instead of wiping
@@ -96,6 +104,23 @@ class VoiceBridge:
             presence=self.presence, device_hint=self.device_hint,
             owner=self._owner,
         ))
+
+    async def _safe_send(self, ws, payload: dict) -> bool:
+        """Send one JSON event, or mark the bridge closed if the peer is gone.
+
+        Returns False once the socket is dead so callers can stop producing
+        output for a client that will never see it. Swallows the RuntimeError
+        that starlette/uvicorn raise on send-after-close (a client that hung
+        up mid-turn is ordinary, not an exception) and WebSocketDisconnect;
+        anything else still propagates."""
+        if self._closed:
+            return False
+        try:
+            await ws.send_text(json.dumps(payload))
+            return True
+        except (RuntimeError, WebSocketDisconnect):
+            self._closed = True
+            return False
 
     async def _receive_once(self, ws) -> bool:
         """Read one client message: buffer mic PCM for speaker-ID, or handle a
@@ -233,14 +258,14 @@ class VoiceBridge:
                     reply = event.content.parts[0].text or ""
         except Exception:
             logging.exception("voice bridge: text turn failed for %s", self._user_id)
-            await ws.send_text(json.dumps(vp.evt_error("İstek işlenemedi, tekrar dene")))
-            await ws.send_text(json.dumps(vp.evt_turn_complete()))
+            await self._safe_send(ws, vp.evt_error("İstek işlenemedi, tekrar dene"))
+            await self._safe_send(ws, vp.evt_turn_complete())
             return
         if reply:
             # jarvis_text FIRST (it is what the TTS speaks), then the
             # transcript row for the UI history; both before turn_complete.
-            await ws.send_text(json.dumps(vp.evt_jarvis_text(reply)))
-            await ws.send_text(json.dumps(vp.evt_transcript("jarvis", reply)))
+            await self._safe_send(ws, vp.evt_jarvis_text(reply))
+            await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
             self.transcript.append({"role": "jarvis", "text": reply})
         else:
             # An empty final response is a real model outcome (e.g. a turn
@@ -248,7 +273,7 @@ class VoiceBridge:
             # the device TTS say nothing after a thinking pause -- log it as
             # DATA instead and still close the turn.
             logging.info("voice bridge: empty model reply for %s -- no jarvis_text", self._user_id)
-        await ws.send_text(json.dumps(vp.evt_turn_complete()))
+        await self._safe_send(ws, vp.evt_turn_complete())
 
     async def _verify_utterance(self, ws, min_bytes: int = 0) -> None:
         """Called at the user utterance boundary: run speaker identity on the
@@ -305,7 +330,7 @@ class VoiceBridge:
         # definition), not the floored fusion input -- "how close was it" is
         # what makes a past decision reconstructable.
         self._publish_trust(level, score)
-        await ws.send_text(json.dumps(vp.evt_speaker("user", verified, score)))
+        await self._safe_send(ws, vp.evt_speaker("user", verified, score))
         # History AFTER the trust publish and the client event: those two are
         # the turn's safety-relevant outputs, the history row is observability
         # (spec §4.2) -- it must neither delay nor break them. No row on the
@@ -370,6 +395,11 @@ class VoiceBridge:
             while await self._receive_once(ws):
                 pass
         finally:
+            # The peer is gone (or the loop broke): anything still queued has
+            # nowhere to send, so flag it BEFORE awaiting the turn tasks --
+            # a task mid-run_async finishes into _safe_send no-ops instead of
+            # send-after-close RuntimeErrors.
+            self._closed = True
             # Outermost teardown. First stop in-flight turns: the socket is
             # gone, so their answers have nowhere to go, and their transcript
             # rows would land after the snapshot below. Then drop this
@@ -454,5 +484,12 @@ async def ws_voice(ws: WebSocket) -> None:
         ).run(ws, user_id=email)
     except Exception:
         logging.exception("voice bridge failed for %s", email)
-        await ws.send_text(json.dumps(vp.evt_error("Sesli oturum düştü, tekrar bağlan")))
-        await ws.close(code=1011)
+        # The bridge may have died BECAUSE the socket is already closed (the
+        # RuntimeError-on-send path seen in prod logs): sending the error
+        # frame would then raise the very same send-after-close RuntimeError
+        # and produce a second, misleading traceback. Suppress it -- a dead
+        # peer cannot be told anything anyway.
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+            await ws.send_text(json.dumps(vp.evt_error("Sesli oturum düştü, tekrar bağlan")))
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+            await ws.close(code=1011)
