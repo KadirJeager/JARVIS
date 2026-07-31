@@ -129,6 +129,17 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             // to the network recognizer, which is still better than failing the call.
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            // VOICE_COMMUNICATION = the AEC-enabled audio source (API 31+): without
+            // it the recognizer hears Jarvis's own TTS from the speaker, treats it as
+            // user speech, and barge-in kills every reply after a few words (prod
+            // report 2026-07-31: "kendi sesi yüzünden dinleme moduna geçiyor").
+            // The PCM mic path (AndroidMicSource) already uses this same source.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                putExtra(
+                    RecognizerIntent.EXTRA_AUDIO_SOURCE,
+                    android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                )
+            }
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, MIN_SPEECH_MS)
             putExtra(
                 RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
