@@ -39,7 +39,8 @@ def authorized_get(url: str, creds, timeout: int = 30) -> dict:
 
     Kept deliberately small (urllib, no google-api-client dep): the pollers
     only read lists. Raises HttpError on non-200 so callers can special-case
-    410 (Calendar syncToken expiry).
+    410 (Calendar syncToken expiry). NOTE: `url` must already be encoded --
+    see _qs() (a raw "+00:00" in timeMin became a space and cost a live 400).
     """
     import json
     import urllib.error
@@ -51,6 +52,15 @@ def authorized_get(url: str, creds, timeout: int = 30) -> dict:
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         raise HttpError(f"HTTP {exc.code} for {url}", status=exc.code) from exc
+
+
+def _qs(params: dict) -> str:
+    """urlencode a query dict. A bare `+00:00` offset in timeMin is a SPACE in
+    a query string -- Google's 400 for the calendar baseline came from exactly
+    this (live, jarvis-brain-00023-wkq)."""
+    from urllib.parse import urlencode
+
+    return urlencode(params)
 
 
 def _iso_now(now_fn) -> str:
@@ -88,10 +98,10 @@ def poll_calendar(db, now_fn=_default_now, get=authorized_get) -> dict:
         time_min = now.isoformat()
         page_token, events_seen = None, 0
         while True:
-            url = f"{CALENDAR_API}?timeMin={time_min}&singleEvents=true&maxResults=250"
+            params = {"timeMin": time_min, "singleEvents": "true", "maxResults": 250}
             if page_token:
-                url += f"&pageToken={page_token}"
-            data = get(url, creds)
+                params["pageToken"] = page_token
+            data = get(f"{CALENDAR_API}?{_qs(params)}", creds)
             events_seen += len(data.get("items", []))
             page_token = data.get("nextPageToken")
             if not page_token:
@@ -105,10 +115,10 @@ def poll_calendar(db, now_fn=_default_now, get=authorized_get) -> dict:
     try:
         page_token = None
         while True:
-            url = f"{CALENDAR_API}?syncToken={sync_token}&maxResults=250"
+            params = {"syncToken": sync_token, "maxResults": 250}
             if page_token:
-                url += f"&pageToken={page_token}"
-            data = get(url, creds)
+                params["pageToken"] = page_token
+            data = get(f"{CALENDAR_API}?{_qs(params)}", creds)
             for item in data.get("items", []):
                 recorded += 1
                 start = item.get("start", {})
@@ -176,7 +186,7 @@ def poll_gmail(db, now_fn=_default_now, get=authorized_get) -> dict:
         return {"handled": True, "baseline": True, "recorded": 0, "notified": 0}
 
     recorded = notified = 0
-    data = get(f"{GMAIL_API}/messages?q=is:unread -in:chats&maxResults=50", creds)
+    data = get(f"{GMAIL_API}/messages?{_qs({'q': 'is:unread -in:chats', 'maxResults': 50})}", creds)
     for stub in data.get("messages", []):
         msg_id = stub["id"]
         if last_history and msg_id <= last_history:
