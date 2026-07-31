@@ -5,7 +5,7 @@ import re
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import repo_watch, speaker_history, speaker_store, voice_trust
+from . import consult, repo_watch, speaker_history, speaker_store, voice_trust
 from .memory import Memory
 
 _memory: Memory | None = None
@@ -191,4 +191,5 @@ def get_repo_updates() -> dict:
 
 
 ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
-             get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates]
+             get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
+             consult.consult_gemini, consult.consult_claude]

@@ -26,6 +26,14 @@ TEXT_MODEL_FALLBACK = "gemini-3.6-flash-high"
 # resolves with latency_first=True -- fastest usable flash variant.
 VOICE_MODEL_FALLBACK = "gemini-3.6-flash"
 
+# Consultant-brain tools (North Star §4.9, app/consult.py). Same "not a pin"
+# rule as TEXT_MODEL_FALLBACK: these ids are used ONLY when the live catalog
+# cannot be fetched or holds nothing usable for that family -- normal
+# resolution is dynamic (newest pro-class Gemini / newest claude-* from
+# GET {base_url}/v1beta/models).
+CONSULT_GEMINI_FALLBACK = "gemini-3.1-pro-preview"
+CONSULT_CLAUDE_FALLBACK = "claude-opus-4-6"
+
 
 def resolve_voice_model() -> str:
     """Resolve the model for the VOICE runner. Same rules as
@@ -107,6 +115,13 @@ TOOL_ZONES = {
     "unwatch_repo": ZONE_YELLOW,
     "list_watched_repos": ZONE_GREEN,
     "get_repo_updates": ZONE_GREEN,
+    # Consultant tools (§4.9) carry conversation content OUT to a second model
+    # but change nothing local. §9 puts misafir danışma between green and red:
+    # no write means not red, data egress means not green -- so YELLOW
+    # ("yap + bildir": run, and Kadir sees in the audit that an outside brain
+    # was consulted).
+    "consult_gemini": ZONE_YELLOW,
+    "consult_claude": ZONE_YELLOW,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 
