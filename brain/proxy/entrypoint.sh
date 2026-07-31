@@ -12,14 +12,20 @@ mkdir -p "$AUTH_DIR"
 # volume failing SILENTLY (its stderr was swallowed by `|| true`) while ls
 # could read the same file. Never swallow this error again -- a copy
 # failure means "0 clients" and a brain that 502s every chat turn.
-for src in "$AUTH_SRC"/*.json; do
-    [ -e "$src" ] || continue
-    base=$(basename "$src")
-    if cat "$src" > "$AUTH_DIR/$base"; then
-        echo "entrypoint: copied $base ($(wc -c < "$AUTH_DIR/$base") bytes)"
-    else
-        echo "entrypoint: COPY FAILED for $src" >&2
-    fi
+# Multiple source dirs: each provider's token lives in its own secret mount
+# (Cloud Run mounts one secret per volume; overlapping mount paths are
+# rejected, so /secrets/auth + /secrets/auth-claude + ...).
+for src_dir in "$AUTH_SRC" /secrets/auth-claude; do
+    [ -d "$src_dir" ] || continue
+    for src in "$src_dir"/*.json; do
+        [ -e "$src" ] || continue
+        base=$(basename "$src")
+        if cat "$src" > "$AUTH_DIR/$base"; then
+            echo "entrypoint: copied $base ($(wc -c < "$AUTH_DIR/$base") bytes)"
+        else
+            echo "entrypoint: COPY FAILED for $src" >&2
+        fi
+    done
 done
 # Secret mounts are 0444; plain cp preserves that, and the proxy SKIPS auth
 # files it cannot rewrite (it persists refreshed tokens back into the file).

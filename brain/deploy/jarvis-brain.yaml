@@ -11,7 +11,7 @@ spec:
         run.googleapis.com/startup-cpu-boost: 'true'
         run.googleapis.com/container-dependencies: '{"brain":["llm-proxy"]}'
       labels:
-        client.knative.dev/nonce: 'vl1785487573'
+        client.knative.dev/nonce: 'rb1785498468'
         run.googleapis.com/startupProbeType: Default
     spec:
       containerConcurrency: 80
@@ -19,7 +19,7 @@ spec:
       timeoutSeconds: 300
       containers:
       - name: brain
-        image: gcr.io/your-gcp-project/jarvis-brain:voicelat-594ecd4
+        image: gcr.io/your-gcp-project/jarvis-brain:stage5-78b8999
         ports:
         - containerPort: 8080
           name: http1
@@ -64,6 +64,9 @@ spec:
         - name: oauth-auth
           mountPath: /secrets/auth
           readOnly: true
+        - name: oauth-auth-claude
+          mountPath: /secrets/auth-claude
+          readOnly: true
         resources:
           limits:
             cpu: 500m
@@ -81,6 +84,12 @@ spec:
           items:
           - key: latest
             path: antigravity.json
+      - name: oauth-auth-claude
+        secret:
+          secretName: cliproxy-oauth-claude
+          items:
+          - key: latest
+            path: claude.json
   traffic:
   - percent: 100
     revisionName: jarvis-brain-00016-pur
