@@ -104,6 +104,29 @@ def test_event_document_schema():
     assert doc["source"] == "scheduler"
 
 
+def test_weekly_retro_event_success_notifies_true():
+    db = FakeDB()
+    payload = {"llm_fn": lambda p: "Haftalık özet raporu"}
+    out = events.record(db, source="scheduler", kind="weekly_retro", payload=payload)
+    assert out["handled"] is True and out["notify"] is True
+    assert "retro" in out["summary"]
+    (doc,) = _stored(db)
+    assert doc["kind"] == "weekly_retro" and doc["handled"] is True
+    assert doc["result"]["ok"] is True
+
+
+def test_weekly_retro_event_llm_failure_notifies_false():
+    db = FakeDB()
+    def bad_llm(p):
+        raise TimeoutError("timeout")
+    payload = {"llm_fn": bad_llm}
+    out = events.record(db, source="scheduler", kind="weekly_retro", payload=payload)
+    assert out["handled"] is True and out["notify"] is False
+    (doc,) = _stored(db)
+    assert doc["kind"] == "weekly_retro" and doc["handled"] is True
+    assert doc["result"]["ok"] is False
+
+
 # --- POST /api/jobs/event -------------------------------------------------------
 
 

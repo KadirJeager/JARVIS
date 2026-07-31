@@ -29,10 +29,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import messages, tasks
+from . import messages, retro, tasks
 
 EVENTS_COLLECTION = "events"
-SUPPORTED_KINDS = ("ping", "health_check", "task_tick", "task_enqueue")
+SUPPORTED_KINDS = ("ping", "health_check", "task_tick", "task_enqueue", "weekly_retro")
 HEALTH_TIMEOUT_SECONDS = 10
 
 
@@ -113,6 +113,17 @@ def _handle_task_enqueue(db, payload: dict, now_fn) -> tuple[dict | None, bool, 
     return {"task_id": task_id}, False, f"Görev kuruldu: {payload.get('title')}", True
 
 
+def _handle_weekly_retro(db, payload: dict, now_fn) -> tuple[dict, bool, str]:
+    """Haftalık retro (§8.4, app/retro.py): geçmiş 7 günün metriklerini ve derslerini
+    derler, LLM ile özet oluşturur ve 'retro' oturumuna rapor atar."""
+    owner = payload.get("owner")
+    llm_fn = payload.get("llm_fn")
+    out = retro.run(db, owner=owner, llm_fn=llm_fn, now_fn=now_fn)
+    notify = bool(out.get("ok"))
+    summary = out.get("summary") or "Haftalık retro çalıştırıldı"
+    return out, notify, summary
+
+
 def record(db, *, source: str, kind: str, payload: dict, fetch=None,
            now_fn=_now) -> dict:
     """Tek olayı işler, `events` koleksiyonuna yazar, endpoint özetini döner.
@@ -139,6 +150,9 @@ def record(db, *, source: str, kind: str, payload: dict, fetch=None,
         handled = True
     elif kind == "task_enqueue":
         result, notify, summary, handled = _handle_task_enqueue(db, payload, now_fn)
+    elif kind == "weekly_retro":
+        result, notify, summary = _handle_weekly_retro(db, payload, now_fn)
+        handled = True
     else:
         handled, result, notify = False, None, False
         summary = f"Bilinmeyen olay türü '{kind}' gözlem olarak kaydedildi"
