@@ -20,7 +20,7 @@ spec:
         # is actually warm.
         run.googleapis.com/cpu-throttling: 'false'
       labels:
-        client.knative.dev/nonce: 'y11785505668'
+        client.knative.dev/nonce: 'y2b1785511387'
         run.googleapis.com/startupProbeType: Default
     spec:
       containerConcurrency: 80
@@ -28,7 +28,7 @@ spec:
       timeoutSeconds: 3600
       containers:
       - name: voice
-        image: gcr.io/your-gcp-project/jarvis-brain:y1-4889ca8
+        image: gcr.io/your-gcp-project/jarvis-brain:y2c-7e35746
         ports:
         - containerPort: 8080
           name: http1
