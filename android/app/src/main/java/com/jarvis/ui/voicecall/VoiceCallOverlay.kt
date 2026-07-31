@@ -23,6 +23,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +42,10 @@ import com.jarvis.ui.theme.JarvisOnAccent
 import com.jarvis.ui.theme.JarvisSurface
 import com.jarvis.ui.theme.JarvisTextMuted
 import com.jarvis.ui.theme.JarvisTextPrimary
+
+/** How long a dial may take before the "Bağlanıyor…" label appears at all
+ *  (prod complaint: the flash was visible on every call, even sub-second dials). */
+private const val CONNECTING_DEBOUNCE_MS = 1200L
 
 /**
  * Full-screen live-call surface (Gemini live referenced): rolling transcript on top,
@@ -135,11 +141,23 @@ private fun OverlayContent(
                 Text("Kapat", color = JarvisCyan)
             }
         } else {
+            // Debounce the "Bağlanıyor…" label: a fast connect never flashes it --
+            // the text only appears if the dial is STILL in progress after the
+            // delay (prod complaint 2026-07-31: label visible on every call).
+            val showConnecting by produceState(initialValue = false, key1 = state.phase) {
+                if (state.phase == VoicePhase.CONNECTING) {
+                    value = false
+                    kotlinx.coroutines.delay(CONNECTING_DEBOUNCE_MS)
+                    value = true
+                } else {
+                    value = false
+                }
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(vertical = 10.dp),
             ) {
-                if (state.phase == VoicePhase.CONNECTING) {
+                if (showConnecting) {
                     CircularProgressIndicator(
                         color = JarvisCyan,
                         modifier = Modifier.size(18.dp),
@@ -147,10 +165,11 @@ private fun OverlayContent(
                     Spacer(Modifier.size(10.dp))
                 }
                 Text(
-                    when (state.phase) {
-                        VoicePhase.CONNECTING -> "Bağlanıyor…"
-                        VoicePhase.LISTENING -> "Dinliyorum"
-                        VoicePhase.SPEAKING -> "Konuşuyor…"
+                    when {
+                        showConnecting -> "Bağlanıyor…"
+                        state.phase == VoicePhase.CONNECTING -> ""  // debounce window: hide
+                        state.phase == VoicePhase.LISTENING -> "Dinliyorum"
+                        state.phase == VoicePhase.SPEAKING -> "Konuşuyor…"
                         else -> ""
                     },
                     color = JarvisTextMuted,

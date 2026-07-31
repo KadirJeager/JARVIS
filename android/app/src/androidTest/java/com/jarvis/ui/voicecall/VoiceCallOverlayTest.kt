@@ -37,8 +37,12 @@ class VoiceCallOverlayTest {
     }
 
     @Test
-    fun connecting_showsConnectingLabel() {
+    fun connecting_showsConnectingLabel_afterDebounce() {
         show(VoiceUiState(phase = VoicePhase.CONNECTING))
+        // Debounced: the label is hidden during the first 1200 ms of a dial
+        // (prod complaint 2026-07-31) and only appears if the dial is still running.
+        rule.onNodeWithText("Bağlanıyor…").assertDoesNotExist()
+        rule.mainClock.advanceTimeBy(1300)
         rule.onNodeWithText("Bağlanıyor…").assertIsDisplayed()
     }
 

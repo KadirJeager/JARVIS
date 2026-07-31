@@ -197,11 +197,19 @@ class VoiceSession(
         override fun onResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (text.isNotBlank()) {
-                _state.update {
-                    it.copy(partialText = null, transcript = appendLine(it, "user", text))
+                if (isJarvisEcho(text)) {
+                    // The recognizer heard Jarvis's own TTS from the speaker and
+                    // transcribed it as user speech. Answering it would put Jarvis
+                    // in a self-reply loop (prod report, 2026-07-31: "kendini
+                    // duyuyor, kendine cevap veriyor"). Drop it and re-arm.
+                    _state.update { it.copy(partialText = null) }
+                } else {
+                    _state.update {
+                        it.copy(partialText = null, transcript = appendLine(it, "user", text))
+                    }
+                    turnBoundary = true
+                    transport.sendText(buildUserTextFrame(text))
                 }
-                turnBoundary = true
-                transport.sendText(buildUserTextFrame(text))
             }
             relisten(gen)
         }
@@ -225,6 +233,46 @@ class VoiceSession(
                 _state.update { it.copy(phase = VoicePhase.LISTENING) }
             }
         }
+    }
+
+    // -- Echo gate -------------------------------------------------------------
+    // What Jarvis recently SAID, kept so a recognizer final that merely repeats
+    // it (TTS heard from the speaker) can be dropped instead of answered.
+    // Bounded: only the last few utterances matter; anything older is ambient.
+    private val recentJarvisTexts = ArrayDeque<String>()
+
+    private fun recordJarvisSpeech(text: String) {
+        if (recentJarvisTexts.size >= ECHO_WINDOW) recentJarvisTexts.removeFirst()
+        recentJarvisTexts.addLast(text)
+    }
+
+    /**
+     * True when the recognizer's final is Jarvis's own voice echoed back.
+     * Conservative on purpose: a short answer ("evet") is NEVER echo even if
+     * Jarvis just said the same word -- only a clear near-verbatim repeat of a
+     * recent Jarvis utterance is (containment either way, or a long common
+     * prefix). Turkish diacritics are NOT folded: both sides come from the
+     * same tr-TR pipeline, so exact repeats stay exact.
+     */
+    internal fun isJarvisEcho(text: String): Boolean {
+        val mine = normalizeForEcho(text)
+        if (mine.length < ECHO_MIN_CHARS) return false
+        return recentJarvisTexts.any { jarvis ->
+            val his = normalizeForEcho(jarvis)
+            his.isNotEmpty() && (his.contains(mine) || mine.contains(his) || commonPrefixLen(his, mine) >= ECHO_MIN_CHARS)
+        }
+    }
+
+    private fun normalizeForEcho(text: String): String =
+        text.lowercase()
+            .replace(Regex("[^\\p{L}\\p{N} ]"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    private fun commonPrefixLen(a: String, b: String): Int {
+        var i = 0
+        while (i < a.length && i < b.length && a[i] == b[i]) i++
+        return i
     }
 
     /**
@@ -266,6 +314,7 @@ class VoiceSession(
             }
             is VoiceServerEvent.JarvisText -> {
                 ttsActive++
+                recordJarvisSpeech(event.text)
                 tts.speak(event.text)
                 val merged = appendLine(_state.value, "jarvis", event.text)
                 turnBoundary = false
@@ -324,5 +373,12 @@ class VoiceSession(
         /** Pause before re-arming the recognizer after a turn or a recoverable error.
          *  Short enough to feel continuous, long enough to break instant-NO_MATCH loops. */
         const val STT_RESTART_DELAY_MS = 300L
+
+        /** Echo gate window: only the last few Jarvis utterances are kept. */
+        const val ECHO_WINDOW = 3
+
+        /** Minimum normalized length before a final can be judged echo at all --
+         *  keeps short real answers ("evet", "tamam") from ever being dropped. */
+        const val ECHO_MIN_CHARS = 20
     }
 }

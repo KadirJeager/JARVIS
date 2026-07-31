@@ -688,6 +688,77 @@ class VoiceSessionTest {
 
     // -- mic capture loop -----------------------------------------------------------------
 
+    // -- echo gate (Jarvis must never answer its own TTS) -----------------------------------
+
+    @Test
+    fun sttFinalResult_thatIsJarvisOwnTts_isDropped_notSent_notInTranscript() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Saat şu an akşam dokuz buçuk, başka bir şey ister misin?"}""")
+
+        // The recognizer hears the speaker and "transcribes" Jarvis's own words.
+        f.stt.listener!!.onResult("Saat şu an akşam dokuz buçuk, başka bir şey ister misin?")
+
+        // Only the hello went out; no user_text for the echo.
+        assertEquals(1, f.transport.sentTexts.size)
+        // The echo adds NO user line; only Jarvis's own reply is in the transcript.
+        assertEquals(
+            listOf(TranscriptLine("jarvis", "Saat şu an akşam dokuz buçuk, başka bir şey ister misin?")),
+            f.session.state.value.transcript,
+        )
+        // Listening still re-arms (the call must not stall on a dropped echo).
+        advanceTimeBy(400)
+        assertEquals(2, f.stt.listenCalls)
+    }
+
+    @Test
+    fun sttFinalResult_partialRepeatOfJarvisTts_isAlsoDropped() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Yarın sabah dokuzda toplantın var, hazırlıklı ol."}""")
+
+        // AEC trims imperfectly: the tail of Jarvis's own sentence comes back.
+        f.stt.listener!!.onResult("sabah dokuzda toplantın var hazırlıklı ol")
+
+        assertEquals(1, f.transport.sentTexts.size)
+        assertEquals(
+            listOf(TranscriptLine("jarvis", "Yarın sabah dokuzda toplantın var, hazırlıklı ol.")),
+            f.session.state.value.transcript,
+        )
+    }
+
+    @Test
+    fun sttFinalResult_genuineUserSpeech_afterJarvisSpoke_isStillSent() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Saat şu an akşam dokuz buçuk."}""")
+
+        f.stt.listener!!.onResult("yarın hava nasıl olacak")
+
+        val frame = lastSentTextJson(f.transport)
+        assertEquals("user_text", frame.getValue("type").jsonPrimitive.content)
+        assertEquals("yarın hava nasıl olacak", frame.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun sttFinalResult_shortRealAnswer_matchingJarvisWord_isNeverDropped() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Evet dedin mi?"}""")
+
+        // Short answers must never be judged echo, even if Jarvis said the same word.
+        f.stt.listener!!.onResult("evet")
+
+        val frame = lastSentTextJson(f.transport)
+        assertEquals("user_text", frame.getValue("type").jsonPrimitive.content)
+    }
+
+    // -- mic capture loop -----------------------------------------------------------------
+
     @Test
     fun micFrames_areForwardedAsBinary_toTheTransport() = runTest {
         // UnconfinedTestDispatcher, not backgroundScope: the fake's readFrame() never
