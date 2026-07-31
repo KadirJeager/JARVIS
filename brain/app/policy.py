@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from . import config, trust
+from . import config, trust, vitals
 from .voice_trust import VoiceSignals
 
 
@@ -90,6 +90,22 @@ def _decide(zone: str, trust_level: str) -> str:
 TrustProvider = Callable[[Any], VoiceSignals | None]
 
 
+def _count_tool_call(audit: AuditWriter) -> None:
+    """North Star §4.5: allow kararlarını vitals/counters'a sayar (best effort).
+
+    db'ye audit nesnesi üzerinden ulaşılır (FirestoreAudit.db); db taşımayan
+    audit yazıcıları (test fake'leri gibi) sessizce atlanır. Herhangi bir
+    Firestore hatası loglanır ve yutulur — kota defter tutması, güvenlik
+    kararının kendisini asla bozmamalı."""
+    db = getattr(audit, "db", None)
+    if db is None:
+        return
+    try:
+        vitals.bump(db, "tool_calls_today")
+    except Exception:
+        logging.exception("policy: vitals tool sayacı yazılamadı -- devam")
+
+
 def _voice_signals(trust_provider: TrustProvider | None, tool_context) -> VoiceSignals | None:
     """Ask the (optional) provider for this call's voice identity signals.
 
@@ -133,6 +149,13 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
             device_hint=signals.device_hint if signals else None,
             decision=decision,
         )
+        if decision == "allow":
+            # North Star §4.5: gerçekten ÇALIŞACAK her araç çağrısı
+            # tool_calls_today'i artırır. Block/confirm/dry_run sayılmaz (araç
+            # hiç koşmadı). Sayım write_audit SONRASINDA yapılır: audit yazımı
+            # fırlatırsa buraya hiç ulaşılmaz ("audit.write başarılıysa say").
+            # Sayaç yazımı da asla aracın önünü kesmez — logla, geç.
+            _count_tool_call(audit)
         if decision == "block":
             return {"result": (
                 f"POLİTİKA ENGELİ: '{tool.name}' kırmızı bölgede — onaysız çalıştırılamaz. "

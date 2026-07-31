@@ -122,6 +122,9 @@ TOOL_ZONES = {
     # was consulted).
     "consult_gemini": ZONE_YELLOW,
     "consult_claude": ZONE_YELLOW,
+    # check_my_vitals (§4.5): salt okuma öz-rapor — kota sayaçları, process
+    # gerçekleri, son politika engelleri. Yazma yok, dışa veri çıkışı yok.
+    "check_my_vitals": ZONE_GREEN,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 

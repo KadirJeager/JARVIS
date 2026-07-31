@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, conversations, guest_gate, messages, repo_watch, speaker, voice, voice_manage, voice_trust
+from . import config, conversations, events, guest_gate, messages, repo_watch, speaker, vitals, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_scheduler, require_user
 
@@ -299,7 +299,25 @@ async def run_turn(user_id: str, session_id: str, message: str) -> str:
                     "user_id=%s session_id=%s -- continuing without it",
                     user_id, session_id,
                 )
+    # Buraya ulaşıldıysa tur başarılıdır (runner hatası yukarı fırlardı):
+    # boş cevap da gerçek bir model sonucudur, sayılır.
+    _bump_chat_counter()
     return reply
+
+
+def _bump_chat_counter() -> None:
+    """North Star §4.5: her başarılı chat turu vitals/counters'ta
+    chat_turns_today'i artırır. conversations.touch ile aynı "best effort"
+    sözleşmesi: sayaç defter tutmaktır, cevap çoktan üretilmiştir — Firestore
+    hıçkırığı turu asla bozmaz, loglanıp geçilir. _memory, _init'i no-op'a
+    çevirip _messages/_runner'ı doğrudan bağlayan testlerde None kalabilir
+    (run_turn'deki _conversations gardının aynısı)."""
+    if _memory is None:
+        return
+    try:
+        vitals.bump(_memory.db, "chat_turns_today")
+    except Exception:
+        logging.exception("run_turn: vitals sayacı yazılamadı -- tura devam ediliyor")
 
 
 class ChatRequest(BaseModel):
@@ -310,6 +328,13 @@ class ChatRequest(BaseModel):
 class EnrollRequest(BaseModel):
     clips: list[str]  # base64-encoded PCM16 mono 16kHz utterances
     device_hint: str = "unknown"
+
+
+class EventRequest(BaseModel):
+    """Olay katmanı (§4.4) gövdesi: kim, ne tür, ne taşıyor."""
+    source: str
+    kind: str
+    payload: dict = {}
 
 
 # /healthz is intercepted by Google Frontend on run.app (returns Google's own
@@ -448,6 +473,29 @@ async def repo_watch_job(email: str = Depends(require_scheduler)):
         raise HTTPException(
             status_code=502,
             detail="Repo kontrolü şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+
+
+@app.post("/api/jobs/event")
+async def event_job(req: EventRequest, email: str = Depends(require_scheduler)):
+    """Olay katmanı iskeleti (North Star §4.4): scheduler/Pub-Sub olayını kaydeder
+    ve kural motorunun kararını döner. Bilinmeyen kind 400 DEĞİLDİR — gözlem
+    olarak kaydedilip handled=False döner (app/events.py docstring)."""
+    try:
+        _init()
+        # asyncio.to_thread, repo-watch'taki gerekçenin aynısı: events.record
+        # senkron Firestore + (health_check'te) ağ I/O'su yapar; loop'ta koşarsa
+        # /api/chat ve /ws/voice'i de dondurur.
+        return await asyncio.to_thread(
+            lambda: events.record(
+                _memory.db, source=req.source, kind=req.kind, payload=req.payload
+            )
+        )
+    except Exception:
+        logging.exception("event job: record failed (source=%s kind=%s)", req.source, req.kind)
+        raise HTTPException(
+            status_code=502,
+            detail="Olay şu an işlenemiyor (altyapı hatası). Az sonra tekrar dene.",
         )
 
 

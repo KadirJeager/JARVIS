@@ -5,7 +5,7 @@ import re
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import consult, repo_watch, speaker_history, speaker_store, voice_trust
+from . import consult, repo_watch, speaker_history, speaker_store, vitals, voice_trust
 from .memory import Memory
 
 _memory: Memory | None = None
@@ -190,6 +190,20 @@ def get_repo_updates() -> dict:
         return {"hata": "repo yenilikleri şu an okunamıyor"}
 
 
+def check_my_vitals() -> dict:
+    """Kendi sağlık ve kota durumumu raporlar (salt okuma): brain process
+    gerçekleri (başlangıç, uptime, revizyon), günlük kullanım sayaçları
+    (chat/ses turu, araç çağrısı) ve son politika engelleri. Aylık harcama
+    bilinçli null — 30 Temmuz'da metin yolu yerel proxy/aboneliğe geçti,
+    faturalı API yok. "Kendini nasıl hissediyorsun", "kota durumun ne",
+    "bugün kaç istek aldın", "son hataların ne" sorularında çağır."""
+    try:
+        return vitals.read(_memory.db)
+    except Exception:
+        logging.exception("check_my_vitals: vitals okunamadı")
+        return {"hata": "sağlık bilgisi şu an okunamıyor"}
+
+
 ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
              get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
-             consult.consult_gemini, consult.consult_claude]
+             consult.consult_gemini, consult.consult_claude, check_my_vitals]

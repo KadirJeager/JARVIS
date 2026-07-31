@@ -36,7 +36,7 @@ import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.genai import types
 
-from . import config, trust, voice_trust
+from . import config, trust, vitals, voice_trust
 from . import voice_protocol as vp
 from .auth import verify_token_email
 
@@ -274,6 +274,16 @@ class VoiceBridge:
             # DATA instead and still close the turn.
             logging.info("voice bridge: empty model reply for %s -- no jarvis_text", self._user_id)
         await self._safe_send(ws, vp.evt_turn_complete())
+        # North Star §4.5: başarıyla kapanan her ses turu voice_turns_today'i
+        # artırır. Sayaç hatası turu asla bozmaz (main.run_turn'deki
+        # conversations.touch deseni); memory'siz test bridge'leri atlanır.
+        if self.memory is not None:
+            try:
+                vitals.bump(self.memory.db, "voice_turns_today")
+            except Exception:
+                logging.exception(
+                    "voice bridge: vitals sayacı yazılamadı for %s -- tura devam", self._user_id
+                )
 
     async def _verify_utterance(self, ws, min_bytes: int = 0) -> None:
         """Called at the user utterance boundary: run speaker identity on the
