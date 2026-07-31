@@ -5,7 +5,7 @@ import re
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import consult, repo_watch, speaker_history, speaker_store, vitals, voice_trust
+from . import consult, reminders, repo_watch, speaker_history, speaker_store, vitals, voice_trust
 from .memory import Memory
 
 _memory: Memory | None = None
@@ -204,6 +204,25 @@ def check_my_vitals() -> dict:
         return {"hata": "sağlık bilgisi şu an okunamıyor"}
 
 
+def set_reminder(text: str, due_at: str) -> str:
+    """Belirli bir zaman için hatırlatma kurar. due_at ISO-8601 biçiminde UTC olmalıdır (ör. '2026-07-31T15:00:00Z'). Geçmiş tarih verildiğinde veya geçersiz biçimde hata mesajı döner."""
+    try:
+        return reminders.set_reminder(_memory.db, text, due_at)
+    except Exception:
+        logging.exception("set_reminder: hatırlatma kurulamadı")
+        return "Hata: Hatırlatma şu an kurulamıyor."
+
+
+def list_reminders() -> dict:
+    """Bekleyen tüm hatırlatmaları zaman sırasına göre listeler."""
+    try:
+        return reminders.list_reminders(_memory.db)
+    except Exception:
+        logging.exception("list_reminders: hatırlatmalar okunamadı")
+        return {"hata": "Hatırlatmalar şu an okunamıyor"}
+
+
 ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
              get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
-             consult.consult_gemini, consult.consult_claude, check_my_vitals]
+             consult.consult_gemini, consult.consult_claude, check_my_vitals,
+             set_reminder, list_reminders]

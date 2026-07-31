@@ -32,7 +32,8 @@ from datetime import datetime, timezone
 from . import messages, retro, tasks
 
 EVENTS_COLLECTION = "events"
-SUPPORTED_KINDS = ("ping", "health_check", "task_tick", "task_enqueue", "weekly_retro")
+SUPPORTED_KINDS = ("ping", "health_check", "task_tick", "task_enqueue", "weekly_retro",
+                   "calendar_event", "gmail_message")
 HEALTH_TIMEOUT_SECONDS = 10
 
 
@@ -152,6 +153,15 @@ def record(db, *, source: str, kind: str, payload: dict, fetch=None,
         result, notify, summary, handled = _handle_task_enqueue(db, payload, now_fn)
     elif kind == "weekly_retro":
         result, notify, summary = _handle_weekly_retro(db, payload, now_fn)
+        handled = True
+    elif kind in ("calendar_event", "gmail_message"):
+        # Poller-written items (workspace_poll): the poller already computed
+        # notify per item (24h window / importance rule); record() just needs
+        # to persist it in the shared schema. handled=True -- the item WAS
+        # processed, "processed = stored" for stream kinds.
+        notify = bool(payload.get("notify"))
+        result = {"notify": notify}
+        summary = payload.get("summary") or payload.get("subject") or kind
         handled = True
     else:
         handled, result, notify = False, None, False

@@ -130,6 +130,9 @@ TOOL_ZONES = {
     # check_my_vitals (§4.5): salt okuma öz-rapor — kota sayaçları, process
     # gerçekleri, son politika engelleri. Yazma yok, dışa veri çıkışı yok.
     "check_my_vitals": ZONE_GREEN,
+    # Reminders (§4.4, Faz Y2.4): sarı bölge ("yap + bildir") ve yeşil bölge (salt okuma)
+    "set_reminder": ZONE_YELLOW,
+    "list_reminders": ZONE_GREEN,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 

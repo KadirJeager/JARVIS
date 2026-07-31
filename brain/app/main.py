@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, conversations, events, guest_gate, messages, repo_watch, speaker, vitals, voice, voice_manage, voice_trust
+from . import config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, vitals, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_scheduler, require_user
 
@@ -455,6 +455,26 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
     return {"anchors": total}
+
+
+@app.post("/api/jobs/workspace-poll")
+async def workspace_poll_job(email: str = Depends(require_scheduler)):
+    """Cloud Scheduler'ın tetiklediği Calendar + Gmail kontrol turu (Faz Y2.2/Y2.3).
+
+    repo-watch deseninin aynası: asyncio.to_thread (senkron Google API +
+    Firestore I/O loop'u dondurmasın), 502 sarması. Token yoksa poller
+    kendisi handled:false döner (çökmez)."""
+    from . import workspace_poll
+
+    try:
+        _init()
+        return await asyncio.to_thread(workspace_poll.poll_all, _memory.db)
+    except Exception:
+        logging.exception("workspace-poll job: poll_all failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Workspace kontrolü şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
 
 
 @app.post("/api/jobs/repo-watch")
