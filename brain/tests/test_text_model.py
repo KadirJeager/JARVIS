@@ -169,6 +169,69 @@ def test_resolve_newer_low_beats_older_high():
 
 
 # ---------------------------------------------------------------------------
+# latency_first (the VOICE path)
+# ---------------------------------------------------------------------------
+
+
+def test_latency_first_prefers_fastest_tier():
+    """Voice turns want the lowest-latency variant: extra-low > low > plain >
+    high at the SAME version."""
+    models = [
+        _model("gemini-3.5-flash-high"),
+        _model("gemini-3.5-flash"),
+        _model("gemini-3.5-flash-low"),
+        _model("gemini-3.5-flash-extra-low"),
+    ]
+    chosen = text_model.resolve(fetch_models=lambda: models, latency_first=True)
+    assert chosen == "gemini-3.5-flash-extra-low"
+
+
+def test_latency_first_version_still_dominates():
+    """A newer slow variant still beats an older fast one: version first,
+    variant second."""
+    models = [
+        _model("gemini-3.5-flash-extra-low"),
+        _model("gemini-3.6-flash-high"),
+    ]
+    chosen = text_model.resolve(fetch_models=lambda: models, latency_first=True)
+    assert chosen == "gemini-3.6-flash-high"
+
+
+def test_resolve_voice_model_passes_latency_first(monkeypatch):
+    """The config wrapper must actually reach for the fast tier, not just
+    expose the flag: with only high+plain in the catalog the voice resolver
+    picks plain, the text resolver picks high."""
+    catalog = [_model("gemini-3.6-flash"), _model("gemini-3.6-flash-high")]
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://proxy.test")
+    monkeypatch.delenv("JARVIS_VOICE_MODEL", raising=False)
+    monkeypatch.delenv("JARVIS_TEXT_MODEL", raising=False)
+    monkeypatch.setattr(text_model, "fetch_models", lambda **kw: catalog)
+    assert config.resolve_voice_model() == "gemini-3.6-flash"
+    assert config.resolve_text_model() == "gemini-3.6-flash-high"
+
+
+def test_resolve_voice_model_pins_and_fallbacks(monkeypatch):
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://proxy.test")
+    monkeypatch.setenv("JARVIS_VOICE_MODEL", "gemini-pinned")
+    assert config.resolve_voice_model() == "gemini-pinned"
+    monkeypatch.delenv("JARVIS_VOICE_MODEL")
+
+    def boom(**kw):
+        raise RuntimeError("proxy down")
+
+    monkeypatch.setattr(text_model, "resolve", boom)
+    assert config.resolve_voice_model() == config.VOICE_MODEL_FALLBACK
+
+
+def test_build_text_model_voice_uses_voice_resolution(monkeypatch):
+    monkeypatch.setattr(config, "LLM_BASE_URL", "")
+    monkeypatch.setattr(config, "resolve_voice_model", lambda: "voice-model-id")
+    monkeypatch.setattr(config, "resolve_text_model", lambda: "text-model-id")
+    assert main._build_text_model(voice=True) == "voice-model-id"
+    assert main._build_text_model() == "text-model-id"
+
+
+# ---------------------------------------------------------------------------
 # resolve() -- fallback paths
 # ---------------------------------------------------------------------------
 

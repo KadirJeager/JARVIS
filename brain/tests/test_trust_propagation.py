@@ -396,10 +396,13 @@ def production_init(monkeypatch):
     monkeypatch.setattr(memory_mod, "make_e5_embedders", lambda: fake_embedders)
     # BOTH runners' models now come from main._build_text_model() (proxy
     # support; protocol v2 retired the separate live model): pin the proxy OFF
-    # and text resolution deterministic, so a developer shell exporting
-    # JARVIS_LLM_BASE_URL/JARVIS_TEXT_MODEL can't leak into this fixture.
+    # and both resolutions deterministic -- the TEXT resolver and the VOICE
+    # resolver are deliberately patched to DIFFERENT ids so a test can prove
+    # which path each runner took (voice resolves latency_first). Also shield
+    # against a developer shell exporting JARVIS_LLM_BASE_URL/JARVIS_TEXT_MODEL.
     monkeypatch.setattr(main_mod.config, "LLM_BASE_URL", "")
     monkeypatch.setattr(main_mod.config, "resolve_text_model", lambda: "fake-text-model")
+    monkeypatch.setattr(main_mod.config, "resolve_voice_model", lambda: "fake-voice-model")
     capturing = _CapturingBuildAgent(agent_mod.build_agent)
     monkeypatch.setattr(agent_mod, "build_agent", capturing)
     for name in ("_runner", "_voice_runner", "_memory", "_messages", "_speaker_service"):
@@ -426,7 +429,7 @@ def test_init_voice_passes_the_trust_provider_and_init_passes_none(production_in
         "main._init_voice() built the production VOICE agent without "
         "trust_provider=voice_trust.lookup: the trust level the bridge computes "
         "can never reach policy_callback. This IS the C1 Critical defect.")
-    assert voice_call["model"] == "fake-text-model"      # same factory as text (v2)
+    assert voice_call["model"] == "fake-voice-model"     # voice resolves latency_first (v2)
     assert text_call["trust_provider"] is None, (
         "main._init() gave the TEXT agent a trust provider: /api/chat's policy "
         "callback must be structurally incapable of seeing voice signals")

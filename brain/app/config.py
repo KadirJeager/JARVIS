@@ -19,6 +19,33 @@ LLM_BASE_URL = os.environ.get("JARVIS_LLM_BASE_URL", "")
 # fails for any reason (proxy down, empty/filtered-out catalog, unexpected
 # exception).
 TEXT_MODEL_FALLBACK = "gemini-3.6-flash-high"
+# Voice turns go through the SAME text-turn machinery (protocol v2: STT/TTS
+# on the device), but a voice conversation is real-time: the thinking-heavy
+# "-high" variant the text resolver prefers costs seconds of dead air after
+# every utterance (prod complaint 2026-07-31). The voice runner therefore
+# resolves with latency_first=True -- fastest usable flash variant.
+VOICE_MODEL_FALLBACK = "gemini-3.6-flash"
+
+
+def resolve_voice_model() -> str:
+    """Resolve the model for the VOICE runner. Same rules as
+    resolve_text_model() -- JARVIS_VOICE_MODEL (falling back to
+    JARVIS_TEXT_MODEL) pins, no proxy means MODEL_NAME -- except the catalog
+    resolution passes latency_first=True (see text_model.resolve's docstring
+    for why) and the last-resort fallback is VOICE_MODEL_FALLBACK."""
+    env_override = os.environ.get("JARVIS_VOICE_MODEL") or os.environ.get("JARVIS_TEXT_MODEL")
+    if env_override:
+        return env_override
+    if not LLM_BASE_URL:
+        return MODEL_NAME
+    try:
+        return text_model.resolve(fallback=VOICE_MODEL_FALLBACK, latency_first=True)
+    except Exception:
+        logging.exception(
+            "config.resolve_voice_model: text_model.resolve() failed, using fallback %s",
+            VOICE_MODEL_FALLBACK,
+        )
+        return VOICE_MODEL_FALLBACK
 
 
 def resolve_text_model() -> str:

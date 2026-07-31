@@ -109,7 +109,8 @@ def fetch_models(base_url: str = "", api_key: str = "") -> list:
     return data.get("models", [])
 
 
-def resolve(fetch_models=fetch_models, fallback: str = "gemini-3.6-flash-high") -> str:
+def resolve(fetch_models=fetch_models, fallback: str = "gemini-3.6-flash-high",
+            latency_first: bool = False) -> str:
     """Pick the newest USABLE flash text-chat model, or `fallback` if none
     qualify.
 
@@ -117,8 +118,15 @@ def resolve(fetch_models=fetch_models, fallback: str = "gemini-3.6-flash-high") 
     fetch (module-level fetch_models() above). Filters applied, in order:
     gemini- id -> generateContent support -> flash class -> not
     task-specialized. Among survivors the highest version_key() wins; ties
-    prefer "-high" over plain over "-low" over "-extra-low", then fall back
-    to lexical order.
+    prefer "-high" over plain over "-low" over "-extra-low" (quality-first),
+    then fall back to lexical order.
+
+    `latency_first=True` (the VOICE path) inverts the variant preference to
+    the fastest tier available: "-extra-low" > "-low" > plain > "-high". A
+    voice turn is a real-time conversation, and a thinking-heavy variant adds
+    seconds the user experiences as dead air after every utterance (prod
+    complaint, 2026-07-31: "çok geç tepki veriyor"). Version still dominates:
+    a newer "-high" beats an older "-low".
 
     Logs a DATA-level line at INFO: how many models were fetched, how many
     survived the filters, and which one was ultimately chosen.
@@ -155,10 +163,14 @@ def resolve(fetch_models=fetch_models, fallback: str = "gemini-3.6-flash-high") 
         return fallback
 
     def sort_key(name: str) -> tuple:
-        # Higher version wins (max() picks the largest tuple); among equal
-        # versions the higher variant rank wins ("-high" > plain > "-low" >
-        # "-extra-low"); the final tiebreak is lexical.
-        return (version_key(name), _variant_rank(name), name)
+        # Higher version wins (max() picks the largest tuple). Among equal
+        # versions: quality-first prefers the higher variant rank ("-high" >
+        # plain > "-low" > "-extra-low"); latency-first inverts it (voice
+        # turns -- see the docstring). The final tiebreak is lexical.
+        rank = _variant_rank(name)
+        if latency_first:
+            rank = -rank
+        return (version_key(name), rank, name)
 
     chosen = max(candidates, key=sort_key)
     logging.info(

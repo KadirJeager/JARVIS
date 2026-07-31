@@ -109,6 +109,16 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
     private companion object {
         const val TAG = "AndroidSpeechToText"
 
+        // Endpointing tuning (prod complaint 2026-07-31: "birkaç kelime sonra
+        // cümle yarıda kesiliyor"). The platform defaults finalize an utterance
+        // after a short pause, which chops Turkish speech at every breath.
+        // These ask the recognizer to tolerate natural sentence-internal
+        // pauses before declaring end-of-speech. They are hints, not
+        // guarantees: Soda respects them, some network recognizers ignore them.
+        const val MIN_SPEECH_MS = 2000L
+        const val COMPLETE_SILENCE_MS = 1500L
+        const val MAYBE_COMPLETE_SILENCE_MS = 1500L
+
         val recognizeIntent: Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
@@ -119,6 +129,15 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             // to the network recognizer, which is still better than failing the call.
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, MIN_SPEECH_MS)
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                COMPLETE_SILENCE_MS,
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                MAYBE_COMPLETE_SILENCE_MS,
+            )
         }
 
         fun createRecognizer(context: Context): SpeechRecognizer =

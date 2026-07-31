@@ -30,6 +30,12 @@ class OkHttpVoiceTransport(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        // Default connect timeout (10 s) is not enough for a cold Cloud Run
+        // instance that is still loading torch/ECAPA when the WS upgrade
+        // arrives -- prod saw exactly this as "Bağlantı zaman aşımına uğradı"
+        // right after a deploy (2026-07-31). The warmup at startup shrinks
+        // the window, but the dial must tolerate what remains of it.
+        .connectTimeout(30, TimeUnit.SECONDS)
         .build(),
 ) : VoiceTransport {
 

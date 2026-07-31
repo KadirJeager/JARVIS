@@ -24,6 +24,40 @@ app = FastAPI(title="JARVIS Brain")
 app.include_router(voice.router)
 app.include_router(voice_manage.router)
 
+
+@app.on_event("startup")
+async def _warm_heavy_models() -> None:
+    """Pre-load the lazy heavy models at process start, off the event loop.
+
+    Prod evidence (2026-07-31): the FIRST voice utterance after a cold start
+    stalled ~20 s while ECAPA downloaded-and-loaded (its lazy singleton), and
+    the first memory search in the same window stalled again for the ~1.1 GB
+    e5 load. The user experiences that as "çok geç tepki veriyor" plus
+    client-side connect timeouts. Both loaders are already lock-guarded
+    singletons (speaker._get_model, memory._get_e5_model), so warming them
+    here only moves the inevitable cost from the first live request to
+    startup -- where Cloud Run's startup probe already waits. Failures are
+    logged, never fatal: the lazy path still works as the fallback.
+    """
+    import threading
+
+    from . import memory as memory_mod
+    from . import speaker as speaker_mod
+
+    def _warm() -> None:
+        for name, load in (
+            ("e5", memory_mod._get_e5_model),
+            ("ecapa", speaker_mod._get_model),
+        ):
+            try:
+                load()
+                logging.info("warmup: %s model loaded", name)
+            except Exception:
+                logging.exception("warmup: %s model failed to pre-load (lazy path remains)", name)
+
+    threading.Thread(target=_warm, name="model-warmup", daemon=True).start()
+
+
 _runner: Runner | None = None
 _session_service = InMemorySessionService()
 _memory = None
@@ -33,12 +67,12 @@ _voice_runner: Runner | None = None
 _speaker_service: "speaker.SpeakerService | None" = None
 
 
-def _build_text_model():
-    """Decide the model for the text runners -- BOTH of them.
+def _build_text_model(voice: bool = False):
+    """Decide the model for the text runners.
 
     Two shapes, both valid for ADK's Agent (str or BaseLlm):
     - config.LLM_BASE_URL empty: the resolved model NAME string (which is
-      config.MODEL_NAME unless JARVIS_TEXT_MODEL pins one) -- the genai SDK
+      config.MODEL_NAME unless the relevant pin env is set) -- the genai SDK
       then talks to AI Studio directly, exactly as before the proxy existed.
     - config.LLM_BASE_URL set: a google.adk.models.google_llm.Gemini INSTANCE
       bound to the proxy's base_url with the catalog-resolved model id. The
@@ -47,15 +81,18 @@ def _build_text_model():
       is sent as x-goog-api-key regardless) -- see app/text_model.py's
       module docstring for the live-verified details.
 
-    The VOICE runner (_init_voice below) uses this same factory since the v2
-    voice protocol: with STT/TTS on the device the server no longer opens a
-    Gemini Live session at all -- voice turns are plain text turns
-    (run_async), so there is no separate live model to resolve."""
+    voice=True (the _init_voice runner) resolves with latency_first: a voice
+    conversation is real-time, so the fastest usable flash variant wins over
+    the thinking-heavy one the text chat prefers (prod complaint 2026-07-31:
+    "çok geç tepki veriyor"). The v2 voice protocol moved STT/TTS onto the
+    device, so voice turns are plain text turns (run_async) -- there is no
+    separate live model to resolve, only this variant preference."""
+    resolve = config.resolve_voice_model if voice else config.resolve_text_model
     if not config.LLM_BASE_URL:
-        return config.resolve_text_model()
+        return resolve()
     from google.adk.models.google_llm import Gemini
 
-    return Gemini(model=config.resolve_text_model(), base_url=config.LLM_BASE_URL)
+    return Gemini(model=resolve(), base_url=config.LLM_BASE_URL)
 
 
 def _init() -> None:
@@ -141,7 +178,7 @@ def _init_voice() -> None:
     _voice_runner = Runner(
         app_name=APP_NAME,
         agent=build_agent(
-            _memory, FirestoreAudit(db), model=_build_text_model(),
+            _memory, FirestoreAudit(db), model=_build_text_model(voice=True),
             # ONLY the voice agent gets a trust provider: identity signals exist
             # only for live voice connections, and this keeps the text runner
             # structurally unable to see them (app/voice_trust.py).
