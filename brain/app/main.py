@@ -337,6 +337,11 @@ class EventRequest(BaseModel):
     payload: dict = {}
 
 
+class FcmRegisterRequest(BaseModel):
+    """Android cihazın FCM token kaydı (JarvisFCMService.onNewToken)."""
+    token: str
+
+
 # /healthz is intercepted by Google Frontend on run.app (returns Google's own
 # 404 before reaching the container) — the canonical health path is /api/health;
 # /healthz is kept for local convenience only.
@@ -455,6 +460,39 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
         logging.exception("enroll: failed for user_id=%s", email)
         raise HTTPException(status_code=502, detail="Ses kaydı işlenemedi, tekrar dene")
     return {"anchors": total}
+
+
+@app.post("/api/jobs/reminders-tick")
+async def reminders_tick_job(email: str = Depends(require_scheduler)):
+    """Scheduler tick: zamanı gelen hatırlatmaları FCM'e dağıtır (Faz Y2.4).
+    repo-watch deseni: asyncio.to_thread + 502 sarması."""
+    try:
+        _init()
+        return await asyncio.to_thread(
+            lambda: reminders.dispatch_due(_memory.db, fcm.send_reminder)
+        )
+    except Exception:
+        logging.exception("reminders-tick job: dispatch_due failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Hatırlatma dağıtımı şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+
+
+@app.post("/api/fcm/register")
+async def fcm_register(req: FcmRegisterRequest, email: str = Depends(require_user)):
+    """Android cihazın FCM token'ını kaydeder (Faz Y2.4)."""
+    try:
+        _init()
+        return fcm.register_token(_memory.db, email, req.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logging.exception("fcm/register: failed for user_id=%s", email)
+        raise HTTPException(
+            status_code=502,
+            detail="Bildirim kaydı şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
 
 
 @app.post("/api/jobs/workspace-poll")
