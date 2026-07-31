@@ -4,10 +4,14 @@ basit kural motoru değerlendirir.
 Akış: Cloud Scheduler (ileride Pub/Sub push) /api/jobs/event'e POST atar →
 her olay Firestore `events` koleksiyonuna yazılır → kind'a göre işlenir.
 
-İlk desteklenen kind'lar:
+Desteklenen kind'lar:
 - "ping": canlılık sinyali; sadece kayıt (handled=True, notify=False).
 - "health_check": payload'daki servis listesinin /api/health'ini çağırır;
   bir servis bile 200 dönmezse notify=True + Türkçe özet.
+- "task_tick": görev döngüsü (§7.6, app/tasks.py) — her active görev bir adım
+  ilerler; biten/bütçesi dolan görev varsa notify=True + Türkçe özet.
+- "task_enqueue": payload {title, goal, max_steps?, checkpoint?} ile görev
+  kurar (events şeması bozulmaz; kurulum da olaydır).
 
 Bilinmeyen kind HATA DEĞİLDİR (hata = gözlem): 400 yerine handled=False ile
 kaydedilir — yeni kind'lar sonradan kod eklemeden gönderilmeye başlanabilir,
@@ -25,8 +29,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+from . import messages, tasks
+
 EVENTS_COLLECTION = "events"
-SUPPORTED_KINDS = ("ping", "health_check")
+SUPPORTED_KINDS = ("ping", "health_check", "task_tick", "task_enqueue")
 HEALTH_TIMEOUT_SECONDS = 10
 
 
@@ -75,6 +81,38 @@ def _handle_health_check(payload: dict, fetch) -> tuple[dict, bool, str]:
     return result, False, f"Sağlık kontrolü: {len(checks)} servisin hepsi sağlıklı"
 
 
+def _handle_task_tick(db, payload: dict, fetch, now_fn) -> dict:
+    """Görev döngüsü turu (§7.6): her active görev bir adım ilerler.
+
+    fetch (events.http_status imzalı) health_patrol step'ine enjekte edilir;
+    raporlar payload["owner"] yoksa tasks.default_owner()'ın REPORT_SESSION_ID
+    oturumuna düşer (owner çözülemezse rapor atlanır, görevler yine yürür)."""
+    owner = payload.get("owner") or tasks.default_owner()
+    report_fn = None
+    if owner:
+        report_fn = tasks.make_reporter(messages.MessageStore(db), owner)
+    return tasks.tick(db, tasks.health_patrol_step(fetch),
+                      report_fn=report_fn, now_fn=now_fn)
+
+
+def _handle_task_enqueue(db, payload: dict, now_fn) -> tuple[dict | None, bool, str, bool]:
+    """Görev kurulumu: (result, notify, summary, handled). Geçersiz payload
+    502 değil handled=False gözlemidir — kurulum isteğinin reddi de kayda
+    geçer (hata = gözlem)."""
+    try:
+        task_id = tasks.enqueue(
+            db,
+            title=payload.get("title"),
+            goal=payload.get("goal"),
+            max_steps=payload.get("max_steps"),
+            checkpoint=payload.get("checkpoint"),
+            now_fn=now_fn,
+        )
+    except ValueError as exc:
+        return None, False, f"Görev kurulamadı: {exc}", False
+    return {"task_id": task_id}, False, f"Görev kuruldu: {payload.get('title')}", True
+
+
 def record(db, *, source: str, kind: str, payload: dict, fetch=None,
            now_fn=_now) -> dict:
     """Tek olayı işler, `events` koleksiyonuna yazar, endpoint özetini döner.
@@ -93,6 +131,14 @@ def record(db, *, source: str, kind: str, payload: dict, fetch=None,
     elif kind == "health_check":
         result, notify, summary = _handle_health_check(payload, fetch)
         handled = True
+    elif kind == "task_tick":
+        out = _handle_task_tick(db, payload, fetch, now_fn)
+        result = {"stepped": out["stepped"], "done": out["done"],
+                  "exhausted": out["exhausted"], "errors": out["errors"]}
+        notify, summary = out["notify"], out["summary"]
+        handled = True
+    elif kind == "task_enqueue":
+        result, notify, summary, handled = _handle_task_enqueue(db, payload, now_fn)
     else:
         handled, result, notify = False, None, False
         summary = f"Bilinmeyen olay türü '{kind}' gözlem olarak kaydedildi"

@@ -25,6 +25,12 @@ class FakeDoc:
     def __init__(self, store, key):
         self.store, self.key = store, key
 
+    @property
+    def id(self):
+        """Real DocumentReference exposes `.id` (the final path segment); tasks
+        code reads task_id off it after collection.add()/query streams."""
+        return self.key
+
     def get(self):
         data = self.store.get(self.key)
         return FakeSnap(data)

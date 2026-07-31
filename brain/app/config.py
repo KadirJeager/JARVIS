@@ -95,6 +95,11 @@ OAUTH_CLIENT_ID = os.environ.get("JARVIS_OAUTH_CLIENT_ID", "")
 # audience'ı (servis URL'i). Boşsa /api/jobs/repo-watch 503 döner.
 SCHEDULER_SA = os.environ.get("JARVIS_SCHEDULER_SA", "")
 SCHEDULER_AUD = os.environ.get("JARVIS_SCHEDULER_AUD", "")
+
+# Görev döngüsü (North Star §7.6, Faz Y1.3, app/tasks.py): görev kurulurken
+# bütçe (adım tavanı) verilmezse kullanılan varsayılan — bütçesiz görev YOK.
+# Token/para tavanı Y1.x işi; bu fazda tek bütçe türü adım sayısıdır.
+TASKS_DEFAULT_MAX_STEPS = 50
 ALLOWED_EMAILS = set(
     filter(None, os.environ.get("JARVIS_ALLOWED_EMAILS", "owner@example.com").split(","))
 )

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import app.auth as auth_mod
 import app.main as main_mod
-from app import config, events
+from app import config, events, tasks
 from app.memory import Memory
 from tests.fakes import FakeDB
 
