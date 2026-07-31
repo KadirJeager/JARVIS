@@ -12,7 +12,7 @@ spec:
         run.googleapis.com/startup-cpu-boost: 'true'
         run.googleapis.com/container-dependencies: '{"voice":["llm-proxy"]}'
       labels:
-        client.knative.dev/nonce: 'dp1785484534'
+        client.knative.dev/nonce: 'vl1785487573'
         run.googleapis.com/startupProbeType: Default
     spec:
       containerConcurrency: 80
@@ -20,7 +20,7 @@ spec:
       timeoutSeconds: 3600
       containers:
       - name: voice
-        image: gcr.io/your-gcp-project/jarvis-brain:deadpeer-bf4f96a
+        image: gcr.io/your-gcp-project/jarvis-brain:voicelat-594ecd4
         ports:
         - containerPort: 8080
           name: http1
