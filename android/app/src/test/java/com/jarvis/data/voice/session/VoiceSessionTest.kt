@@ -783,6 +783,64 @@ class VoiceSessionTest {
 
     // -- echo gate (Jarvis must never answer its own TTS) -----------------------------------
 
+    /**
+     * SAHA 4 Ağu 02:28 (hoparlör yönlendirmesinden sonra): Jarvis yine kendine cevap
+     * verdi. Delik: salt-zamanlama düşürmesi onset MANDALINA bağlıydı ve Android
+     * tanıyıcısı `onBeginningOfSpeech`i her zaman ATMAZ — mandal kurulmayınca
+     * konuşma SIRASINDA gelen final yalnız metin kapısına (isJarvisEcho) düşüyordu,
+     * tanıyıcının bozduğu kısa yankı oradan geçiyordu. Korumanın kendi kuralı
+     * ("hoparlör çalarken duyulan Kadir değildir") mandaldan bağımsızdır.
+     *
+     * ÖLDÜREN MUTASYON: onResult'taki `echoGuardActive()` dalını mandala geri
+     * bağlamak — bu test onset GÖNDERMEDEN finali verir ve düşmesini bekler.
+     */
+    @Test
+    fun sttFinalResult_whileTheGuardIsUp_isDropped_evenWithoutAnOnset() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Saat şu an gece iki buçuk, yatsan iyi olur."}""")
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+
+        // onset YOK (tanıyıcı kaçırdı) ve metin, yankının tanınmayacak kadar
+        // bozulmuş hâli — metin kapısı bunu yakalayamaz, yakalayan zamanlamadır.
+        f.stt.listener!!.onResult("saat on gece buçuk yatsan")
+
+        assertEquals(1, f.transport.sentTexts.size)
+        assertTrue(f.session.state.value.transcript.none { it.role == "user" })
+        // Düşen yankı çağrıyı asla parke etmez: tanıyıcı yeniden kurulur.
+        advanceTimeBy(400)
+        assertEquals(2, f.stt.listenCalls)
+    }
+
+    /**
+     * Son cümle yankısının deliği: onset kaçtı, yankının finali Jarvis sustuktan
+     * sonra (kuyrukta) geldi. Kuyruktaki mandalsız finali düşüremeyiz — Jarvis
+     * sustuktan hemen sonra verilen gerçek kısa cevap da orada gelir (bir alttaki
+     * iki test onu pinler). Onun yerine PARTIAL mandalı kurar: partial'lar,
+     * onset'in aksine güvenilir ateşlenir ve konuşma SIRASINDA gelen partial bu
+     * söyleyişin hoparlörden başladığının kanıtıdır.
+     *
+     * ÖLDÜREN MUTASYON: onPartialResult'taki mandal yükseltmesini silmek.
+     */
+    @Test
+    fun aPartialDuringJarvisSpeech_latchesTheUtterance_soItsTailFinalDrops() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Saat şu an gece iki buçuk, yatsan iyi olur."}""")
+
+        // onset YOK; konuşma sırasında bir partial düştü (yankının başlangıcı).
+        f.stt.listener!!.onPartialResult("saat şu an")
+        // Jarvis sustu; yankının bozuk finali KUYRUK içinde geliyor.
+        f.tts.listener!!.onUtteranceDone()
+        f.clock.now += 500
+        f.stt.listener!!.onResult("saat on gece buçuk yatsan")
+
+        assertEquals(1, f.transport.sentTexts.size)
+        assertTrue(f.session.state.value.transcript.none { it.role == "user" })
+    }
+
     @Test
     fun sttFinalResult_thatIsJarvisOwnTts_isDropped_notSent_notInTranscript() = runTest {
         val f = Fixture(backgroundScope)
@@ -829,6 +887,13 @@ class VoiceSessionTest {
         f.transport.listener!!.onOpen()
         f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Saat şu an akşam dokuz buçuk."}""")
 
+        // "Jarvis konuştuktan SONRA": söyleyiş bitti ve kuyruk penceresi geçti.
+        // (4 Ağu koruma düzeltmesinden beri konuşma SIRASINDA gelen final mandalsız
+        // da düşer — bu testin pinlediği şey o değil, metin kapısının gerçek
+        // konuşmayı yutmamasıdır.)
+        f.tts.listener!!.onUtteranceDone()
+        f.clock.now += 2_100
+
         f.stt.listener!!.onResult("yarın hava nasıl olacak")
 
         val frame = lastSentTextJson(f.transport)
@@ -842,6 +907,10 @@ class VoiceSessionTest {
         f.session.start()
         f.transport.listener!!.onOpen()
         f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Evet dedin mi?"}""")
+        // Gerçekçi zaman çizgisi: cevap, söyleyiş bitip kuyruk geçtikten sonra gelir
+        // (yukarıdaki testle aynı gerekçe).
+        f.tts.listener!!.onUtteranceDone()
+        f.clock.now += 2_100
 
         // Short answers must never be judged echo, even if Jarvis said the same word.
         f.stt.listener!!.onResult("evet")

@@ -136,15 +136,23 @@ class VoiceSession(
     private var onsetDuringJarvisSpeech = false
 
     /**
+     * True while Jarvis's voice is coming out of the speaker RIGHT NOW (bounded by the
+     * MAX ceiling). Split out of [echoGuardActive] because the two windows carry
+     * different certainty: while the speaker plays, nothing the microphone hears is
+     * Kadir — no latch needed; the TAIL is only a probability (echo decay vs. Kadir's
+     * quick answer), so tail-time drops additionally require the utterance to have
+     * PROVABLY begun during speech (the latch).
+     */
+    private fun jarvisSpeakingNow(): Boolean =
+        ttsActive > 0 && nowMs() < guardStartedAtMs + MAX_SPEAK_GUARD_MS
+
+    /**
      * True while Jarvis's voice is (or has just been) coming out of the speaker.
-     * `ttsActive > 0` is the live signal; the tail covers the room's decay and the
+     * [jarvisSpeakingNow] is the live signal; the tail covers the room's decay and the
      * recognizer's own latency; both are bounded so neither can latch open.
      */
-    private fun echoGuardActive(): Boolean {
-        val now = nowMs()
-        if (ttsActive > 0 && now < guardStartedAtMs + MAX_SPEAK_GUARD_MS) return true
-        return now < guardTailUntilMs
-    }
+    private fun echoGuardActive(): Boolean =
+        jarvisSpeakingNow() || nowMs() < guardTailUntilMs
 
     /** Jarvis stopped talking: start the decay tail. */
     private fun openGuardTail() {
@@ -307,6 +315,13 @@ class VoiceSession(
 
         override fun onPartialResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
+            // A partial arriving while the speaker plays upgrades to a LATCH: partials
+            // fire reliably where onBeginningOfSpeech does not (the 4 Ağu 02:28 hole),
+            // and an utterance whose hypothesis was already forming mid-speech provably
+            // BEGAN there — so its final gets the same tail-time treatment an onset
+            // latch would have bought it. Speech only, never the tail: a partial in the
+            // tail is just as likely Kadir's quick answer.
+            if (jarvisSpeakingNow()) onsetDuringJarvisSpeech = true
             // The guard covers PARTIALS too. Only the onset and the final were gated, so
             // while Jarvis spoke the recognizer's running hypothesis -- his own words,
             // off the loudspeaker -- was drawn as Kadir's dimmed bubble (saha, S23,
@@ -320,30 +335,31 @@ class VoiceSession(
         override fun onResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (text.isNotBlank()) {
-                if (onsetDuringJarvisSpeech && (echoGuardActive() || isJarvisEcho(text))) {
-                    // This utterance BEGAN while the speaker was playing Jarvis's own
-                    // voice (latched in onBeginningOfSpeech). Timing, not similarity:
-                    // this catches the short echoes ECHO_MIN_CHARS lets through and
-                    // the ones the recognizer mangled beyond textual recognition.
+                if (jarvisSpeakingNow() ||
+                    (onsetDuringJarvisSpeech && echoGuardActive()) || isJarvisEcho(text)
+                ) {
+                    // Three drops, in decreasing certainty:
                     //
-                    // The onset alone is NOT enough to drop on, though. One recognition
-                    // turn can span both the echo and Kadir: the echo trips the onset,
-                    // then Jarvis stops, then Kadir answers inside the recognizer's
-                    // 1.5 s silence window, so no endpoint occurs and the single final
-                    // carries KADIR's words. Dropping on the latch alone swallowed them
-                    // silently -- he would watch his sentence appear and vanish, with no
-                    // reply. So a latched utterance is only dropped while the guard is
-                    // STILL up (a real echo's final lands there, which is what
-                    // ECHO_TAIL_MS is sized for) or when the text itself gives it away.
-                    // Past that, a latched final is treated as speech: this is also what
-                    // quietly gives voice barge-in back, since someone who talks over
-                    // Jarvis and keeps going finalizes well outside the tail.
-                    _state.update { it.copy(partialText = null) }
-                } else if (isJarvisEcho(text)) {
-                    // The recognizer heard Jarvis's own TTS from the speaker and
-                    // transcribed it as user speech. Answering it would put Jarvis
-                    // in a self-reply loop (prod report, 2026-07-31: "kendini
-                    // duyuyor, kendine cevap veriyor"). Drop it and re-arm.
+                    // 1. WHILE THE SPEAKER PLAYS, no latch needed: nothing the mic
+                    //    hears mid-speech is Kadir. The latch-only version of this was
+                    //    the 4 Ağu 02:28 hole — Android skips onBeginningOfSpeech
+                    //    often enough that a mangled echo's final arrived unlatched
+                    //    MID-SPEECH with only the text gate standing, and Jarvis
+                    //    answered himself off the loudspeaker.
+                    // 2. In the TAIL only with the latch (onset, or a mid-speech
+                    //    partial): the tail is a probability window and Jarvis's-gone-
+                    //    quiet is exactly when Kadir's real quick answer also lands —
+                    //    an UNLATCHED tail final passes (the two tests below pin it).
+                    // 3. The text gate, any time.
+                    //
+                    // Pass-back cases survive: a recognition turn spanning the echo AND
+                    // Kadir (echo trips the latch, Jarvis stops, Kadir answers inside
+                    // the recognizer's 1.5 s silence window) finalizes AFTER the tail
+                    // and passes — which is also what quietly gives voice barge-in back
+                    // for someone who talks over Jarvis and keeps going. The stated
+                    // cost is unchanged: a Kadir utterance begun AND finalized entirely
+                    // inside Jarvis's speech is dropped (half-duplex trade;
+                    // interrupt() is the deterministic cut).
                     _state.update { it.copy(partialText = null) }
                 } else {
                     _state.update {
