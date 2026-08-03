@@ -452,3 +452,76 @@ gcloud scheduler jobs create http repo-watch \
   --oidc-service-account-email="$JARVIS_SCHEDULER_SA" \
   --oidc-token-audience="https://<brain-url>"
 ```
+
+## Onay merkezi (Faz Y3)
+
+Kırmızı bölge artık bir çıkmaz sokak değil. Bir kırmızı araç çağrısı
+`policy.make_policy_callback`'in `approval_sink`'inden geçip **bekleyen bir
+onaya** dönüşür; araç çalışmaz — çalışma anı **onay anıdır**
+(`approvals.decide`). North Star §4.8 / §9.
+
+**Koleksiyonlar**
+
+- `approvals` (auto-id): `{user_id, kind, title, detail, tool_name, tool_args,
+  zone, session_id, status, created_at, expires_at, decided_at, decided_by,
+  outcome}`. `status` ∈ `pending|approved|rejected|expired|failed`.
+- `approval_claims` (doc id = onay id'si): kararın **birincil kaydı**
+  (`{decision, by, at}`). Onay dokümanındaki `status` bunun izdüşümüdür.
+
+**Neden ayrı bir claim dokümanı.** Firestore'da işlemsiz koşullu güncelleme
+yoktur, ama `DocumentReference.create()` atomik bir "yoksa yaz"dır. Çift
+dokunuş ya da "push + kuyruk senkronu aynı anda" bu sayede kırmızı bir eylemi
+**iki kez çalıştıramaz**; ikinci çağrı `AlreadyExists` alır ve
+`{already: true}` döner. (Aynı desen `conversations` başlık yarışında da
+kullanılıyor.)
+
+**Zaman aşımı = reddet, ve KARAR anında uygulanır.** Süpürücü iş
+(`/api/jobs/approvals-tick`) tek başına yeterli değildir: süpürme ile son
+kullanma arasındaki pencerede gelen bir onay, süresi geçmiş bir kırmızı eylemi
+çalıştırırdı. `decide()` bu yüzden önce süreyi kontrol eder. Süpürücü bir
+temizlik yoludur, güvenlik sınırı değil.
+
+**Yürütme bir allowlist'tir.** `approvals.EXECUTORS` (`register_executor` ile
+doldurulur) kayıtlı olmayan bir `tool_name`'i **çalıştırmaz** —
+`status=failed`. Onay kaydına keyfi bir isim yazmak kod çalıştırma yolu
+değildir.
+
+**Uçlar**
+
+| Uç | Auth | İş |
+|---|---|---|
+| `GET /api/approvals` | `require_user` | Bekleyenler (süresi geçmişler hariç, ≤50) |
+| `GET /api/approvals/{id}` | `require_user` | Tek onayın güncel durumu (kart yenilemesi) |
+| `POST /api/approvals/{id}/approve` | `require_user` | Karar + yürütme |
+| `POST /api/approvals/{id}/reject` | `require_user` | Karar; yürütme yok |
+| `POST /api/jobs/approvals-tick` | `require_scheduler` | Süresi geçenleri `expired` yapar |
+
+Başkasının onayı **404** döner (403 değil — başka birinin onayının varlığı bile
+sızmasın).
+
+**İlk gerçek kırmızı araç: `cancel_reminder`.** Y3'ten önce `TOOL_ZONES` her
+aracı açıkça yeşil/sarı yapıyordu; `DEFAULT_ZONE = red` yalnızca tabloda
+olmayan araçlar içindi, ki öyle bir araç yoktu — yani onaylanacak hiçbir şey
+olmadan mekanizma doğrulanamazdı. `cancel_reminder` §9'un "bir şey silme"
+örneğinin en zararsızı ve model onu bugün zaten zincirleyebiliyor
+(`list_reminders` id veriyor). Bölge ataması bilinçli olarak muhafazakâr ve
+konfigürasyondur (§9: eşikler kodda gevşetilir, sohbette değil).
+
+**Kart sohbettedir** (§4.8: "ayrı ekran değil"). Sink, transcript'e
+`kind="approval"` + `meta.approval_id` taşıyan bir model mesajı yazar;
+`messages.history()` bu iki alanı yalnızca doluysa döndürür, yani alansız eski
+satırlar ve eski istemciler aynen çalışır. Kartın DURUMU transcript'e gömülü
+değildir — tek gerçek kaynak onay dokümanıdır.
+
+**Push.** `fcm.dispatch` tek yoldur; `send_reminder` (Y2.4) ve `send_approval`
+(Y3) onun sarmalayıcılarıdır. `send_approval` cihaz token'ı yokken sohbete
+**yazmaz** (`fallback_text=None`): kartı sink zaten aynı oturuma yazdı, ikinci
+bir satır gürültü olurdu. Push kaçarsa onay kaybolmaz — kuyruk uygulama
+açılınca `GET /api/approvals` ile senkronlanır.
+
+> **3 Ağustos 2026 saha notu:** Bu tarihe kadar push **hiç çalışmamıştı.**
+> Üretimde `fcm_tokens` boştu ve her gönderim sessizce sohbet fallback'ine
+> düşüyordu, çünkü Android modülünde `firebase-messaging` bağımlılığı ve
+> `FirebaseMessagingService` yoktu. Android istemcisi eklendikten sonra
+> doğrulandı: `fcm_tokens` 0 → 1 doküman, gerçek push cihazda
+> `channel=jarvis_push` bildirimi olarak çizildi.
