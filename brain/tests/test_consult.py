@@ -12,7 +12,7 @@ import urllib.request
 
 import pytest
 
-from app import config, consult, policy, tools
+from app import config, consult, policy
 
 
 def _model(name, methods=("generateContent",)):
@@ -304,13 +304,26 @@ def test_answer_is_capped_at_4000_chars(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_consult_tools_are_yellow_zone():
+def test_consult_gemini_is_yellow_zone():
     """§9: misafir danışma yeşil-sarı arası -> SARI (yap + bildir)."""
     assert policy.check_zone("consult_gemini") == "yellow"
-    assert policy.check_zone("consult_claude") == "yellow"
 
 
-def test_consult_tools_registered_in_all_tools():
+def test_consult_gemini_registered_in_all_tools():
     from tests.fakes import wired_into_all_tools
     assert wired_into_all_tools(consult.consult_gemini)
-    assert wired_into_all_tools(consult.consult_claude)
+
+
+def test_consult_claude_is_removed_from_the_agent_surface():
+    """KALDIRILDI (Kadir, 4 Ağu 02:48): "o öyle bi şey değildi — telefon
+    terminalinden veya uzak PC'den CLI üzerinden danışmaydı kurgusu." Ajanın
+    araç setine hiç ait değildi; ölü OAuth token'ı da sidecar'ı 5 dakikada bir
+    invalid_grant'la söyletiyordu. Fonksiyon module'de duruyor (CLI kurgusu
+    geri gelirse yeri hazır) ama KAYITLI DEĞİL ve bölge tablosunda da yok —
+    bilinmeyen araç fail-closed KIRMIZIDIR (check_zone'un varsayılanı).
+
+    ÖLDÜREN MUTASYON: consult_claude'u ALL_TOOLS'a ya da TOOL_ZONES'a geri
+    eklemek."""
+    from tests.fakes import wired_into_all_tools
+    assert not wired_into_all_tools(consult.consult_claude)
+    assert policy.check_zone("consult_claude") == "red"

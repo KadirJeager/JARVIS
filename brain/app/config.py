@@ -126,7 +126,8 @@ TOOL_ZONES = {
     # ("yap + bildir": run, and Kadir sees in the audit that an outside brain
     # was consulted).
     "consult_gemini": ZONE_YELLOW,
-    "consult_claude": ZONE_YELLOW,
+    # consult_claude bilerek YOK (4 Ağu, ajan yüzeyinden kaldırıldı): tabloda
+    # olmayan araç fail-closed KIRMIZIDIR, geri eklemek bilinçli bir karar olsun.
     # check_my_vitals (§4.5): salt okuma öz-rapor — kota sayaçları, process
     # gerçekleri, son politika engelleri. Yazma yok, dışa veri çıkışı yok.
     "check_my_vitals": ZONE_GREEN,

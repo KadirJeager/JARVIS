@@ -459,5 +459,7 @@ def _off_loop(fn):
 ALL_TOOLS = [_off_loop(f) for f in (
     get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
     get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
-    consult.consult_gemini, consult.consult_claude, check_my_vitals,
+    # consult_claude BİLEREK YOK (4 Ağu): kurgu Kadir'in CLI'dan danışmasıydı,
+    # ajanın araç seti değil — tests/test_consult.py'deki kaldırma testi pinler.
+    consult.consult_gemini, check_my_vitals,
     set_reminder, list_reminders, cancel_reminder, propose_tool, spawn_specialist)]

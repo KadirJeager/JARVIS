@@ -28,7 +28,7 @@ spec:
       timeoutSeconds: 3600
       containers:
       - name: voice
-        image: gcr.io/your-gcp-project/jarvis-brain:gecefix3-e2c0b54
+        image: gcr.io/your-gcp-project/jarvis-brain:gecefix4-591d857
         ports:
         - containerPort: 8080
           name: http1
@@ -69,9 +69,6 @@ spec:
         - name: oauth-auth
           mountPath: /secrets/auth
           readOnly: true
-        - name: oauth-auth-claude
-          mountPath: /secrets/auth-claude
-          readOnly: true
         resources:
           limits:
             cpu: 500m
@@ -89,12 +86,6 @@ spec:
           items:
           - key: latest
             path: antigravity.json
-      - name: oauth-auth-claude
-        secret:
-          secretName: cliproxy-oauth-claude
-          items:
-          - key: latest
-            path: claude.json
   traffic:
   # latestRevision, PINNED BİR REVİZYON DEĞİL.
   #
