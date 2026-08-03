@@ -7,8 +7,12 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 
 /**
  * Presence holder for a live voice call — owns NO call logic. The session object lives
@@ -63,7 +67,52 @@ class VoiceCallService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jarvis:voice-call")
                 .apply { acquire(MAX_CALL_MS) }
         }
+        routeVoiceToSpeaker()
         return START_NOT_STICKY // a killed process has no call to resume — do not resurrect
+    }
+
+    /**
+     * The reply plays as USAGE_VOICE_COMMUNICATION (AndroidTextToSpeech — the AEC fix),
+     * and on a phone that usage routes to the EARPIECE by default. Nobody holds Jarvis
+     * to their ear: since the AEC fix shipped, replies were "silent" — playing quietly
+     * out of the earpiece (4 Ağu 02:12). A live call therefore routes communication
+     * audio to the loudspeaker, the way every VoIP app's speakerphone does.
+     *
+     * ONLY when no external device is attached: a wired or Bluetooth headset in
+     * [AudioManager.getAvailableCommunicationDevices] means the user chose where audio
+     * goes, and stealing it back to the speaker would be worse than the bug.
+     */
+    private fun routeVoiceToSpeaker() {
+        val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val devices = audio.availableCommunicationDevices
+            val external = devices.any {
+                it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
+                    it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }
+            if (external) {
+                Log.i(TAG, "voice: harici ses cihazı bağlı, yönlendirmeye dokunulmadı")
+                return
+            }
+            val speaker = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            val ok = speaker != null && audio.setCommunicationDevice(speaker)
+            // DATA-level: a silent reply and a mis-routed reply look identical to the
+            // user; this line is what tells them apart in logcat.
+            Log.i(TAG, "voice: iletişim sesi hoparlöre yönlendirildi=$ok")
+        } else {
+            @Suppress("DEPRECATION")
+            audio.isSpeakerphoneOn = true
+        }
+    }
+
+    private fun clearVoiceRoute() {
+        val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audio.clearCommunicationDevice()
+        } else {
+            @Suppress("DEPRECATION")
+            audio.isSpeakerphoneOn = false
+        }
     }
 
     /**
@@ -77,6 +126,7 @@ class VoiceCallService : Service() {
     }
 
     override fun onDestroy() {
+        clearVoiceRoute()
         wakeLock?.takeIf { it.isHeld }?.release()
         wakeLock = null
         super.onDestroy()
@@ -85,6 +135,7 @@ class VoiceCallService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        private const val TAG = "VoiceCallService"
         private const val CHANNEL_ID = "voice_call"
         private const val NOTIFICATION_ID = 42
         /** Wake-lock safety ceiling; matches the server's 1h WebSocket request timeout. */
