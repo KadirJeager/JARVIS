@@ -235,6 +235,24 @@ class ChatViewModel(
     }
 
     /**
+     * The voice overlay just closed; reconcile the approval queue.
+     *
+     * A red-zone call made DURING a voice call raises its card while this screen sits
+     * inert underneath the overlay — the overlay is plain composition, so the chat gets
+     * no lifecycle event when it goes away, and the queue was only synced on launch and
+     * after send. Without this hook a voice-born approval stays invisible until the next
+     * app launch (the 4 Ağu 01:49 case: three cards created, none on screen).
+     *
+     * Guarded by [ChatUiState.signedIn]: the overlay flag is also observed once at first
+     * composition (LaunchedEffect), and hitting the queue before sign-in would paint
+     * "Onaylar şu an okunamıyor" over the sign-in screen.
+     */
+    fun onVoiceCallEnded() {
+        if (!_state.value.signedIn) return
+        viewModelScope.launch { syncApprovals() }
+    }
+
+    /**
      * Show the approval a push notification pointed at (`data.approval_id`, spec §10).
      *
      * The id is fetched directly rather than looked up in the queue: by the time Kadir

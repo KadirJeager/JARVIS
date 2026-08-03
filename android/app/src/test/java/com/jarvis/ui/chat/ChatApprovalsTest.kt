@@ -121,6 +121,46 @@ class ChatApprovalsTest {
             approvals = ApprovalRepository(approvals),
         )
 
+    // --- 0. voice overlay closing re-syncs the queue -------------------------------
+
+    /**
+     * 4 Ağu 01:49 vakası: ses görüşmesi İÇİNDE doğan onay kartı, overlay kapanınca
+     * görünmüyordu — overlay alttaki sohbete hiçbir yaşam-döngüsü olayı vermez ve
+     * kuyruk yalnız açılışta/gönderimde senkronlanıyordu. Görüşme bitişi artık bir
+     * senkron tetiğidir.
+     */
+    @Test
+    fun voiceCallEnding_syncsTheQueue_soAVoiceBornApprovalAppears() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi()
+        val vm = vm(approvals = approvals)
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        approvals.queue = listOf(dto("7"))
+        vm.onVoiceCallEnded()
+        advanceUntilIdle()
+
+        assertEquals(2, approvals.listCalls)
+        assertEquals(listOf("7"), vm.state.value.pinnedApprovals.map { it.id })
+    }
+
+    /**
+     * Overlay bayrağı açılışta da bir kez "kapalı" olarak gözlemlenir (LaunchedEffect
+     * ilk kompozisyonda koşar) — oturum açılmadan ağa çıkmak, girişten önce
+     * "Onaylar şu an okunamıyor" hatası basardı. Girişsiz çağrı YOK sayılır.
+     */
+    @Test
+    fun voiceCallEnding_beforeSignIn_staysOffTheNetwork() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi()
+        val vm = vm(approvals = approvals)
+
+        vm.onVoiceCallEnded()
+        advanceUntilIdle()
+
+        assertEquals(0, approvals.listCalls)
+        assertNull(vm.state.value.error)
+    }
+
     // --- 1. queue sync ------------------------------------------------------------
 
     /**

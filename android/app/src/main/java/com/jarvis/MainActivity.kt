@@ -346,10 +346,20 @@ class MainActivity : FragmentActivity() {
                     onRejectApproval = vm::rejectApproval,
                 )
 
+                // The overlay is plain composition: closing it fires no lifecycle event
+                // at the chat underneath, so a voice-born approval card stayed invisible
+                // until the next launch (the 4 Ağu 01:49 case). The flag flip IS the
+                // close event; the ViewModel ignores the first "closed" observation that
+                // this effect makes at initial composition (sign-in guard).
+                val inVoiceCall = voiceCallState.phase != VoicePhase.IDLE
+                LaunchedEffect(inVoiceCall) {
+                    if (!inVoiceCall) vm.onVoiceCallEnded()
+                }
+
                 // Drawn AFTER (= on top of) Nav: while a call is anything but IDLE the
                 // overlay owns the screen. Dismissing an error is also just stop() —
                 // the session is already torn down, this only returns the state to IDLE.
-                if (voiceCallState.phase != VoicePhase.IDLE) {
+                if (inVoiceCall) {
                     VoiceCallOverlay(
                         state = voiceCallState,
                         onStop = voiceCallVm::stop,
