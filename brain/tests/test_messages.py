@@ -1,6 +1,6 @@
 import pytest
 
-from app.messages import MessageStore, sanitize_session_id
+from app.messages import COLLECTION, MessageStore, sanitize_session_id
 from tests.fakes import FakeDB
 
 
@@ -48,6 +48,67 @@ def test_sanitize_session_id_accepts_uuid_like():
 def test_sanitize_session_id_rejects_invalid(bad):
     with pytest.raises(ValueError):
         sanitize_session_id(bad)
+
+
+# --- kind/meta (Faz Y3: onay kartı transcript'te taşınır, spec §7) ----------
+
+
+def test_append_writes_kind_and_meta_when_given():
+    store = _store()
+    store.append("u@x.com", "s1", "model", "Hatırlatma silinecek",
+                 kind="approval", meta={"approval_id": "a1"})
+    hist = store.history("u@x.com", "s1")
+    assert hist == [{
+        "role": "model", "text": "Hatırlatma silinecek",
+        "ts": "2026-01-01T00:00:00.000000+00:00",
+        "kind": "approval", "meta": {"approval_id": "a1"},
+    }]
+
+
+def test_plain_append_stays_byte_identical_to_today():
+    """GERİYE DÖNÜK UYUM PİMİ: kind/meta verilmeyen satır ne Firestore'da ne de
+    projeksiyonda yeni alan taşır. Bu test düşerse eski istemciler (ve eski
+    transcript satırları) yeni bir alanla karşılaşır."""
+    store = _store()
+    store.append("u@x.com", "s1", "user", "selam")
+
+    written = [s.to_dict() for s in store.db.collection(COLLECTION).stream()]
+    assert set(written[0]) == {"user_id", "session_id", "role", "text", "ts"}
+    assert store.history("u@x.com", "s1") == [
+        {"role": "user", "text": "selam", "ts": "2026-01-01T00:00:00.000000+00:00"}
+    ]
+
+
+def test_history_of_rows_written_before_kind_existed_is_unchanged():
+    """Y3 ÖNCESİ yazılmış satır (koleksiyona doğrudan konur) bugünkü üç alanla
+    BİREBİR aynı döner — yeni kod eski veriyi bozmaz."""
+    db = FakeDB()
+    db.collection(COLLECTION).add({
+        "user_id": "u@x.com", "session_id": "s1", "role": "model",
+        "text": "eski satır", "ts": "2026-01-01T00:00:00.000000+00:00",
+    })
+    store = MessageStore(db)
+
+    assert store.history("u@x.com", "s1") == [
+        {"role": "model", "text": "eski satır", "ts": "2026-01-01T00:00:00.000000+00:00"}
+    ]
+
+
+@pytest.mark.parametrize("kind,meta", [(None, None), ("", {}), (None, {}), ("", None)])
+def test_empty_kind_or_meta_is_never_projected(kind, meta):
+    """Yalnız DOLU alanlar yazılır: boş string / boş dict, alanın varlığından
+    daha kötüdür — istemci 'kind var ama boş' hâlini ayrıca ele almak zorunda
+    kalırdı."""
+    store = _store()
+    store.append("u@x.com", "s1", "model", "düz metin", kind=kind, meta=meta)
+    assert set(store.history("u@x.com", "s1")[0]) == {"role", "text", "ts"}
+
+
+def test_kind_and_meta_are_independent():
+    store = _store()
+    store.append("u@x.com", "s1", "model", "sadece kind", kind="approval")
+    hist = store.history("u@x.com", "s1")
+    assert hist[0]["kind"] == "approval" and "meta" not in hist[0]
 
 
 # --- delete_session (Katman 2b conversations feature) -----------------------
