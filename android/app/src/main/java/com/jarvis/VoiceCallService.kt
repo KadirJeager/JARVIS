@@ -78,25 +78,26 @@ class VoiceCallService : Service() {
      * out of the earpiece (4 Ağu 02:12). A live call therefore routes communication
      * audio to the loudspeaker, the way every VoIP app's speakerphone does.
      *
-     * ONLY a WIRED headset is honoured: plugging a cable in is a deliberate choice.
-     * Bluetooth is deliberately overridden — the first field test (4 Ağu 02:22) found
-     * the Galaxy Watch registered as a communication device and the replies played
-     * on the WRIST while the phone stayed silent. A watch, buds and a BT speaker are
-     * indistinguishable here by type; single-user reality (Kadir talks phone-in-hand)
-     * says speaker wins, and the log line names what was bypassed so a future
-     * buds-first session can revisit this rule.
+     * Honoured: a WIRED headset (plugging a cable in is a deliberate choice) and a
+     * BLE headset (TYPE_BLE_HEADSET is what modern earbuds register as — "kulaklık
+     * takılıysa ses oradan gelsin", 4 Ağu). Overridden: classic Bluetooth SCO — the
+     * first field test (02:22) found the Galaxy Watch registered EXACTLY as that
+     * (`Kadir(7)`) and the replies played on the WRIST while the phone stayed silent.
+     * An SCO-only legacy headphone loses to the speaker under this rule; the log line
+     * names every bypassed device so that day is a one-line diagnosis.
      */
     private fun routeVoiceToSpeaker() {
         val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val devices = audio.availableCommunicationDevices
-            val wired = devices.any {
+            val headset = devices.any {
                 it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
                     it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
             }
-            if (wired) {
-                Log.i(TAG, "voice: kablolu kulaklık takılı, yönlendirmeye dokunulmadı")
+            if (headset) {
+                Log.i(TAG, "voice: kulaklık bağlı, yönlendirmeye dokunulmadı")
                 return
             }
             val bypassed = devices.filter {
