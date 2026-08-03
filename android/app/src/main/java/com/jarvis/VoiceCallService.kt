@@ -78,27 +78,36 @@ class VoiceCallService : Service() {
      * out of the earpiece (4 Ağu 02:12). A live call therefore routes communication
      * audio to the loudspeaker, the way every VoIP app's speakerphone does.
      *
-     * ONLY when no external device is attached: a wired or Bluetooth headset in
-     * [AudioManager.getAvailableCommunicationDevices] means the user chose where audio
-     * goes, and stealing it back to the speaker would be worse than the bug.
+     * ONLY a WIRED headset is honoured: plugging a cable in is a deliberate choice.
+     * Bluetooth is deliberately overridden — the first field test (4 Ağu 02:22) found
+     * the Galaxy Watch registered as a communication device and the replies played
+     * on the WRIST while the phone stayed silent. A watch, buds and a BT speaker are
+     * indistinguishable here by type; single-user reality (Kadir talks phone-in-hand)
+     * says speaker wins, and the log line names what was bypassed so a future
+     * buds-first session can revisit this rule.
      */
     private fun routeVoiceToSpeaker() {
         val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val devices = audio.availableCommunicationDevices
-            val external = devices.any {
-                it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
-                    it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            val wired = devices.any {
+                it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET
             }
-            if (external) {
-                Log.i(TAG, "voice: harici ses cihazı bağlı, yönlendirmeye dokunulmadı")
+            if (wired) {
+                Log.i(TAG, "voice: kablolu kulaklık takılı, yönlendirmeye dokunulmadı")
                 return
             }
+            val bypassed = devices.filter {
+                it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
+                    it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }.joinToString { "${it.productName}(${it.type})" }
             val speaker = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
             val ok = speaker != null && audio.setCommunicationDevice(speaker)
             // DATA-level: a silent reply and a mis-routed reply look identical to the
             // user; this line is what tells them apart in logcat.
-            Log.i(TAG, "voice: iletişim sesi hoparlöre yönlendirildi=$ok")
+            Log.i(TAG, "voice: hoparlöre yönlendirildi=$ok ezilen=[$bypassed]")
         } else {
             @Suppress("DEPRECATION")
             audio.isSpeakerphoneOn = true
