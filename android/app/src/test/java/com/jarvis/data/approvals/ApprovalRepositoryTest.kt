@@ -5,6 +5,10 @@ import com.jarvis.data.net.ApprovalDecisionDto
 import com.jarvis.data.net.ApprovalDto
 import com.jarvis.data.net.ApprovalsResponse
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
+import retrofit2.HttpException
+import retrofit2.Response
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -24,6 +28,19 @@ import org.junit.Test
  *   the server may already have decided.
  */
 class ApprovalRepositoryTest {
+
+    /** Builds a real retrofit HttpException for a status code, the way OkHttp would. */
+    private fun http(code: Int) = HttpException(
+        Response.error<Any>(code, "".toResponseBody("application/json".toMediaType())),
+    )
+
+    /** An API whose queue call always fails; everything else is unused here. */
+    private class FailingApi(private val boom: Throwable) : ApprovalApi {
+        override suspend fun list(): ApprovalsResponse = throw boom
+        override suspend fun get(id: String): ApprovalDto = throw boom
+        override suspend fun approve(id: String): ApprovalDecisionDto = throw boom
+        override suspend fun reject(id: String): ApprovalDecisionDto = throw boom
+    }
 
     private class FakeApprovalApi(
         var queue: List<ApprovalDto> = emptyList(),
@@ -154,5 +171,33 @@ class ApprovalRepositoryTest {
     fun decision_withAnUnknownStatus_isUnknown_notApproved() = runBlocking {
         val api = FakeApprovalApi(decision = ApprovalDecisionDto(status = null))
         assertEquals(ApprovalStatus.UNKNOWN, ApprovalRepository(api).approve("a1").status)
+    }
+
+    // --- version skew: an older server has no approval centre ---------------------
+
+    @Test
+    fun aServerWithoutTheApprovalEndpoint_readsAsAnEmptyQueue_notAnError() = runBlocking {
+        // The app can be newer than the deployment (it was, on 2026-08-03: the branch
+        // shipped to the phone while production still 404'd /api/approvals). A 404 here
+        // means the server HAS no approvals, so reporting an error banner on every
+        // launch and every send would be alarming Kadir about nothing.
+        val repo = ApprovalRepository(FailingApi(http(404)))
+        assertEquals(emptyList<Approval>(), repo.pending())
+    }
+
+    @Test
+    fun aRealFailure_stillPropagates_soAPendingRedActionIsNeverHiddenSilently() = runBlocking {
+        // The opposite case, and the reason the 404 rule is narrow: a 502 or a 401 means
+        // "we do not know what is pending". Answering "nothing" there would hide a red
+        // action behind a green-looking screen.
+        val repo = ApprovalRepository(FailingApi(http(502)))
+        val patladi = try {
+            repo.pending()
+            false
+        } catch (e: HttpException) {
+            assertEquals(502, e.code())
+            true
+        }
+        assertTrue("502 yutulmamalı", patladi)
     }
 }

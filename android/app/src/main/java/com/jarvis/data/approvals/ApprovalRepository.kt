@@ -3,6 +3,7 @@ package com.jarvis.data.approvals
 import com.jarvis.data.net.ApprovalApi
 import com.jarvis.data.net.ApprovalDecisionDto
 import com.jarvis.data.net.ApprovalDto
+import retrofit2.HttpException
 
 /**
  * Data access for the approval centre (spec §9/§10).
@@ -30,7 +31,16 @@ class ApprovalRepository(private val api: ApprovalApi) {
      * filtered out server-side. This is what makes a lost push harmless — the app syncs
      * from here on every launch instead of trusting the notification to arrive (spec §4.3).
      */
-    suspend fun pending(): List<Approval> = api.list().approvals.mapNotNull { it.toDomainOrNull() }
+    suspend fun pending(): List<Approval> = try {
+        api.list().approvals.mapNotNull { it.toDomainOrNull() }
+    } catch (e: HttpException) {
+        // 404 = this SERVER has no approval centre, i.e. it is older than this app.
+        // That is version skew, not a fault to alarm Kadir about, and it cannot hide a
+        // pending approval: a server without the endpoint has no approvals to hide.
+        // Anything else (401, 502, ...) still propagates -- those are real failures and
+        // silently reporting "no approvals" for them WOULD hide a red action.
+        if (e.code() == 404) emptyList() else throw e
+    }
 
     /** The CURRENT state of one approval; null when it cannot be rendered. Spec §7. */
     suspend fun get(id: String): Approval? = api.get(id).toDomainOrNull()
