@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -28,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,7 +69,26 @@ fun ChatScreen(
     onNewConversation: () -> Unit = {},
     onOpenConversation: (String) -> Unit = {},
     onDeleteConversation: (String) -> Unit = {},
+    onApproveApproval: (String) -> Unit = {},
+    onRejectApproval: (String) -> Unit = {},
 ) {
+    val listState = rememberLazyListState()
+
+    // Where the focused approval sits in the ONE LazyColumn below: thread rows first, then
+    // the pinned ones. Computed here rather than inside the list so the scroll target
+    // cannot drift from the render order.
+    val focusIndex = state.focusedApprovalId?.let { id ->
+        val inThread = state.messages.indexOfFirst { it.approvalId == id }
+        if (inThread >= 0) inThread
+        else state.pinnedApprovals.indexOfFirst { it.id == id }
+            .takeIf { it >= 0 }
+            ?.let { state.messages.size + it }
+    }
+    LaunchedEffect(focusIndex) {
+        // Tapping the push must land ON the card, not merely inside the app.
+        focusIndex?.let { runCatching { listState.animateScrollToItem(it) } }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -77,15 +98,46 @@ fun ChatScreen(
     ) {
         TopBar(onOpenVoiceProfile, onToggleConversations)
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (state.messages.isEmpty() && !state.loading) {
+            if (state.messages.isEmpty() && state.pinnedApprovals.isEmpty() && !state.loading) {
                 EmptyHint()
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(state.messages) { Bubble(it) }
+                    items(state.messages) { message ->
+                        // An approval row whose document has not arrived yet falls back to
+                        // the bubble — the server already wrote a readable Turkish card
+                        // into the row's text, so there is nothing to hide behind a
+                        // placeholder. Same for any kind this build does not know.
+                        val approval = message.approvalId?.let { state.approvals[it] }
+                        if (message.isApprovalCard && approval != null) {
+                            ApprovalCard(
+                                approval = approval,
+                                canDecide = state.canDecide(approval.id),
+                                deciding = state.isDeciding(approval.id),
+                                onApprove = { onApproveApproval(approval.id) },
+                                onReject = { onRejectApproval(approval.id) },
+                                focused = state.focusedApprovalId == approval.id,
+                            )
+                        } else {
+                            Bubble(message)
+                        }
+                    }
+                    // Pending approvals the thread does not show — a push that never
+                    // arrived, or a card that belongs to another conversation (spec §4.3).
+                    items(state.pinnedApprovals, key = { it.id }) { approval ->
+                        ApprovalCard(
+                            approval = approval,
+                            canDecide = state.canDecide(approval.id),
+                            deciding = state.isDeciding(approval.id),
+                            onApprove = { onApproveApproval(approval.id) },
+                            onReject = { onRejectApproval(approval.id) },
+                            focused = state.focusedApprovalId == approval.id,
+                        )
+                    }
                 }
             }
             if (state.loading) {

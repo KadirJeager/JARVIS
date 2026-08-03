@@ -2,9 +2,12 @@ package com.jarvis.ui.chat
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.jarvis.data.approvals.Approval
+import com.jarvis.data.approvals.ApprovalRepository
 import com.jarvis.data.chat.ChatRepository
 import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.UiMessage
+import com.jarvis.data.net.userMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +22,10 @@ import kotlinx.coroutines.launch
 class ChatViewModel(
     private val repo: ChatRepository,
     private val conversations: ConversationsRepository? = null,
+    // Nullable for the same reason [conversations] is: several tests build a chat with
+    // neither, and approvals are a feature OF this screen rather than a precondition for
+    // drawing it. Every approval entry point below is a no-op without it.
+    private val approvals: ApprovalRepository? = null,
 ) : ViewModel() {
 
     /**
@@ -184,6 +191,117 @@ class ChatViewModel(
                 _state.update { it.copy(messages = messages, loading = false) }
             } catch (e: Exception) {
                 _state.update { it.copy(loading = false, error = "Geçmiş yüklenemedi: ${e.message}") }
+            }
+            // Runs whether or not the history loaded: the queue does not depend on the
+            // transcript, and a pending red action must be visible even on a launch where
+            // the history call failed (spec §4.3).
+            syncApprovals()
+        }
+    }
+
+    /**
+     * Reconciles the approval cards with the server.
+     *
+     * Two reads, for two different failure modes:
+     *
+     * 1. `GET /api/approvals` — the QUEUE. This is what makes a lost push harmless: the
+     *    approval is here whether or not the notification ever arrived (spec §4.3).
+     * 2. `GET /api/approvals/{id}` for every card in the transcript the queue did NOT
+     *    return. Those are the decided ones, and the transcript cannot tell us their
+     *    verdict — the row still reads "🔔 Onay bekliyor" and always will. The approval
+     *    document is the single source of truth for the badge (spec §7). A card the queue
+     *    DID return is already current, so it is not fetched twice.
+     *
+     * A failed queue read keeps the cards already on screen. An empty list means "no
+     * approvals"; a failure means "we could not look", and quietly retracting a red action
+     * that is still waiting is the worse of the two ways to be wrong.
+     */
+    private suspend fun syncApprovals() {
+        val repoRef = approvals ?: return
+        val queue = runCatching { repoRef.pending() }
+        val merged = LinkedHashMap<String, Approval>()
+        if (queue.isFailure) merged.putAll(_state.value.approvals)
+        queue.getOrNull()?.forEach { merged[it.id] = it }
+
+        for (id in _state.value.messages.mapNotNull { it.approvalId }.distinct()) {
+            if (id in merged && queue.isSuccess) continue
+            runCatching { repoRef.get(id) }.getOrNull()?.let { merged[it.id] = it }
+        }
+
+        val queueError = queue.exceptionOrNull()
+            ?.userMessage("Onaylar şu an okunamıyor. Az sonra tekrar dene.")
+        _state.update { it.copy(approvals = merged, error = it.error ?: queueError) }
+    }
+
+    /**
+     * Show the approval a push notification pointed at (`data.approval_id`, spec §10).
+     *
+     * The id is fetched directly rather than looked up in the queue: by the time Kadir
+     * taps the notification the approval may have been decided elsewhere or expired, and
+     * "the card you were sent is gone" is a worse answer than showing it with its real
+     * badge.
+     */
+    fun focusApproval(approvalId: String?) {
+        val id = approvalId?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        _state.update { it.copy(focusedApprovalId = id) }
+        val repoRef = approvals ?: return
+        viewModelScope.launch {
+            runCatching { repoRef.get(id) }.getOrNull()?.let { approval ->
+                _state.update { it.copy(approvals = it.approvals + (approval.id to approval)) }
+            }
+        }
+    }
+
+    fun approveApproval(approvalId: String) = decideApproval(approvalId, approve = true)
+
+    fun rejectApproval(approvalId: String) = decideApproval(approvalId, approve = false)
+
+    /**
+     * Sends a decision and adopts the status the SERVER returned.
+     *
+     * NO OPTIMISTIC UPDATE — the 3d-3 lesson. The button says "approve"; the server may
+     * answer `expired`, because the TTL is enforced at decision time and not only by the
+     * sweeper (spec §4.1). A card that flipped to "Onaylandı" on tap would be claiming a
+     * red action ran when it never did. On failure the card does not move at all: it stays
+     * pending and decidable, so a retry is one tap away.
+     *
+     * The guard is [ChatUiState.canDecide], the same flag the buttons are drawn from, so a
+     * double tap sends one decision and an already-decided card sends none.
+     */
+    private fun decideApproval(approvalId: String, approve: Boolean) {
+        val repoRef = approvals ?: return
+        if (!_state.value.canDecide(approvalId)) return
+        _state.update {
+            it.copy(decidingApprovals = it.decidingApprovals + approvalId, error = null)
+        }
+        viewModelScope.launch {
+            val result = runCatching {
+                if (approve) repoRef.approve(approvalId) else repoRef.reject(approvalId)
+            }
+            _state.update { s ->
+                val stillDeciding = s.decidingApprovals - approvalId
+                result.fold(
+                    onSuccess = { decision ->
+                        val current = s.approvals[approvalId]
+                        s.copy(
+                            decidingApprovals = stillDeciding,
+                            approvals = if (current == null) s.approvals else s.approvals +
+                                (approvalId to current.copy(
+                                    status = decision.status,
+                                    outcome = decision.outcome ?: current.outcome,
+                                )),
+                        )
+                    },
+                    onFailure = { e ->
+                        s.copy(
+                            decidingApprovals = stillDeciding,
+                            error = e.userMessage(
+                                if (approve) "Onaylanamadı. Az sonra tekrar dene."
+                                else "Reddedilemedi. Az sonra tekrar dene.",
+                            ),
+                        )
+                    },
+                )
             }
         }
     }

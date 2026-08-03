@@ -50,6 +50,8 @@ fun Nav(
     onNewConversation: () -> Unit = {},
     onOpenConversation: (String) -> Unit = {},
     onDeleteConversation: (String) -> Unit = {},
+    onApproveApproval: (String) -> Unit = {},
+    onRejectApproval: (String) -> Unit = {},
 ) {
     when (state.authPhase) {
         AuthPhase.CHECKING -> BootSplash()
@@ -70,6 +72,8 @@ fun Nav(
                 onNewConversation = onNewConversation,
                 onOpenConversation = onOpenConversation,
                 onDeleteConversation = onDeleteConversation,
+                onApproveApproval = onApproveApproval,
+                onRejectApproval = onRejectApproval,
             )
             Route.VOICE_PROFILE -> VoiceProfileScreen(
                 state = voiceState,

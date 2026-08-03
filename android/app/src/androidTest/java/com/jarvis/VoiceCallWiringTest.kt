@@ -14,6 +14,10 @@ import androidx.test.rule.GrantPermissionRule
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ApprovalApi
+import com.jarvis.data.net.ApprovalDecisionDto
+import com.jarvis.data.net.ApprovalDto
+import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
@@ -80,6 +84,18 @@ class VoiceCallWiringTest {
         override suspend fun hasSignedInBefore() = true
         override suspend fun markSignedIn() {}
         override suspend fun clearSignedIn() {}
+    }
+
+    /**
+     * Approvals are wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers "no approvals" rather than reaching the deployed backend: a
+     * test suite must not talk to production at all.
+     */
+    private class FakeApprovalApi : ApprovalApi {
+        override suspend fun list() = ApprovalsResponse(emptyList())
+        override suspend fun get(id: String) = ApprovalDto(id = id, title = "t", status = "pending")
+        override suspend fun approve(id: String) = ApprovalDecisionDto("approved", null, false)
+        override suspend fun reject(id: String) = ApprovalDecisionDto("rejected", null, false)
     }
 
     private class FakeChatApi : JarvisApi {
@@ -177,7 +193,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -227,7 +243,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -272,7 +288,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(

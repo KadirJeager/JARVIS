@@ -10,6 +10,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ApprovalApi
+import com.jarvis.data.net.ApprovalDecisionDto
+import com.jarvis.data.net.ApprovalDto
+import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ConversationDeletedResponse
 import com.jarvis.data.net.ConversationsApi
 import com.jarvis.data.net.ConversationsResponse
@@ -81,6 +85,18 @@ class BootFlowTest {
         override suspend fun delete(sessionId: String) = ConversationDeletedResponse(sessionId)
     }
 
+    /**
+     * Approvals are wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers "no approvals" rather than reaching the deployed backend: a
+     * test suite must not talk to production at all.
+     */
+    private class FakeApprovalApi : ApprovalApi {
+        override suspend fun list() = ApprovalsResponse(emptyList())
+        override suspend fun get(id: String) = ApprovalDto(id = id, title = "t", status = "pending")
+        override suspend fun approve(id: String) = ApprovalDecisionDto("approved", null, false)
+        override suspend fun reject(id: String) = ApprovalDecisionDto("rejected", null, false)
+    }
+
     private class FakeChatApi : JarvisApi {
         override suspend fun chat(req: ChatRequest) = ChatResponse("")
         override suspend fun history(sessionId: String) = HistoryResponse(emptyList())
@@ -109,7 +125,7 @@ class BootFlowTest {
         app.container = AppContainer(
             app,
             authManager = HangingAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
             authStateStore = state,
         )
     }

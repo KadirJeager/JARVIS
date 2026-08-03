@@ -33,6 +33,20 @@ import com.jarvis.ui.voicecall.VoiceCallOverlay
 import com.jarvis.ui.voicecall.VoiceCallViewModel
 import kotlinx.coroutines.launch
 
+/**
+ * The intent extra that carries an approval id into the app.
+ *
+ * The name is the WIRE key, not a local invention: `fcm.send_approval` sends
+ * `data.approval_id`, and Firebase copies a notification's `data` map into the launch
+ * intent's extras verbatim. One concept, one name, end to end.
+ *
+ * NOTE: nothing in this app produces this extra yet — there is no
+ * `FirebaseMessagingService`, because `firebase-messaging` is not a dependency of this
+ * module (only `google-services.json` is present). This is the receiving half of the
+ * contract; the service that delivers the tap is a separate slice.
+ */
+const val EXTRA_APPROVAL_ID = "approval_id"
+
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,7 +54,11 @@ class MainActivity : FragmentActivity() {
         setContent {
             JarvisTheme {
                 val vm: ChatViewModel = viewModel {
-                    ChatViewModel(container.chatRepository, container.conversationsRepository)
+                    ChatViewModel(
+                        container.chatRepository,
+                        container.conversationsRepository,
+                        container.approvalRepository,
+                    )
                 }
                 val state by vm.state.collectAsState()
                 val scope = rememberCoroutineScope()
@@ -198,6 +216,10 @@ class MainActivity : FragmentActivity() {
                 LaunchedEffect(Unit) {
                     // Every launch opens a NEW conversation; the old ones live in the list.
                     vm.onColdStart()
+                    // A push notification carries `data.approval_id` (fcm.send_approval,
+                    // spec §10). Reading it here means tapping the notification lands on
+                    // THAT card. Absent on an ordinary launch, where this is a no-op.
+                    vm.focusApproval(intent?.getStringExtra(EXTRA_APPROVAL_ID))
                     val returning = container.authStateStore.hasSignedInBefore()
                     if (returning) vm.onReturningUser()
 
@@ -253,6 +275,8 @@ class MainActivity : FragmentActivity() {
                     onNewConversation = vm::startNewConversation,
                     onOpenConversation = vm::openConversation,
                     onDeleteConversation = vm::deleteConversation,
+                    onApproveApproval = vm::approveApproval,
+                    onRejectApproval = vm::rejectApproval,
                 )
 
                 // Drawn AFTER (= on top of) Nav: while a call is anything but IDLE the
