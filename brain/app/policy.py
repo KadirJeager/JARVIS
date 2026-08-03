@@ -11,8 +11,44 @@ class AuditWriter(Protocol):
     def write(self, entry: dict) -> None: ...
 
 
-def check_zone(tool_name: str) -> str:
-    return config.TOOL_ZONES.get(tool_name, config.DEFAULT_ZONE)
+# (tool name) -> zone | None. app/tool_registry.make_zone_resolver builds the
+# production one; None means "this resolver knows nothing about that name".
+ZoneResolver = Callable[[str], str | None]
+
+
+def check_zone(tool_name: str, zone_resolver: "ZoneResolver | None" = None) -> str:
+    """Resolve a tool's zone (North Star §9). Order is a SECURITY BOUNDARY, not
+    a style choice (Y4 spec §4.2):
+
+        config.TOOL_ZONES (code)  ->  registry (resolver)  ->  DEFAULT_ZONE (red)
+
+    Code first, unconditionally: a granted registry entry can only assign a zone
+    to a name the code does NOT know. If the registry could win, one approved
+    `{name: "cancel_reminder", zone: "green"}` document would pull a red tool
+    into green and bypass the approval centre entirely.
+
+    `zone_resolver` is INJECTED rather than read from a module-level db so this
+    function stays pure and db-free. Called without one -- as app/guest_gate.py
+    and every pre-Y4 caller do -- the behaviour is byte-identical to before:
+    known tool -> its code zone, unknown tool -> red.
+
+    A resolver that raises, or answers with anything outside the grantable
+    zones (green/yellow), degrades to DEFAULT_ZONE (red). Fail-closed: a
+    Firestore hiccup or a corrupted document must never OPEN a tool.
+    """
+    zone = config.TOOL_ZONES.get(tool_name)
+    if zone is not None:
+        return zone
+    if zone_resolver is not None:
+        try:
+            resolved = zone_resolver(tool_name)
+        except Exception:
+            logging.exception(
+                "policy: zone resolver failed for tool=%s -- falling back to red", tool_name)
+            resolved = None
+        if resolved in (config.ZONE_GREEN, config.ZONE_YELLOW):
+            return resolved
+    return config.DEFAULT_ZONE
 
 
 def write_audit(
@@ -154,7 +190,8 @@ def _red_block_text(tool_name: str, args: dict[str, Any],
 
 
 def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | None = None,
-                         approval_sink: ApprovalSink | None = None):
+                         approval_sink: ApprovalSink | None = None,
+                         zone_resolver: "ZoneResolver | None" = None):
     """`trust_provider` is how voice identity reaches the policy matrix: ONLY
     the voice runner's agent is built with one (main._init_voice), so the text
     runner's callback is structurally incapable of seeing voice trust and the
@@ -166,10 +203,16 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
     voice runners (main._init / main._init_voice) -- never by the guest gate,
     which does not use this factory at all (§4.9: guests never reach RED). Left
     None -- as every other caller does -- the RED branch keeps its exact
-    pre-Y3 text, and the tool is blocked exactly as before."""
+    pre-Y3 text, and the tool is blocked exactly as before.
+
+    `zone_resolver` (Faz Y4, spec §4.2) lets the tool registry assign zones to
+    tools the CODE does not know -- granted MCP servers and capabilities Jarvis
+    acquired after this build shipped. It can never loosen a zone that
+    config.TOOL_ZONES already states; see check_zone for why that ordering is
+    the security boundary. Left None, zone resolution is exactly pre-Y4."""
 
     def policy_callback(tool, args: dict[str, Any], tool_context) -> dict[str, Any] | None:
-        zone = check_zone(tool.name)
+        zone = check_zone(tool.name, zone_resolver)
         signals = _voice_signals(trust_provider, tool_context)
         trust_level = signals.trust_level if signals else _read_trust(tool_context)
         decision = _decide(zone, trust_level)

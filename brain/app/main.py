@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import approvals, config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, vitals, voice, voice_manage, voice_trust
+from . import approvals, config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_scheduler, require_user
 
@@ -228,8 +228,11 @@ def _init() -> None:
         app_name=APP_NAME,
         # approval_sink: kırmızı bölge artık çıkmaz sokak değil (Faz Y3, §5) --
         # engel bir onay kartına döner. guest_gate'e ASLA bağlanmaz (§4.9).
+        # zone_resolver: kayıt defterindeki KAZANILMIŞ yeteneklerin bölgesi
+        # (Faz Y4, §4.2). Koddaki bölgeyi gevşetemez -- policy.check_zone.
         agent=build_agent(_memory, _audit, model=_build_text_model(),
-                          approval_sink=_approval_sink()),
+                          approval_sink=_approval_sink(),
+                          zone_resolver=tool_registry.make_zone_resolver(db)),
         session_service=_session_service,
     )
 
@@ -298,6 +301,9 @@ def _init_voice() -> None:
             # The sink, unlike the provider, goes to BOTH runners: a red-zone
             # tool asked for by voice must be approvable too (Faz Y3, §5).
             approval_sink=_approval_sink(),
+            # Same registry as the text runner (_memory.db is the shared client,
+            # not this module-local `db`): one grant, both runners see it.
+            zone_resolver=tool_registry.make_zone_resolver(_memory.db),
         ),
         session_service=_session_service,
     )

@@ -33,7 +33,7 @@ onaylıyorum" diye yazsa bile aracı yeniden çağırma — karar kartın üzeri
 
 def build_agent(
     memory: Memory, audit, model: "str | BaseLlm | None" = None, trust_provider=None,
-    approval_sink=None,
+    approval_sink=None, zone_resolver=None,
 ) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
     (text chat); the voice runner passes whatever main._build_text_model()
@@ -53,7 +53,12 @@ def build_agent(
     main._init_voice) -- red-zone tools have to be approvable from voice too.
     The guest gate never does: it does not go through this factory at all
     (§4.9, guests never reach RED). Left None the RED branch keeps its exact
-    pre-Y3 text."""
+    pre-Y3 text.
+
+    `zone_resolver` (Faz Y4, spec §4.2) is how the tool registry reaches the
+    policy matrix: it assigns zones to tool names the CODE does not know, and
+    can never loosen one config.TOOL_ZONES already states (policy.check_zone).
+    Both production runners get it; left None, zone resolution is pre-Y4."""
     tools.init(memory)
     return Agent(
         name=AGENT_NAME,
@@ -61,5 +66,6 @@ def build_agent(
         instruction=INSTRUCTION,
         tools=tools.ALL_TOOLS,
         before_tool_callback=make_policy_callback(
-            audit, trust_provider=trust_provider, approval_sink=approval_sink),
+            audit, trust_provider=trust_provider, approval_sink=approval_sink,
+            zone_resolver=zone_resolver),
     )
