@@ -123,6 +123,36 @@ Araştırma sonucu (kanıtlarıyla `~/.agents-shared/LESSONS.md` ve oturum kayd�
 yol **hibrit**: metin abonelik-OAuth'ta kalır, ses Vertex AI service account'a ayrılır.
 Bu bir bug fix değil, §13 maliyet modelini değiştiren bir yön kararı — Kadir'in.
 
+## Ek — aynı gece 23:10: onay kartı vakası KAPANDI (teşhis düzeltmesi)
+
+Yukarıdaki "sorun istemcide" sonucu **yanlıştı**. İstemcide hata yok; kart artık ekranda.
+
+Kanıt zinciri (yeni oturum, 23:00–23:10):
+
+1. Firestore dokümanı eksiksiz: `title` var, `user_id=owner@example.com`,
+   `created_at=19:52:47Z` (=22:52 yerel), `expires_at=20:52Z` (=23:52 yerel).
+2. `list_pending`'in birebir sorgusu Firestore'a karşı elle koşuldu: kayıt dönüyor.
+3. Cloud Run istek logları: Kadir'in uygulama kontrollerinin TAMAMI (18:27–19:41Z =
+   21:27–22:41 yerel) `GET /api/approvals` için **404** aldı — çünkü istekleri
+   **Y3-öncesi revizyonlar** servis etti (`00025-9xf`, 19:41'de `00016-pur`).
+   İstemci 404'ü tasarım gereği "bu sunucuda onay merkezi yok" sayar ve sessizce
+   boş kuyruk gösterir (`ApprovalRepository.pending`) — kartsızlığın ve hatasızlığın
+   tam açıklaması.
+4. Admin audit: `ReplaceService` 19:37:58Z trafiği yine `00016-pur`'a sardı;
+   19:43:57Z'deki ikinci replace düzeltti. Onay kaydı 19:52:47Z'de (düzeltmeden
+   SONRA, ses oturumundan) kuruldu; oturum boyunca uygulama bir daha açılmadığı
+   için kuyruk hiç yeniden okunmadı.
+5. Yeni oturumda soğuk başlatma (23:06): kart S23 ekranında — "Onay bekliyor",
+   `'cancel_reminder' çalıştırılsın mı?`, Onayla/Reddet. Sunucu logu:
+   `20:05:58Z GET /api/approvals → 200`, revizyon `00026-b5f`.
+
+Onay kaydına DOKUNULMADI — karar Kadir'in (kart 23:52 yerele kadar karar alabilir).
+
+Not edilen tasarım gözlemi (değiştirilmedi): istemcinin 404→boş-liste toleransı,
+sürüm kayması için bilinçli bir seçim ama bu olayda gerçek bir prod kesintisini de
+sessizleştirdi. Trafik kök nedeni YAML'da düzeltilip belgelendiği için istemci
+tarafında değişiklik yapılmadı.
+
 ## Küçük notlar
 
 - Sohbet listesindeki `%20`'li iki başlık 30 Temmuz curl smoke testlerinden kalma eski
