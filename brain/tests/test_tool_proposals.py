@@ -25,12 +25,12 @@ MCP_URL = "https://mcp.example.com/mcp"
 MCP_CMD = "npx -y @modelcontextprotocol/server-github"
 
 
-def _now():
-    return NOW.isoformat()
-
-
-def _at(minutes):
-    return (NOW + timedelta(minutes=minutes)).isoformat()
+# NOT: burada bir zamanlar `_now()` / `_at(dakika)` yardımcıları vardı ve
+# KALDIRILDILAR. propose_tool bir now_fn almadığı için onayı GERÇEK saatle
+# kuruyor; sabit bir NOW'a göre karar vermek testi iki ayrı zaman çizgisine
+# oturtuyor ve sonucu GÜNÜN SAATİNE bağlıyordu (bu dosya 3 Ağustos sabahı
+# yeşildi, gerçek zaman 12:00 UTC'yi geçince kırmızıya döndü). Süreye bağlı bir
+# şey ölçeceksen kaydın KENDİ `expires_at`'inden türet: `_after_expiry`.
 
 
 def _ctx(user_id=USER, session_id=SESSION_ID):
@@ -50,6 +50,21 @@ def _propose(db=None, *, name="github_mcp", kind=tool_registry.KIND_MCP,
              mcp_url=MCP_URL, mcp_command="", scopes="repo,read:org", ctx=None):
     return tools.propose_tool(name, kind, zone, why, ctx or _ctx(),
                               mcp_url=mcp_url, mcp_command=mcp_command, scopes=scopes)
+
+
+def _after_expiry(db, approval_id, minutes=1):
+    """Bu onayın KENDİ son kullanma anından `minutes` dakika sonrası.
+
+    Sabit bir NOW'a göre hesaplamak yerine kaydın kendi `expires_at`'inden
+    türetiliyor, çünkü `propose_tool` bir now_fn almıyor ve onayı GERÇEK saatle
+    kuruyor. Sabit anlı `_at(...)` ile karar vermek testi iki ayrı zaman
+    çizgisine oturtuyordu ve sonuç GÜNÜN SAATİNE bağlı hâle geliyordu: dosya
+    sabah yeşildi, gerçek zaman NOW'u (12:00 UTC) geçince kırmızıya döndü.
+    (approvals.request'in `now_fn=_now` varsayılanı TANIM anında bağlandığı için
+    `approvals._now`'u yamamak da bunu çözmez -- klasik geç-bağlama tuzağı.)"""
+    doc = db.collection(approvals.COLLECTION).docs[approval_id]
+    expires = datetime.fromisoformat(doc["expires_at"])
+    return (expires + timedelta(minutes=minutes)).isoformat()
 
 
 def _approvals(db):
@@ -238,7 +253,7 @@ def test_expired_grant_writes_nothing():
     _propose(db)
     aid, _ = _only_approval(db)
     out = approvals.decide(db, aid, USER, approvals.STATUS_APPROVED,
-                           now_fn=lambda: _at(config.APPROVAL_TTL_MINUTES + 1))
+                           now_fn=lambda: _after_expiry(db, aid))
     assert out["status"] == approvals.STATUS_EXPIRED
     assert _registry(db) == {}
 
