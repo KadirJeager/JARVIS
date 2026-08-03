@@ -14,12 +14,19 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.BiometricGate
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ApprovalApi
+import com.jarvis.data.net.ApprovalDecisionDto
+import com.jarvis.data.net.ApprovalDto
+import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ConversationDeletedResponse
 import com.jarvis.data.net.ConversationsApi
 import com.jarvis.data.net.ConversationsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.FcmApi
+import com.jarvis.data.net.FcmRegisterResponse
+import com.jarvis.data.net.FcmTokenRequest
 import com.jarvis.data.net.HistoryResponse
 import com.jarvis.data.net.JarvisApi
 import com.jarvis.data.net.LabelPatch
@@ -32,6 +39,7 @@ import com.jarvis.data.net.VoiceProfileResponse
 import com.jarvis.data.net.VoiceSampleDto
 import org.junit.After
 import org.junit.Assert.assertEquals
+import androidx.test.rule.GrantPermissionRule
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -62,6 +70,14 @@ class VoiceGateWiringTest {
 
     @get:Rule val compose = createEmptyComposeRule()
 
+    // POST_NOTIFICATIONS is now requested at STARTUP (approvals reach Kadir by push,
+    // North Star §4.8), not only inside startVoice(). Without this grant the system
+    // dialog opens over every MainActivity launch here and deadlocks the whole class.
+    @get:Rule
+    val notificationPermission: GrantPermissionRule =
+        GrantPermissionRule.grant(android.Manifest.permission.POST_NOTIFICATIONS)
+
+
     private class FakeAuthClient(private val token: String = "fake-token") : AuthClient {
         override fun currentToken(): String? = token
         override suspend fun signIn(activityContext: Context): Result<String> =
@@ -73,6 +89,27 @@ class VoiceGateWiringTest {
     private class FakeConversationsApi : ConversationsApi {
         override suspend fun list() = ConversationsResponse(emptyList())
         override suspend fun delete(sessionId: String) = ConversationDeletedResponse(sessionId)
+    }
+
+    /**
+     * The push path is wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers locally rather than reaching the deployed backend: a test
+     * suite must not talk to production at all.
+     */
+    private class FakeFcmApi : FcmApi {
+        override suspend fun register(req: FcmTokenRequest) = FcmRegisterResponse(true)
+    }
+
+    /**
+     * Approvals are wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers "no approvals" rather than reaching the deployed backend: a
+     * test suite must not talk to production at all.
+     */
+    private class FakeApprovalApi : ApprovalApi {
+        override suspend fun list() = ApprovalsResponse(emptyList())
+        override suspend fun get(id: String) = ApprovalDto(id = id, title = "t", status = "pending")
+        override suspend fun approve(id: String) = ApprovalDecisionDto("approved", null, false)
+        override suspend fun reject(id: String) = ApprovalDecisionDto("rejected", null, false)
     }
 
     private class FakeChatApi : JarvisApi {
@@ -134,7 +171,7 @@ class VoiceGateWiringTest {
             app,
             authManager = FakeAuthClient(),
             biometricGate = fakeGate,
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
         )
 
         ActivityScenario.launch(MainActivity::class.java).use {
@@ -179,7 +216,7 @@ class VoiceGateWiringTest {
             app,
             authManager = FakeAuthClient(),
             biometricGate = fakeGate,
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
         )
 
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->

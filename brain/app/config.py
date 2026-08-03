@@ -133,8 +133,32 @@ TOOL_ZONES = {
     # Reminders (§4.4, Faz Y2.4): sarı bölge ("yap + bildir") ve yeşil bölge (salt okuma)
     "set_reminder": ZONE_YELLOW,
     "list_reminders": ZONE_GREEN,
+    # cancel_reminder (Faz Y3, spec §2): onay merkezinin ilk GERÇEK kırmızı
+    # aracı — §9'un "bir şey silme" örneğinin en küçük, en zararsız hâli.
+    # Bilinçli olarak muhafazakâr: §9 "eşikler konfigürasyondur; güven arttıkça
+    # gevşetilebilir — kodda, sohbette değil". Mekanizma oturduktan sonra sarıya
+    # alınabilir; o karar bu satırın değiştirilmesidir, modelin ikna edilmesi
+    # değil.
+    "cancel_reminder": ZONE_RED,
+    # propose_tool (§8.5, Faz Y4.1): araç kazanım merdiveninin ilk basamağı.
+    # YEŞİL, çünkü bir öneri kurmak zararsızdır — kayıt defterine yazmaz, hiçbir
+    # yeteneği etkinleştirmez; asıl karar onay kartındadır ve onu Kadir verir.
+    "propose_tool": ZONE_GREEN,
+    # spawn_specialist (§8.5, Faz Y4.2): fabrika Kademe 1'in çağrı yüzeyi.
+    # SARI ("yap + bildir"): koşar ve Kadir audit'te/raporda görür. Kırmızı
+    # olsaydı her devir bir onay kartı isterdi (kalıphanenin amacı buharlaşır);
+    # yeşil olsaydı "bildir" yarısı zayıflardı — türetilmiş bir ajan koşturmak
+    # sıradan bir okuma değildir. Örneğin KENDİ araçları ayrıca kendi
+    # bölgelerinden geçer; bu bölge yalnızca DEVİR eylemini yetkilendirir.
+    "spawn_specialist": ZONE_YELLOW,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
+
+# Onay merkezi (North Star §4.8, Faz Y3, app/approvals.py): bir onay kartının
+# ömrü. Süre dolunca karar REDDEDİLİR — ve bu, süpürücü iş koşmasa bile karar
+# anında uygulanır (spec §4.1). Kısa tutmak güvenli yöndür: süresi dolan onay
+# kaybolmaz, model yeni bir kart oluşturabilir.
+APPROVAL_TTL_MINUTES = int(os.environ.get("JARVIS_APPROVAL_TTL_MINUTES", "60"))
 
 # Speaker identity (Katman 2b Dilim 3a) — cosine thresholds are starting
 # estimates, calibrated after enrollment (spec §15).

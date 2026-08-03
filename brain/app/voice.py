@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -43,6 +44,12 @@ from .auth import verify_token_email
 router = APIRouter()
 
 APP_NAME = "jarvis"   # must match main.APP_NAME: it is part of the ADK session identity
+
+# Echo-window estimate (see VoiceBridge._speech_seconds). Only ever suppresses
+# ADAPTATION, so every constant here is chosen to err long.
+SPEECH_CHARS_PER_SECOND = 14.0
+SPEECH_START_MARGIN_SECONDS = 1.0
+SPEECH_MAX_SECONDS = 60.0
 
 
 class VoiceBridge:
@@ -92,6 +99,44 @@ class VoiceBridge:
         # is what lets voice_trust.clear() compare-and-delete instead of wiping
         # a still-live sibling connection's signals (see voice_trust.clear).
         self._owner = uuid.uuid4().hex
+        # Monotonic deadline: until when the DEVICE is probably still speaking
+        # Jarvis's last reply out loud. Anything its microphone captures before
+        # then is echo, not Kadir.
+        #
+        # Why an ESTIMATE and not a flag between jarvis_text and turn_complete:
+        # those two frames go out back to back, microseconds apart -- the device
+        # starts speaking only after it receives them, and keeps speaking for
+        # seconds. A flag spanning them would be a placebo. The server has no
+        # direct signal for "the TTS is still playing" and this deliberately
+        # does not invent a protocol frame to ask the client for one: the
+        # client is exactly the component this guards against regressing.
+        #
+        # So it is estimated from the reply's length, and it is only ever
+        # allowed to SUPPRESS ADAPTATION -- never to change a verification, a
+        # trust level or a turn. Erring long costs a few adaptive samples the
+        # gallery did not strictly need; erring short would let the assistant's
+        # own TTS teach the gallery, which is the one failure this system
+        # cannot recover from without a human deleting samples.
+        self._speaking_until = 0.0
+
+    # Seam so tests can move time without sleeping. Monotonic, not wall clock:
+    # this is a duration guard and must not jump with an NTP correction.
+    _now = staticmethod(time.monotonic)
+
+    @staticmethod
+    def _speech_seconds(reply: str) -> float:
+        """Conservative estimate of how long the device will take to SAY `reply`.
+
+        Turkish TTS at a normal rate runs roughly 14 characters per second;
+        the constant is deliberately on the slow side and a flat margin is
+        added for engine start-up, because every error in the generous
+        direction costs only a skipped adaptive sample. Clamped so a
+        pathological reply cannot disable adaptation for the rest of the call.
+        """
+        return min(
+            SPEECH_MAX_SECONDS,
+            len(reply) / SPEECH_CHARS_PER_SECOND + SPEECH_START_MARGIN_SECONDS,
+        )
 
     def _publish_trust(self, level: str, voice_score: float | None) -> None:
         """Make this connection's identity signals visible to the policy layer.
@@ -259,11 +304,15 @@ class VoiceBridge:
         except Exception:
             logging.exception("voice bridge: text turn failed for %s", self._user_id)
             await self._safe_send(ws, vp.evt_error("İstek işlenemedi, tekrar dene"))
+            # NOT: _speaking_until burada sıfırlanmaz. Bu dalda hiç jarvis_text
+            # gitmedi, yani zaten bir konuşma penceresi açılmadı; açılmış olsaydı
+            # da onu erken kapatmak yalnızca adaptasyonu erken serbest bırakırdı.
             await self._safe_send(ws, vp.evt_turn_complete())
             return
         if reply:
             # jarvis_text FIRST (it is what the TTS speaks), then the
             # transcript row for the UI history; both before turn_complete.
+            self._speaking_until = self._now() + self._speech_seconds(reply)
             await self._safe_send(ws, vp.evt_jarvis_text(reply))
             await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
             self.transcript.append({"role": "jarvis", "text": reply})
@@ -321,6 +370,7 @@ class VoiceBridge:
             outcome = await asyncio.to_thread(
                 self.speaker_service.identify,
                 self._user_id, pcm, self.device_hint, auth_is_kadir=True,
+                allow_adapt=self._now() >= self._speaking_until,
             )
             verified, score = outcome.verified, outcome.score
         except Exception:

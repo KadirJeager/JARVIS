@@ -471,3 +471,24 @@ def test_cap_refused_promote_leaves_the_entry_unmarked_and_sample_auto():
     assert entry["correction"] is None, "a refused promote must not mark the entry"
     saved = [s for s in load_profile(db, "k").adaptive if s["id"] == auto_id]
     assert len(saved) == 1 and saved[0]["source"] == "auto", "unpromoted"
+
+
+# -- allow_adapt: the server's own echo guard (2026-08-03) ---------------------
+# Belt-and-braces behind the client-side half-duplex guard. If any client ever
+# streams audio again while the device is speaking Jarvis's reply, that audio
+# may still be SCORED (so trust degrades honestly) but must never be allowed to
+# feed the gallery -- a self-feeding TTS voice is the one failure this system
+# cannot recover from on its own.
+
+def test_allow_adapt_false_blocks_self_feeding_even_at_a_perfect_score():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    out = _svc(db).identify("k", b"A", "phone", auth_is_kadir=True, allow_adapt=False)
+    assert out.verified is True and out.score == 1.0     # still scored honestly
+    assert out.adapted_sample_id is None
+    assert load_profile(db, "k").adaptive == []          # gallery untouched
+
+
+def test_allow_adapt_defaults_to_true_so_existing_callers_are_unchanged():
+    db = FakeDB(); enroll_anchors(db, "k", [A])
+    _svc(db).identify("k", b"A", "phone", auth_is_kadir=True)
+    assert len(load_profile(db, "k").adaptive) == 1

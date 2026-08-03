@@ -2,7 +2,13 @@
 
 Model (Firestore `reminders` koleksiyonu): her hatırlatma tek doküman —
 {text: str, due_at: str (ISO UTC), status: "pending"|"sent"|"cancelled",
- created_at: str, sent_at: str|None, fcm_result: dict|str|None}.
+ created_at: str, sent_at: str|None, cancelled_at: str|None,
+ fcm_result: dict|str|None}.
+
+`cancel()` (Faz Y3) bu modülün tek YIKICI işlemidir: kaydı silmez, `cancelled`
+damgalar — geçmiş okunabilir kalsın diye. Kırmızı bölgededir ve normal akışta
+yalnızca Kadir'in onayından sonra, `approvals.decide()` üzerinden çağrılır
+(app/tools.py'deki yürütücü kaydı).
 """
 import logging
 from datetime import datetime, timezone
@@ -66,6 +72,43 @@ def set_reminder(db, text: str, due_at: str, now_fn=_now) -> str:
     return f"Hatırlatma kuruldu: '{text.strip()}' ({due_at_utc}) [ID: {ref.id}]"
 
 
+def cancel(db, reminder_id: str, now_fn=_now) -> str:
+    """Bekleyen bir hatırlatmayı iptal eder; Türkçe sonuç metni döner.
+
+    Modül deseni (set_reminder ile aynı): exception FIRLATMAZ, gözlem döner —
+    bu metin hem modele hem de onay kaydının `outcome` alanına gider.
+
+    Kayıt silinmez, `status=cancelled` + `cancelled_at` damgalanır: iptal de bir
+    olaydır, geçmişten kazınmaz. Üç durum ayrı ayrı ele alınır:
+    - yoksa: hata metni, HİÇBİR yazma yapılmaz (var olmayan id'ye doküman
+      yaratmak — Firestore'da set() bunu sessizce yapar — iptali bir yazma
+      aracına çevirirdi);
+    - zaten `cancelled`: idempotent, ilk damga korunur (çift dokunuş, ör. push
+      + kuyruk senkronu, damgayı ileri kaydırmasın);
+    - `sent`: iptal EDİLEMEZ — bildirim gitmiştir, geçmiş geri alınamaz.
+    """
+    if not isinstance(reminder_id, str) or not reminder_id.strip():
+        return "Hata: Hatırlatma ID'si gerekli."
+
+    ref = db.collection(REMINDERS_COLLECTION).document(reminder_id.strip())
+    snap = ref.get()
+    if not snap.exists:
+        return f"Hata: '{reminder_id.strip()}' kimlikli bir hatırlatma bulunamadı."
+
+    d = snap.to_dict()
+    text = d.get("text", "")
+    status = d.get("status")
+
+    if status == STATUS_CANCELLED:
+        return f"'{text}' hatırlatması zaten iptal edilmişti."
+    if status == STATUS_SENT:
+        return f"'{text}' hatırlatması zaten gönderilmiş; gönderilmiş bir hatırlatma iptal edilemez."
+
+    ref.set({"status": STATUS_CANCELLED, "cancelled_at": now_fn()}, merge=True)
+    logging.info("reminders: cancel id=%s text=%r", reminder_id.strip(), text)
+    return f"Hatırlatma iptal edildi: '{text}'"
+
+
 def list_reminders(db) -> dict:
     """Bekleyen hatırlatmaları zaman sırasına göre listeler."""
     snaps = list(
@@ -127,6 +170,34 @@ def dispatch_due(db, send_fn, now_fn=_now) -> dict:
             success = False
 
         ref = snap.reference
+        # RE-READ before writing. The candidate list is a snapshot taken before
+        # send_fn, and send_fn is network time (an FCM round trip per token). A
+        # cancellation can land inside that window -- and since Faz Y3 that
+        # cancellation is a RED action Kadir personally approved
+        # (tools.cancel_reminder -> approvals.decide). Writing the pre-read status
+        # back would silently reverse his decision: the failure branch used to
+        # restore "pending" unconditionally, resurrecting a cancelled reminder for
+        # the next tick, and the success branch would stamp it "sent".
+        #
+        # Not atomic -- a compare-and-set would need a transaction. It closes the
+        # window that actually exists (hundreds of ms of network I/O) and leaves
+        # only the microseconds between this read and the write. The failure
+        # direction is also the safe one: worst case a cancelled reminder keeps its
+        # cancelled status and one push already went out, which nothing can unsend.
+        current = ref.get()
+        if not current.exists or current.to_dict().get("status") != STATUS_PENDING:
+            logging.info(
+                "reminders: dispatch_due id=%s artik pending degil (%s) -- durum "
+                "YAZILMADI (iptal/karar korunuyor)",
+                reminder["id"],
+                current.to_dict().get("status") if current.exists else "silinmis",
+            )
+            if success:
+                sent_count += 1
+            else:
+                failed_count += 1
+            continue
+
         if success:
             update = {
                 "status": STATUS_SENT,
@@ -142,7 +213,7 @@ def dispatch_due(db, send_fn, now_fn=_now) -> dict:
             }
             failed_count += 1
             logging.warning("reminders: dispatch_due basarisiz id=%s res=%s", reminder["id"], res)
-            
+
         ref.set(update, merge=True)
 
     return {"handled": True, "sent": sent_count, "failed": failed_count}

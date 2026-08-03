@@ -31,16 +31,63 @@ import com.jarvis.ui.theme.JarvisTheme
 import com.jarvis.ui.voice.VoiceProfileViewModel
 import com.jarvis.ui.voicecall.VoiceCallOverlay
 import com.jarvis.ui.voicecall.VoiceCallViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * The intent extra that carries an approval id into the app.
+ *
+ * The name is the WIRE key, not a local invention: `fcm.send_approval` sends
+ * `data.approval_id`, and Firebase copies a notification's `data` map into the launch
+ * intent's extras verbatim. One concept, one name, end to end.
+ *
+ * Two producers put it here, and neither is optional. Backgrounded, the system tray draws
+ * the push and Firebase copies `data` into the launch intent verbatim; in the foreground
+ * [JarvisFCMService] builds the notification and sets the extra itself. Both land on the
+ * same key, which is why it is read here once and nowhere else.
+ */
+const val EXTRA_APPROVAL_ID = "approval_id"
+
 class MainActivity : FragmentActivity() {
+
+    /**
+     * The approval id a notification tap carried in, waiting to be handed to the
+     * ChatViewModel.
+     *
+     * A flow rather than a read of `intent` at composition time, because the launch is
+     * not the only way one arrives. When the app is already running, tapping a
+     * notification delivers the extra through [onNewIntent] — no recomposition, so a
+     * `LaunchedEffect(Unit)` that read `intent` would never see it and the tap would
+     * land on the chat with no card focused. That is also the ONLY path the app does
+     * not build itself: `fcm.send_approval` sends a `notification` payload, so a
+     * backgrounded app gets the system tray's own PendingIntent, not
+     * JarvisFCMService's.
+     *
+     * Paired with `android:launchMode="singleTop"`: without it the tap would stack a
+     * SECOND MainActivity instead of calling onNewIntent on the live one.
+     */
+    private val pendingApprovalId = MutableStateFlow<String?>(null)
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        // setIntent so anything later reading getIntent() sees the new one, not the
+        // launch intent -- the standard singleTop contract.
+        setIntent(intent)
+        intent.getStringExtra(EXTRA_APPROVAL_ID)?.let { pendingApprovalId.value = it }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val container = (application as JarvisApp).container
+        intent?.getStringExtra(EXTRA_APPROVAL_ID)?.let { pendingApprovalId.value = it }
         setContent {
             JarvisTheme {
                 val vm: ChatViewModel = viewModel {
-                    ChatViewModel(container.chatRepository, container.conversationsRepository)
+                    ChatViewModel(
+                        container.chatRepository,
+                        container.conversationsRepository,
+                        container.approvalRepository,
+                    )
                 }
                 val state by vm.state.collectAsState()
                 val scope = rememberCoroutineScope()
@@ -165,6 +212,39 @@ class MainActivity : FragmentActivity() {
                     else voicePermissionLauncher.launch(wanted.toTypedArray())
                 }
 
+                // A push notification carries `data.approval_id` (fcm.send_approval,
+                // spec §10); tapping it must land on THAT card. Keyed on the flow, not
+                // on Unit, so a tap that arrives while the app is already running
+                // (onNewIntent -- no recomposition) is delivered too. Consumed on
+                // arrival so a rotation cannot re-focus a card Kadir has scrolled away
+                // from.
+                val approvalToFocus by pendingApprovalId.collectAsState()
+                LaunchedEffect(approvalToFocus) {
+                    approvalToFocus?.let {
+                        vm.focusApproval(it)
+                        pendingApprovalId.value = null
+                    }
+                }
+
+                // POST_NOTIFICATIONS on its own launcher, not only inside startVoice():
+                // approvals reach Kadir by push and North Star §4.8 puts that on the
+                // critical path, so an install that never happens to place a voice call
+                // would otherwise drop every approval notification silently. Asked once
+                // per launch and only when actually missing; a denial changes nothing
+                // else -- the queue still syncs on open (spec §4.3).
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) { /* granted or not, nothing else depends on it */ }
+                LaunchedEffect(Unit) {
+                    if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                        ContextCompat.checkSelfPermission(
+                            this@MainActivity, Manifest.permission.POST_NOTIFICATIONS,
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+
                 // While a call (or its error) owns the screen, Back hangs up instead of
                 // exiting the app under a live microphone.
                 BackHandler(enabled = voiceCallState.phase != VoicePhase.IDLE) {
@@ -204,6 +284,10 @@ class MainActivity : FragmentActivity() {
                     if (container.authManager.silentSignIn().isSuccess) {
                         container.authStateStore.markSignedIn()
                         if (!returning) vm.onSignedIn()
+                        // Only now: /api/fcm/register is require_user, so before a session
+                        // exists this is a guaranteed 401. Last in the branch because a
+                        // push registration must never delay the chat becoming usable.
+                        container.registerForPush()
                     } else if (returning) {
                         container.authStateStore.clearSignedIn()
                         vm.onSilentSignInFailed()
@@ -238,6 +322,11 @@ class MainActivity : FragmentActivity() {
                                     // Remember it, so every later launch skips the splash.
                                     container.authStateStore.markSignedIn()
                                     vm.onSignedIn()
+                                    // The FIRST-EVER launch never reaches the boot path's
+                                    // registration (silent sign-in fails before an account
+                                    // is chosen). Without this line a brand-new install
+                                    // would receive no push until its second launch.
+                                    container.registerForPush()
                                 },
                                 onFailure = { vm.onSignInFailed(it.message) },
                             )
@@ -253,6 +342,8 @@ class MainActivity : FragmentActivity() {
                     onNewConversation = vm::startNewConversation,
                     onOpenConversation = vm::openConversation,
                     onDeleteConversation = vm::deleteConversation,
+                    onApproveApproval = vm::approveApproval,
+                    onRejectApproval = vm::rejectApproval,
                 )
 
                 // Drawn AFTER (= on top of) Nav: while a call is anything but IDLE the
@@ -263,6 +354,7 @@ class MainActivity : FragmentActivity() {
                         state = voiceCallState,
                         onStop = voiceCallVm::stop,
                         onDismissError = voiceCallVm::stop,
+                        onInterrupt = voiceCallVm::interrupt,
                     )
                 }
             }

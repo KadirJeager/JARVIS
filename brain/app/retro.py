@@ -55,6 +55,27 @@ def make_reporter(store, user_id: str):
     return report
 
 
+FACTORY_ACTOR_PREFIX = "factory:"
+
+
+def _factory_line(factory: dict) -> str:
+    """Fabrika envanterinin tek satırlık raporu (§8.5 değişmez 6).
+
+    Hiç koşu yoksa bunu AÇIKÇA söyler: "üretilmiş ajan yok" bir gözlemdir,
+    satırın sessizce kaybolması ise envanterin taranıp taranmadığını
+    belirsiz bırakırdı."""
+    if not factory["instances_7d"] and not factory.get("spawn_calls_7d"):
+        return "- Fabrika (Kademe 1): bu hafta üretilmiş ajan yok."
+    if not factory["instances_7d"]:
+        return (f"- Fabrika (Kademe 1): {factory['spawn_calls_7d']} çağrı, "
+                "hiçbiri araç kullanmadı.")
+    return (
+        f"- Fabrika (Kademe 1): {factory['instances_7d']} örnek, "
+        f"{factory['tool_calls_7d']} araç çağrısı. "
+        f"Şablon dağılımı: {json.dumps(factory['by_template'], ensure_ascii=False)}"
+    )
+
+
 def collect_week(db, now_fn=_now) -> dict:
     """Collect system metrics and recent lessons from the past 7 days.
 
@@ -71,6 +92,15 @@ def collect_week(db, now_fn=_now) -> dict:
     audit_total_7d = 0
     audit_decisions = {"allow": 0, "block": 0, "confirm": 0, "dry_run": 0}
     blocked_tools_counter: dict[str, int] = {}
+    # Fabrika envanteri (North Star §8.5, değişmez 6: "haftalık retro üretilmiş
+    # ajan envanterini de tarar — ajan sürünmesine karşı temizlik"). Ayrı bir
+    # koleksiyon YOK: Kademe 1 örnekleri geçicidir ve arkalarında yalnızca audit
+    # izlerini bırakır (actor="factory:<şablon>#<örnek>"), ki §8.5 değişmez 5'in
+    # istediği iz zaten budur. Şablon başına koşu sayısı ve ayrı örnek sayısı,
+    # "hangi kalıp gerçekten kullanılıyor" sorusunun cevabıdır.
+    factory_runs: dict[str, int] = {}
+    factory_instances: set[str] = set()
+    factory_spawns = 0
 
     for snap in db.collection("audit_log").stream():
         entry = snap.to_dict()
@@ -86,6 +116,27 @@ def collect_week(db, now_fn=_now) -> dict:
             if dec == "block":
                 tool = entry.get("tool") or "unknown"
                 blocked_tools_counter[tool] = blocked_tools_counter.get(tool, 0) + 1
+
+            # str() -- aynı döngüdeki `tool` alanı savunmalı, bu değildi:
+            # audit_log'da string olmayan tek bir `actor` (elle yazılmış ya
+            # da ileride başka bir yazıcıdan gelen) collect_week'i komple
+            # AttributeError ile düşürüyordu -- haftalık raporun tamamı bir
+            # bozuk satır yüzünden kaybolurdu.
+            # Orkestratörün spawn çağrıları da sayılır: hiç araç çağırmadan
+            # cevap veren bir örnek geriye "factory:" satırı BIRAKMAZ, ve o
+            # zaman rapor "bu hafta üretilmiş ajan yok" derdi -- 5 koşu yapılmış
+            # olsa bile. İki sayaç ayrı tutulur: biri "kaç kez çağrıldı", diğeri
+            # "kaç örnek gerçekten araç kullandı".
+            if entry.get("tool") == "spawn_specialist" and dec == "allow":
+                factory_spawns += 1
+
+            actor = str(entry.get("actor") or "")
+            if actor.startswith(FACTORY_ACTOR_PREFIX):
+                # "factory:<şablon>#<örnek>" -- şablon adı ile örnek kimliğini ayır.
+                label = actor[len(FACTORY_ACTOR_PREFIX):]
+                template = label.split("#", 1)[0] or "bilinmeyen"
+                factory_runs[template] = factory_runs.get(template, 0) + 1
+                factory_instances.add(label)
 
     sorted_blocked = sorted(blocked_tools_counter.items(), key=lambda x: x[1], reverse=True)
     top_blocked_tools = dict(sorted_blocked[:5])
@@ -158,6 +209,12 @@ def collect_week(db, now_fn=_now) -> dict:
     recent_lessons = [entry for _, entry in all_lessons[:5]]
 
     return {
+        "factory": {
+            "tool_calls_7d": sum(factory_runs.values()),
+            "instances_7d": len(factory_instances),
+            "spawn_calls_7d": factory_spawns,
+            "by_template": dict(sorted(factory_runs.items(), key=lambda x: x[1], reverse=True)),
+        },
         "audit_log": {
             "total_7d": audit_total_7d,
             "decisions": audit_decisions,
@@ -228,6 +285,7 @@ def _build_prompt(data: dict) -> str:
         f"- Denetim Kayıtları (son 7 gün): Toplam {audit_info['total_7d']} karar.",
         f"  Karar dağılımı: {json.dumps(audit_info['decisions'], ensure_ascii=False)}",
         f"  En çok engellenen araçlar: {json.dumps(audit_info['top_blocked_tools'], ensure_ascii=False)}",
+        _factory_line(data["factory"]),
         f"- Olaylar (son 7 gün): Toplam {events_info['total_7d']}, Bildirim üretilen: {events_info['notify_count']}.",
         f"  Olay türleri: {json.dumps(events_info['kinds'], ensure_ascii=False)}",
         f"  90 günden eski olay sayısı (temizlik ölçümü): {events_info['obsolete_90d_count']}",

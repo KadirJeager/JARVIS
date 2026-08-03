@@ -21,6 +21,12 @@ espressoCore = "3.6.1"
 # FragmentActivity — and androidx.appcompat (runtime). The appcompat pull-in is
 # expected, not a misconfiguration.
 biometric = "1.1.0"
+# Push (Faz Y3). Both are the newest releases at the time of writing, chosen because the
+# google-services plugin has to understand AGP 9.3.0's build model — an older line of the
+# plugin predates AGP 9 entirely. The BOM pins firebase-messaging (34.17.0 -> 25.1.1), so
+# the messaging artifact carries NO version of its own: one place decides, always.
+googleServices = "4.5.0"
+firebaseBom = "34.17.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -51,6 +57,9 @@ androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "a
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-test-rules = { group = "androidx.test", name = "rules", version = "1.6.1" }
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
+# No version on purpose — the BOM above supplies it.
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
 
 [plugins]
 # AGP 9.x has built-in Kotlin support — the org.jetbrains.kotlin.android plugin is
@@ -59,3 +68,7 @@ androidx-biometric = { group = "androidx.biometric", name = "biometric", version
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+# Turns app/google-services.json into the resources FirebaseApp reads at init. Without it
+# FirebaseMessaging.getInstance() throws at runtime even though the JSON is in the tree —
+# which is exactly the state this module was in before Faz Y3.
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

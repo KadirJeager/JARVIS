@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ActivityScenario
@@ -14,9 +15,16 @@ import androidx.test.rule.GrantPermissionRule
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.ApprovalApi
+import com.jarvis.data.net.ApprovalDecisionDto
+import com.jarvis.data.net.ApprovalDto
+import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.FcmApi
+import com.jarvis.data.net.FcmRegisterResponse
+import com.jarvis.data.net.FcmTokenRequest
 import com.jarvis.data.net.ConversationDeletedResponse
 import com.jarvis.data.net.ConversationsApi
 import com.jarvis.data.net.ConversationsResponse
@@ -80,6 +88,27 @@ class VoiceCallWiringTest {
         override suspend fun hasSignedInBefore() = true
         override suspend fun markSignedIn() {}
         override suspend fun clearSignedIn() {}
+    }
+
+    /**
+     * The push path is wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers locally rather than reaching the deployed backend: a test
+     * suite must not talk to production at all.
+     */
+    private class FakeFcmApi : FcmApi {
+        override suspend fun register(req: FcmTokenRequest) = FcmRegisterResponse(true)
+    }
+
+    /**
+     * Approvals are wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers "no approvals" rather than reaching the deployed backend: a
+     * test suite must not talk to production at all.
+     */
+    private class FakeApprovalApi : ApprovalApi {
+        override suspend fun list() = ApprovalsResponse(emptyList())
+        override suspend fun get(id: String) = ApprovalDto(id = id, title = "t", status = "pending")
+        override suspend fun approve(id: String) = ApprovalDecisionDto("approved", null, false)
+        override suspend fun reject(id: String) = ApprovalDecisionDto("rejected", null, false)
     }
 
     private class FakeChatApi : JarvisApi {
@@ -177,7 +206,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -227,7 +256,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -272,7 +301,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -296,6 +325,13 @@ class VoiceCallWiringTest {
             // The REAL factory seam was exercised and the overlay owns the screen.
             assertEquals(1, transport.connectCalls)
             compose.onNodeWithTag("voice_call_overlay").assertIsDisplayed()
+            // The label is DEBOUNCED by CONNECTING_DEBOUNCE_MS (1200 ms) so a fast dial
+            // never flashes it. waitForIdle() does not cover that wait -- this rule does
+            // not drive the compose clock (the Activity owns it), so asserting straight
+            // after the click is a bet on timing. Wait for it explicitly.
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithText("Bağlanıyor…").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Bağlanıyor…").assertIsDisplayed()
 
             // Server accepts: the session flips to live listening.

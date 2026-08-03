@@ -452,3 +452,136 @@ gcloud scheduler jobs create http repo-watch \
   --oidc-service-account-email="$JARVIS_SCHEDULER_SA" \
   --oidc-token-audience="https://<brain-url>"
 ```
+
+## Onay merkezi (Faz Y3)
+
+Kırmızı bölge artık bir çıkmaz sokak değil. Bir kırmızı araç çağrısı
+`policy.make_policy_callback`'in `approval_sink`'inden geçip **bekleyen bir
+onaya** dönüşür; araç çalışmaz — çalışma anı **onay anıdır**
+(`approvals.decide`). North Star §4.8 / §9.
+
+**Koleksiyonlar**
+
+- `approvals` (auto-id): `{user_id, kind, title, detail, tool_name, tool_args,
+  zone, session_id, status, created_at, expires_at, decided_at, decided_by,
+  outcome}`. `status` ∈ `pending|approved|rejected|expired|failed`.
+- `approval_claims` (doc id = onay id'si): kararın **birincil kaydı**
+  (`{decision, by, at}`). Onay dokümanındaki `status` bunun izdüşümüdür.
+
+**Neden ayrı bir claim dokümanı.** Firestore'da işlemsiz koşullu güncelleme
+yoktur, ama `DocumentReference.create()` atomik bir "yoksa yaz"dır. Çift
+dokunuş ya da "push + kuyruk senkronu aynı anda" bu sayede kırmızı bir eylemi
+**iki kez çalıştıramaz**; ikinci çağrı `AlreadyExists` alır ve
+`{already: true}` döner. (Aynı desen `conversations` başlık yarışında da
+kullanılıyor.)
+
+**Zaman aşımı = reddet, ve KARAR anında uygulanır.** Süpürücü iş
+(`/api/jobs/approvals-tick`) tek başına yeterli değildir: süpürme ile son
+kullanma arasındaki pencerede gelen bir onay, süresi geçmiş bir kırmızı eylemi
+çalıştırırdı. `decide()` bu yüzden önce süreyi kontrol eder. Süpürücü bir
+temizlik yoludur, güvenlik sınırı değil.
+
+**Yürütme bir allowlist'tir.** `approvals.EXECUTORS` (`register_executor` ile
+doldurulur) kayıtlı olmayan bir `tool_name`'i **çalıştırmaz** —
+`status=failed`. Onay kaydına keyfi bir isim yazmak kod çalıştırma yolu
+değildir.
+
+**Uçlar**
+
+| Uç | Auth | İş |
+|---|---|---|
+| `GET /api/approvals` | `require_user` | Bekleyenler (süresi geçmişler hariç, ≤50) |
+| `GET /api/approvals/{id}` | `require_user` | Tek onayın güncel durumu (kart yenilemesi) |
+| `POST /api/approvals/{id}/approve` | `require_user` | Karar + yürütme |
+| `POST /api/approvals/{id}/reject` | `require_user` | Karar; yürütme yok |
+| `POST /api/jobs/approvals-tick` | `require_scheduler` | Süresi geçenleri `expired` yapar |
+
+Başkasının onayı **404** döner (403 değil — başka birinin onayının varlığı bile
+sızmasın).
+
+**İlk gerçek kırmızı araç: `cancel_reminder`.** Y3'ten önce `TOOL_ZONES` her
+aracı açıkça yeşil/sarı yapıyordu; `DEFAULT_ZONE = red` yalnızca tabloda
+olmayan araçlar içindi, ki öyle bir araç yoktu — yani onaylanacak hiçbir şey
+olmadan mekanizma doğrulanamazdı. `cancel_reminder` §9'un "bir şey silme"
+örneğinin en zararsızı ve model onu bugün zaten zincirleyebiliyor
+(`list_reminders` id veriyor). Bölge ataması bilinçli olarak muhafazakâr ve
+konfigürasyondur (§9: eşikler kodda gevşetilir, sohbette değil).
+
+**Kart sohbettedir** (§4.8: "ayrı ekran değil"). Sink, transcript'e
+`kind="approval"` + `meta.approval_id` taşıyan bir model mesajı yazar;
+`messages.history()` bu iki alanı yalnızca doluysa döndürür, yani alansız eski
+satırlar ve eski istemciler aynen çalışır. Kartın DURUMU transcript'e gömülü
+değildir — tek gerçek kaynak onay dokümanıdır.
+
+**Push.** `fcm.dispatch` tek yoldur; `send_reminder` (Y2.4) ve `send_approval`
+(Y3) onun sarmalayıcılarıdır. `send_approval` cihaz token'ı yokken sohbete
+**yazmaz** (`fallback_text=None`): kartı sink zaten aynı oturuma yazdı, ikinci
+bir satır gürültü olurdu. Push kaçarsa onay kaybolmaz — kuyruk uygulama
+açılınca `GET /api/approvals` ile senkronlanır.
+
+> **3 Ağustos 2026 saha notu:** Bu tarihe kadar push **hiç çalışmamıştı.**
+> Üretimde `fcm_tokens` boştu ve her gönderim sessizce sohbet fallback'ine
+> düşüyordu, çünkü Android modülünde `firebase-messaging` bağımlılığı ve
+> `FirebaseMessagingService` yoktu. Android istemcisi eklendikten sonra
+> doğrulandı: `fcm_tokens` 0 → 1 doküman, gerçek push cihazda
+> `channel=jarvis_push` bildirimi olarak çizildi.
+
+## Araç kayıt defteri ve kazanım merdiveni (Faz Y4.1)
+
+Yeni bir yetenek artık kod değil, **onaylanmış bir kayıttır** (North Star §8.5:
+*"Keşif ve kurulum otonomdur; yetkilendirme her zaman insanlıdır"*).
+
+Akış: Jarvis eksik yeteneği fark eder → `propose_tool` ile öneri kurar (yeşil bölge:
+öneri kurmak zararsızdır) → öneri `kind="tool_grant"` bir **onay kartına** düşer (Y3)
+→ Kadir onaylarsa `tool_registry` koleksiyonuna kayıt yazılır → bir sonraki açılışta
+etkin olur.
+
+**Kayıt defterine yazan TEK yer onay yürütücüsüdür.** `propose_tool` defterin kendisine
+dokunmaz; bu, "yetkilendirme insanidir" cümlesinin koddaki karşılığıdır.
+
+**Kayıt defteri koddaki bölgeyi GEVŞETEMEZ.** `check_zone` sırası: `config.TOOL_ZONES`
+(kod) → kayıt defteri → `DEFAULT_ZONE` (red). Kod bir aracı biliyorsa kod kazanır —
+aksi hâlde onaylanmış tek bir kayıt `cancel_reminder`'ı yeşile çekip onay merkezini
+tümüyle baypas edebilirdi. Kayıt defteri yalnızca kodun *bilmediği* adlara bölge atar.
+
+**Kırmızı öneri kabul edilmez:** `propose_tool` yalnızca `green`/`yellow` isteyebilir
+(§8.5 değişmez 1). Kırmızı bir yetenek hâlâ insan eliyle koda girer.
+
+**MCP sunucuları gerçekten bağlanır.** `kind="mcp"` granted kayıtlar ADK `McpToolset`
+nesnelerine dönüşür ve ajana eklenir. Üç şey bilinçlidir: bir kaydın kurulumu fırlarsa
+o kayıt **atlanır** (tek bozuk kayıt Jarvis'i susturmaz); toolset ön-eki kaydın adıdır,
+çünkü bölge eşlemesi ön-ek üzerinden yapılır; ve ön-eki eşleşmeyen bir araç adı
+`DEFAULT_ZONE` = **red** olur. Çakışan ön-eklerde en kısıtlayıcı bölge kazanır.
+
+| Değişken | Varsayılan | Anlam |
+|---|---|---|
+| `JARVIS_APPROVAL_TTL_MINUTES` | `60` | Bir onay kartının ömrü (Y3) |
+
+## Ajan fabrikası — Kademe 1 (Faz Y4.2)
+
+`app/factory.py`: derleme anında sabit **şablonlar**, çalışma anında parametreyle
+örneklenen geçici uzmanlar (§8.5 Kademe 1 "kalıphane"). Şablon eklemek bir kod
+değişikliğidir — Kademe 1'in tanımı budur, ve debug yüzeyini statik mimariye yakın
+tutan da budur.
+
+Çağrı: `spawn_specialist(template, goal)` — sarı bölge. Şablonlar: `arastirmaci`,
+`arsivci`, `nobetci`.
+
+Fabrika anayasası (§8.5), hepsi testle pinli:
+
+1. **Misafir muamelesi.** Türetilmiş ajanın politika callback'ine `approval_sink`
+   VERİLMEZ: kırmızı bir araç çağrısı onay kartına bile dönüşemez, düz engellenir.
+2. **Yalnız kayıt defterinden araç** — şablonun izin verdiği adlar ∩ `ALL_TOOLS`.
+   Bulunamayan ad sessizce atlanmaz, loglanır.
+3. **Ajan üretemez.** `spawn_specialist` türetilmiş ajanın araç kümesinde hiçbir yoldan
+   bulunamaz; şablon açıkça istese bile dışlanır.
+4. **İki bağımsız tavan:** adım sayısı ve duvar saati. Biri diğerinin yerine geçmez —
+   tek bir araç çağrısı dakikalarca sürebilir (adım tavanı yakalamaz), hızlı bir döngü
+   saniyeler içinde yüzlerce adım atabilir (süre tavanı yakalamaz). Hiç olay üretmeyen
+   askıda çağrı için ayrıca sert bir `asyncio.timeout` vardır.
+5. **İz zorunlu:** her araç çağrısı audit'e `actor="factory:<şablon>#<örnek>"` yazılır.
+6. **Retro envanteri tarar:** haftalık rapor şablon başına koşu ve ayrı örnek sayısını
+   verir; hiç üretim yoksa bunu açıkça söyler.
+
+Örnek Kadir'in sohbet oturumunu kirletmez: kendi oturum kimliğiyle koşar
+(`factory-<şablon>-<örnek>`).

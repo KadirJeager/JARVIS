@@ -68,3 +68,29 @@ gcloud scheduler jobs create http task-tick \
   --oidc-service-account-email="$JARVIS_SCHEDULER_SA" \
   --oidc-token-audience="https://<brain-url>"
 ```
+
+## Approvals Tick Job (`approvals-tick`)
+
+Expires approval cards whose deadline has passed (Faz Y3, North Star §4.8:
+*"kritik onaylarda zaman aşımı = reddet"*).
+
+**This job is a janitor, not the guarantee.** `approvals.decide` checks the
+deadline itself before it lets anything through, so an approval that expires
+between two sweeps still cannot be approved. If this job never runs, expired
+cards simply keep the `pending` status in Firestore and stay invisible to the
+client (`list_pending` filters them out too) — nothing becomes executable.
+
+```bash
+gcloud scheduler jobs create http approvals-tick \
+  --schedule="*/5 * * * *" \
+  --time-zone=Europe/Istanbul \
+  --uri="https://<brain-url>/api/jobs/approvals-tick" \
+  --http-method=POST \
+  --message-body='' \
+  --oidc-service-account-email="$JARVIS_SCHEDULER_SA" \
+  --oidc-token-audience="https://<brain-url>"
+```
+
+Card lifetime is `JARVIS_APPROVAL_TTL_MINUTES` (default 60). Shortening it is
+the safe direction: an expired approval is not lost work — the model can raise
+a new card for the same request.

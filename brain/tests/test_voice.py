@@ -505,10 +505,12 @@ class FakeSpeaker:
             verified=verified, score=score, vec=[0.5, 0.5],
             adapted_sample_id=None)
         self.calls = []
+        self.allow_adapt_calls = []
         self.history = []
 
-    def identify(self, user_id, pcm, device_hint, auth_is_kadir):
+    def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True):
         self.calls.append((user_id, pcm, device_hint, auth_is_kadir))
+        self.allow_adapt_calls.append(allow_adapt)
         return self.result
 
     def record_history(self, user_id, **entry):
@@ -640,7 +642,7 @@ class ExplodingSpeaker:
     model/embed failure can never break the stream (the SAFETY guarantee for
     _verify_utterance)."""
 
-    def identify(self, user_id, pcm, device_hint, auth_is_kadir):
+    def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True):
         raise RuntimeError("embed blew up")
 
 
@@ -675,7 +677,7 @@ async def test_identify_runs_off_the_event_loop_thread():
     seen = {}
 
     class ThreadRecordingSpeaker:
-        def identify(self, user_id, pcm, device_hint, auth_is_kadir):
+        def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True):
             seen["thread"] = threading.get_ident()
             return speaker_mod.IdentifyOutcome(
                 verified=True, score=0.9, vec=[0.5], adapted_sample_id=None)
@@ -1188,3 +1190,58 @@ def test_non_positive_utterance_window_falls_back_to_the_default(caplog):
     assert config._effective_utterance_seconds(3.0) == 3.0
     # ...and the shipped constant is therefore always a real bound.
     assert config.SPEAKER_UTTERANCE_MAX_BYTES > 0
+
+
+# --- server-side echo window: the assistant's own TTS may never teach ---------
+# Belt-and-braces behind the client's half-duplex guard (VoiceSession). The
+# server cannot observe the device's loudspeaker, so it ESTIMATES how long the
+# reply takes to say and refuses to ADAPT inside that window. It never changes
+# a verification, a trust level or a turn -- only self-feeding.
+
+
+@pytest.mark.asyncio
+async def test_an_utterance_during_the_estimated_speech_window_is_scored_but_never_adapts():
+    speaker = FakeSpeaker((True, 0.95))
+    bridge = _armed(VoiceBridge(runner=FakeTextRunner("selam"), session_service=None,
+                                speaker_service=speaker))
+    ws = FakeWS([])
+    # A turn happens: the device is now saying "selam" out loud.
+    await bridge._handle_text_frame(ws, _user_text("merhaba"))
+    await _drive_turns(bridge)
+
+    # The echo comes back before the device finished speaking.
+    bridge._utterance.extend(b"\x01\x02")
+    await bridge._handle_text_frame(ws, _user_text("selam"))
+    await _drive_turns(bridge)
+
+    assert speaker.allow_adapt_calls[-1] is False, "echo window must forbid self-feeding"
+    # ...but it was still SCORED: trust has to degrade honestly, not silently.
+    speaker_events = [e for e in _sent_json(ws) if e["type"] == "speaker"]
+    assert speaker_events, "the utterance must still produce a speaker verdict"
+
+
+@pytest.mark.asyncio
+async def test_an_utterance_after_the_window_may_adapt_again():
+    speaker = FakeSpeaker((True, 0.95))
+    bridge = _armed(VoiceBridge(runner=FakeTextRunner("selam"), session_service=None,
+                                speaker_service=speaker))
+    ws = FakeWS([])
+    await bridge._handle_text_frame(ws, _user_text("merhaba"))
+    await _drive_turns(bridge)
+
+    # Time passes: the device has finished speaking.
+    bridge._speaking_until = 0.0
+    bridge._utterance.extend(b"\x03\x04")
+    await bridge._handle_text_frame(ws, _user_text("bugün nasılsın"))
+    await _drive_turns(bridge)
+
+    assert speaker.allow_adapt_calls[-1] is True
+
+
+def test_the_speech_estimate_scales_with_the_reply_and_is_clamped():
+    # DATA-level: the estimate is the whole guarantee, so its shape is pinned.
+    short = VoiceBridge._speech_seconds("selam")            # 5 chars
+    long = VoiceBridge._speech_seconds("x" * 140)           # 140 chars -> 10 s + margin
+    assert short == pytest.approx(5 / 14.0 + 1.0)
+    assert long == pytest.approx(140 / 14.0 + 1.0)
+    assert VoiceBridge._speech_seconds("x" * 100_000) == voice_mod.SPEECH_MAX_SECONDS

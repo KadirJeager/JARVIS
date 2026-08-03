@@ -75,6 +75,26 @@ class AndroidTextToSpeech(context: Context) : SpeechSynthesis {
                     // call: a wrong-accent reply beats a silent one.
                     Log.w(TAG, "tr-TR TTS data unavailable ($langResult), using engine default")
                 }
+                // Put the REPLY on the same audio path the microphone's echo canceller
+                // references. The recognizer and the PCM mic both open
+                // VOICE_COMMUNICATION (the AEC-enabled source), but TextToSpeech
+                // defaults to Engine.DEFAULT_STREAM = STREAM_MUSIC — so the platform AEC
+                // was cancelling against a playback path the reply was never on, and had
+                // no chance of removing it. That is a large part of why Jarvis kept
+                // hearing himself, and why VoiceSession had to grow a half-duplex guard
+                // to compensate.
+                //
+                // HYPOTHESIS, not a proven fix: AEC behaviour is HAL-specific and this
+                // has to be MEASURED on the S23 (does the recognizer still transcribe
+                // Jarvis's own reply with the guard removed?). The guard stays either
+                // way — it is the structural guarantee; this only stops asking it to
+                // cover for a misrouted audio stream.
+                engine?.setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
                 engine?.setOnUtteranceProgressListener(progressListener)
                 ready = true
                 while (pending.isNotEmpty()) speakNow(pending.removeFirst())

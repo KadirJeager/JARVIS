@@ -253,7 +253,17 @@ class SpeakerService:
             return len(speaker_store.load_profile(self.db, user_id).anchors)
 
     def identify(self, user_id: str, pcm: bytes, device_hint: str,
-                 auth_is_kadir: bool) -> IdentifyOutcome:
+                 auth_is_kadir: bool, allow_adapt: bool = True) -> IdentifyOutcome:
+        """`allow_adapt=False` means "score this, but never learn from it".
+
+        Distinct from `auth_is_kadir`, which answers "whose voice may this be";
+        this answers "is this channel trustworthy as a teaching example right
+        now". The voice bridge passes False while the device is speaking
+        Jarvis's own reply through its loudspeaker (app/voice.py): audio
+        captured then is echo, and a gallery that self-feeds on the assistant's
+        own TTS is the one failure mode this system cannot recover from without
+        a human deleting samples. Defaults True so every existing caller keeps
+        its behaviour."""
         vec = self.embed_fn(pcm)
         adapted_sample_id = None
         with self._gallery_lock:
@@ -266,7 +276,7 @@ class SpeakerService:
             score = profile.score(vec, self.top_k)
             anchor_score = profile.anchor_score(vec, self.top_k)
             verified = score >= self.accept
-            if anchor_score >= self.adapt and auth_is_kadir:
+            if anchor_score >= self.adapt and auth_is_kadir and allow_adapt:
                 adapted_sample_id = profile.adapt(
                     vec, device_hint, self.cap, self.now_fn, self.id_fn)
                 speaker_store.save_profile(self.db, user_id, profile)

@@ -140,6 +140,26 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
                     android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 )
             }
+            // Bias the recognizer towards the words it keeps getting wrong. Kadir said
+            // "selam Jarvis nasılsın" and the transcript read "selam CEVİZ nasılsın"
+            // (S23, 2026-08-03) -- a Turkish recognizer has no reason to expect an
+            // English name, and the assistant's own name being unrecognisable is not a
+            // cosmetic problem when it is the wake word of every sentence.
+            //
+            // API 33+ (verified against the installed android-36 SDK, not assumed).
+            // AOSP documents it as "Optional list of strings, towards which the
+            // recognizer should bias the recognition results" but does NOT document the
+            // extra's value type, and the sibling constant carries an explicit
+            // "may have no effect depending on the recognizer implementation". So this
+            // is a best-effort hint sent as an ArrayList (the accessor Android pairs
+            // with "list"), and whether it lands is a DEVICE measurement, not a claim.
+            if (Build.VERSION.SDK_INT >= 33) {
+                putStringArrayListExtra(
+                    RecognizerIntent.EXTRA_BIASING_STRINGS,
+                    arrayListOf("Jarvis", "Cârvis", "Kadir"),
+                )
+                putExtra(RecognizerIntent.EXTRA_ENABLE_BIASING_DEVICE_CONTEXT, true)
+            }
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, MIN_SPEECH_MS)
             putExtra(
                 RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,

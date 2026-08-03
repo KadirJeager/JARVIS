@@ -285,11 +285,22 @@ Bu tablo bir takvim veya görev planı değildir (belgenin statüsü gereği —
 |---|---|---|
 | **1 — Omurga** ✅ | Cloud Run + ADK beyni, asgari sohbet istemcisi (Web/PWA — nihai uygulamanın ilk kabuğu, §15), 3 kademeli hafıza + kullanıcı profili + ders defteri iskeleti, politika katmanı, Firestore loglama | Kendi uygulamamdan yazışıyorum, beni hatırlıyor ve tanımaya başlıyor, her eylem loglanıyor |
 | **2 — Ses** ✅ (Wear OS hariç) | Ses geçidi (31 Tem revizyonu: cihaz-üstü STT/TTS + metin turu, §4.2), Android uygulama olgunlaşır (ASSIST intent + canlı ekran + onay merkezi), Wear OS asgari | Güç tuşuna basıp konuşuyorum, saatten komut veriyorum, onaylar uygulamadan akıyor |
-| **Y1 — Otonomi çekirdeği** | `check_my_vitals`, olay katmanı iskeleti (Pub/Sub + `/api/jobs/event`), **görev döngüsü** (uzun soluklu görevler, görev bütçesi; §7.6), haftalık retro (§8.4) | Jarvis kendiliğinden anlamlı şeyler söylüyor; çok adımlı bir görevi kendi kendine günlerce ilerletiyor; haftalık öğrenme raporu atıyor |
-| **Y2 — Sekreter** | Google Workspace OAuth (Gmail/Calendar readonly), Gmail push + Calendar watch → olay katmanı, hatırlatma aracı (Scheduler + FCM) | Önemli mail/takvim değişimi Jarvis'i uyandırıyor; "yarın hatırlat" dediğimde unutmuyor |
-| **Y3 — Onay merkezi** | approvals backend (kuyruk + FCM + zaman aşımı=reddet), sohbete düşen etkileşimli onay kartları (§4.8), politika RED kararının onay kartına bağlanması | Kırmızı bölge onayları uygulamadan akıyor; push kaçarsa kuyruk uygulama açılınca senkronlanıyor |
-| **Y4 — Ekosistem yazılımı** | Geliştirici ajanı (GitHub MCP), araç kazanım merdiveni (§8.5), fabrika Kademe 1 (kalıphane), Keep MCP, Wear OS asgari (donanım varsa) | Yazılım projelerimde iş alıyor; eksik yeteneğini onayımla kazanıyor; şablondan geçici ajan üretiyor |
+| **Y1 — Otonomi çekirdeği** ✅ | `check_my_vitals`, olay katmanı iskeleti (Pub/Sub + `/api/jobs/event`), **görev döngüsü** (uzun soluklu görevler, görev bütçesi; §7.6), haftalık retro (§8.4) | Jarvis kendiliğinden anlamlı şeyler söylüyor; çok adımlı bir görevi kendi kendine günlerce ilerletiyor; haftalık öğrenme raporu atıyor |
+| **Y2 — Sekreter** ✅ | Google Workspace OAuth (Gmail/Calendar readonly), Gmail push + Calendar watch → olay katmanı, hatırlatma aracı (Scheduler + FCM) | Önemli mail/takvim değişimi Jarvis'i uyandırıyor; "yarın hatırlat" dediğimde unutmuyor |
+| **Y3 — Onay merkezi** 🟡 | approvals backend (kuyruk + FCM + zaman aşımı=reddet), sohbete düşen etkileşimli onay kartları (§4.8), politika RED kararının onay kartına bağlanması | Kırmızı bölge onayları uygulamadan akıyor; push kaçarsa kuyruk uygulama açılınca senkronlanıyor |
+| **Y4 — Ekosistem yazılımı** 🟡 | Geliştirici ajanı (GitHub MCP), araç kazanım merdiveni (§8.5), fabrika Kademe 1 (kalıphane), Keep MCP, Wear OS asgari (donanım varsa) | Yazılım projelerimde iş alıyor; eksik yeteneğini onayımla kazanıyor; şablondan geçici ajan üretiyor |
 | **D — Donanım (SON)** | Telefon/telesekreter (**yeni telefon + birleşen projeyle yeniden tasarım**), akıllı ev (Pi + HAOS + connector), browser worker + dar-sağlam sipariş/taksi, OTP köprüsü | Tetik koşulu: yeni telefon + birleşecek proje netleşince |
+
+> **3 Ağustos 2026 durumu.** ✅ = canlıda. 🟡 = `feat/y3-onay-merkezi` dalında kod +
+> test olarak tamam, **deploy EDİLMEDİ**. Y3'ün tamamı ve Y4'ün araç kayıt defteri +
+> kazanım merdiveni + MCP eklentisi + fabrika Kademe 1'i o dalda; Y4'ten kalan Kademe 2
+> (onaylı kalıcı ajan) ve Wear OS. Aynı oturumda iki canlı hata da kapatıldı: ses
+> kimliği kendi TTS'ini puanlıyordu (yarım-düpleks yankı koruması), ve FCM push hiç
+> çalışmamıştı (Android istemcisi yoktu — artık var, üretimde kanıtlandı).
+>
+> Y2'nin "✅"si bir uyarıyla gelir: Y2.4 push'u "canlı doğrulandı" diye kayda geçmişti,
+> ama üretimde `fcm_tokens` boştu ve her gönderim sessizce sohbet fallback'ine düşüyordu.
+> Sağlam bir fallback, asıl yolun hiç denenmediğini gizleyebilir.
 
 Eski katman adlandırmasıyla eşleme: eski "3 — Telefon" ve "5 — Ekosistem"in donanım parçaları (HA, browser worker) Faz D'ye; eski "4 — Eller ve Refleksler"in yazılım parçaları Y1'e, donanım parçaları (browser worker) Faz D'ye taşındı.
 

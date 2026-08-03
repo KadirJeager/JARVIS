@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 import app.auth as auth_mod
 import app.config as config_mod
 import app.main as main_mod
-from app import repo_watch, tools
+from app import approvals, messages, repo_watch, tools
 from app.memory import Memory
 from tests.fakes import FakeDB
 
@@ -263,6 +263,30 @@ def test_non_green_zone_blocked_with_audit(gate_client, monkeypatch):
     assert audit.entries[0]["decision"] == "block"
     assert audit.entries[0]["zone"] == "yellow"
     assert audit.entries[0]["actor"] == f"guest:{EMAIL}"
+
+
+def test_red_zone_call_never_creates_an_approval(gate_client, monkeypatch):
+    """TAŞIYICI PİM (§4.9, Faz Y3): misafirler kırmızıya ASLA — dış bir AI
+    kırmızı bir eylem için Kadir'e onay kartı ÜRETEMEZ.
+
+    Yapısal olarak zaten kapalı: guest_gate `policy.make_policy_callback`'i
+    (dolayısıyla `approval_sink`'i) hiç kullanmaz, doğrudan `policy.check_zone`
+    + `policy.write_audit` çağırır. Bu test o sınırı DAVRANIŞLA sabitler:
+    sink'i bir gün buraya bağlamak (veya kapıyı ana policy callback'ine
+    geçirmek) bu testi kırar."""
+    client, audit, db = gate_client
+    monkeypatch.setitem(config_mod.TOOL_ZONES, "remember_fact", config_mod.ZONE_RED)
+
+    r = _call(client, "remember_fact", {"fact": "kırmızı olsun"})
+
+    assert r.json()["result"]["isError"] is True
+    assert audit.entries[-1]["decision"] == "block"
+    assert audit.entries[-1]["zone"] == config_mod.ZONE_RED
+    # Ne onay kaydı, ne onay kartı: kırmızı, misafir için düz bir REDDİR.
+    assert db.collection(approvals.COLLECTION).docs == {}
+    assert db.collection(messages.COLLECTION).docs == {}
+    # Araç da hiç çalışmadı.
+    assert db.collection("facts").docs == {}
 
 
 # -- JSON-RPC hata şekilleri ------------------------------------------------------

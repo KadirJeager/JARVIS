@@ -224,3 +224,139 @@ def test_red_zone_blocks_regardless_of_voice_signals():
     result = cb(_tool("unknown_danger"), {}, None)
     assert result is not None and "POLİTİKA ENGELİ" in result["result"]
     assert audit.entries[0]["decision"] == "block"
+
+
+# --- Görev 4 (Faz Y3): approval_sink — kırmızı engel bir onay kartına döner --
+#
+# İki pim taşıyıcıdır, silinmesi güvenlik sınırını kaldırır:
+#   * test_red_block_text_without_a_sink_is_byte_identical -- sink YOKKEN
+#     davranış Y3 öncesiyle birebir aynı (guest_gate bu yoldan geçer, §5).
+#   * test_sink_failure_falls_back_to_the_block_text_and_the_tool_still_does_not_run
+#     -- onay kaydı kurulamaması bir aracın çalışmasına ASLA yol açmaz.
+
+BLOCK_TEXT = (
+    "POLİTİKA ENGELİ: 'unknown_danger' kırmızı bölgede — onaysız çalıştırılamaz. "
+    "Kadir'e ne yapmak istediğini söyle ve onay iste."
+)
+SINK_TEXT = "ONAY KARTI GÖNDERİLDİ: Kadir'in kararını bekliyorum."
+
+
+class RecordingSink:
+    """`(tool_name, args, tool_context) -> str` imzalı sahte sink; çağrıları
+    sayar (sarı/yeşil dallarda "hiç çağrılmadı" ancak sayılırsa kanıtlanır)."""
+
+    def __init__(self, text=SINK_TEXT, raises=None):
+        self.calls = []
+        self._text = text
+        self._raises = raises
+
+    def __call__(self, tool_name, args, tool_context):
+        self.calls.append((tool_name, args, tool_context))
+        if self._raises is not None:
+            raise self._raises
+        return self._text
+
+
+def test_red_block_text_without_a_sink_is_byte_identical():
+    """REGRESYON PİMİ (spec §5): sink verilmediğinde kırmızı metin Y3
+    öncesiyle KARAKTERİ KARAKTERİNE aynıdır — guest_gate ve mevcut her çağıran
+    bu yoldan geçer."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit)
+    assert cb(_tool("unknown_danger"), {"a": 1}, None) == {"result": BLOCK_TEXT}
+
+
+def test_sink_text_replaces_the_block_text_but_the_tool_still_does_not_run():
+    audit = FakeAudit()
+    sink = RecordingSink()
+    cb = make_policy_callback(audit, approval_sink=sink)
+
+    result = cb(_tool("unknown_danger"), {"reminder_id": "r1"}, None)
+
+    # Dönen dict None DEĞİL => ADK aracı çalıştırmaz; çalışma anı onay anıdır.
+    assert result == {"result": SINK_TEXT}
+    assert len(sink.calls) == 1
+
+
+def test_sink_receives_the_tool_name_args_and_tool_context():
+    audit = FakeAudit()
+    sink = RecordingSink()
+    ctx = SimpleNamespace(state={})
+    cb = make_policy_callback(audit, approval_sink=sink)
+
+    cb(_tool("unknown_danger"), {"reminder_id": "r1"}, ctx)
+
+    assert sink.calls == [("unknown_danger", {"reminder_id": "r1"}, ctx)]
+
+
+def test_sink_failure_falls_back_to_the_block_text_and_the_tool_still_does_not_run(caplog):
+    """FAIL-CLOSED PİMİ (spec §5): onay kaydı kurulamazsa eski metne düşülür ve
+    araç YİNE çalışmaz. Bu testin silinmesi, bir Firestore hıçkırığının kırmızı
+    bir aracı serbest bırakmasına açık kapı bırakır."""
+    audit = FakeAudit()
+    sink = RecordingSink(raises=RuntimeError("firestore öldü"))
+    cb = make_policy_callback(audit, approval_sink=sink)
+
+    with caplog.at_level("ERROR"):
+        result = cb(_tool("unknown_danger"), {}, None)
+
+    assert result == {"result": BLOCK_TEXT}   # None DEĞİL: araç çalışmaz
+    assert len(sink.calls) == 1
+    assert "onay kartı" in caplog.text.lower()
+
+
+def test_sink_is_never_called_in_the_yellow_confirm_branch():
+    audit = FakeAudit()
+    sink = RecordingSink()
+    cb = make_policy_callback(audit, approval_sink=sink)
+
+    result = cb(_tool("update_user_profile"), {}, _ctx(trust.MEDIUM))
+
+    assert audit.entries[0]["decision"] == "confirm"
+    assert "GÜVEN DÜŞÜK" in result["result"]
+    assert sink.calls == []
+
+
+def test_sink_is_never_called_in_the_green_allow_branch():
+    audit = FakeAudit()
+    sink = RecordingSink()
+    cb = make_policy_callback(audit, approval_sink=sink)
+
+    assert cb(_tool("get_user_profile"), {}, None) is None
+    assert sink.calls == []
+
+
+def test_sink_is_never_called_in_the_dry_run_branch(monkeypatch):
+    monkeypatch.setattr(config, "DRY_RUN", True)
+    audit = FakeAudit()
+    sink = RecordingSink()
+    cb = make_policy_callback(audit, approval_sink=sink)
+
+    result = cb(_tool("get_user_profile"), {}, None)
+
+    assert "DRY-RUN" in result["result"]
+    assert sink.calls == []
+
+
+def test_audit_still_records_the_block_when_the_sink_handles_it():
+    """Onay kartına dönen bir engel yine bir ENGELDİR: audit satırı
+    decision="block" olarak yazılır (spec §7 — karar yeniden kurulabilmeli)."""
+    audit = FakeAudit()
+    cb = make_policy_callback(audit, approval_sink=RecordingSink())
+
+    cb(_tool("unknown_danger"), {"reminder_id": "r1"}, None)
+
+    entry = audit.entries[0]
+    assert entry["decision"] == "block"
+    assert entry["zone"] == config.ZONE_RED
+    assert entry["args"] == {"reminder_id": "r1"}
+
+
+def test_audit_still_records_the_block_when_the_sink_fails():
+    audit = FakeAudit()
+    cb = make_policy_callback(
+        audit, approval_sink=RecordingSink(raises=RuntimeError("firestore öldü")))
+
+    cb(_tool("unknown_danger"), {}, None)
+
+    assert audit.entries[0]["decision"] == "block"

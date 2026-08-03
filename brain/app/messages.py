@@ -37,16 +37,28 @@ class MessageStore:
         self.db = db
         self._now = now_fn or _now
 
-    def append(self, user_id: str, session_id: str, role: str, text: str) -> None:
-        self.db.collection(COLLECTION).add(
-            {
-                "user_id": user_id,
-                "session_id": session_id,
-                "role": role,
-                "text": text,
-                "ts": self._now(),
-            }
-        )
+    def append(self, user_id: str, session_id: str, role: str, text: str,
+               kind: str | None = None, meta: dict | None = None) -> None:
+        """Append one transcript row. `kind`/`meta` are OPTIONAL (Faz Y3, spec
+        §7): an approval card rides the transcript as a model row with
+        kind="approval" and meta={"approval_id": ...}.
+
+        Both fields are written ONLY when non-empty. A plain row therefore keeps
+        exactly the five columns it had before Y3 -- an empty `kind` would force
+        every reader (old Android build included) to handle a third state
+        ("present but blank") that carries no information."""
+        row = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "role": role,
+            "text": text,
+            "ts": self._now(),
+        }
+        if kind:
+            row["kind"] = kind
+        if meta:
+            row["meta"] = meta
+        self.db.collection(COLLECTION).add(row)
 
     def history(self, user_id: str, session_id: str, limit: int = MAX_HISTORY_MESSAGES) -> list[dict]:
         """Newest `limit` messages for (user_id, session_id), returned oldest→newest.
@@ -66,7 +78,22 @@ class MessageStore:
         )
         rows = [snap.to_dict() for snap in query.stream()]
         rows.reverse()
-        return [{"role": r["role"], "text": r["text"], "ts": r["ts"]} for r in rows]
+        return [self._project(r) for r in rows]
+
+    @staticmethod
+    def _project(row: dict) -> dict:
+        """Wire shape of one transcript row.
+
+        `kind`/`meta` appear only when the stored row carries them, so a row
+        written before Y3 -- and every plain row written after it -- projects to
+        the exact same three keys it always did. This is the backward-compat
+        boundary the Android tolerant-wire reader leans on (spec §7)."""
+        out = {"role": row["role"], "text": row["text"], "ts": row["ts"]}
+        if row.get("kind"):
+            out["kind"] = row["kind"]
+        if row.get("meta"):
+            out["meta"] = row["meta"]
+        return out
 
     def delete_session(self, user_id: str, session_id: str) -> int:
         """Delete every message row for (user_id, session_id). Returns the
