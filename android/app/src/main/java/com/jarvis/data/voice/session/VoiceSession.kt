@@ -151,6 +151,33 @@ class VoiceSession(
         guardTailUntilMs = nowMs() + ECHO_TAIL_MS
     }
 
+    // Bounded fallback for "the TTS engine never reported done". Removing the old
+    // `ttsActive = 0` from the turn_complete branch removed the only thing that
+    // guaranteed the SPEAKING phase ends, and a call parked in SPEAKING forever is
+    // deaf AND unusable. A delay always fires (only teardown cancels it), so this
+    // ends by the passage of time rather than by an event that may not arrive --
+    // the same rule the guard's own deadlines follow.
+    @Volatile
+    private var speechWatchdog: Job? = null
+
+    private fun armSpeechWatchdog(gen: Int) {
+        speechWatchdog?.cancel()
+        speechWatchdog = scope.launch {
+            delay(MAX_SPEAK_GUARD_MS)
+            synchronized(lock) {
+                if (gen != generation.get() || ttsActive == 0) return@synchronized
+                ttsActive = 0
+                openGuardTail()
+                _state.update { it.copy(phase = VoicePhase.LISTENING) }
+            }
+        }
+    }
+
+    private fun cancelSpeechWatchdog() {
+        speechWatchdog?.cancel()
+        speechWatchdog = null
+    }
+
     // Delayed recognizer re-arm after a final result / recoverable error. The small
     // delay keeps a pathological device (instant NO_MATCH loops) from hot-spinning the
     // recognition service. Only touched under [lock].
@@ -247,6 +274,7 @@ class VoiceSession(
         if (_state.value.phase != VoicePhase.SPEAKING && ttsActive == 0) return
         tts.stop()
         ttsActive = 0
+        cancelSpeechWatchdog()
         // Kadir asked for the floor: open the mic immediately rather than serving out
         // the decay tail, and clear the latch so the words he is about to say are not
         // read as the echo of the sentence he just cut off.
@@ -285,11 +313,24 @@ class VoiceSession(
         override fun onResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (text.isNotBlank()) {
-                if (onsetDuringJarvisSpeech) {
+                if (onsetDuringJarvisSpeech && (echoGuardActive() || isJarvisEcho(text))) {
                     // This utterance BEGAN while the speaker was playing Jarvis's own
                     // voice (latched in onBeginningOfSpeech). Timing, not similarity:
                     // this catches the short echoes ECHO_MIN_CHARS lets through and
                     // the ones the recognizer mangled beyond textual recognition.
+                    //
+                    // The onset alone is NOT enough to drop on, though. One recognition
+                    // turn can span both the echo and Kadir: the echo trips the onset,
+                    // then Jarvis stops, then Kadir answers inside the recognizer's
+                    // 1.5 s silence window, so no endpoint occurs and the single final
+                    // carries KADIR's words. Dropping on the latch alone swallowed them
+                    // silently -- he would watch his sentence appear and vanish, with no
+                    // reply. So a latched utterance is only dropped while the guard is
+                    // STILL up (a real echo's final lands there, which is what
+                    // ECHO_TAIL_MS is sized for) or when the text itself gives it away.
+                    // Past that, a latched final is treated as speech: this is also what
+                    // quietly gives voice barge-in back, since someone who talks over
+                    // Jarvis and keeps going finalizes well outside the tail.
                     _state.update { it.copy(partialText = null) }
                 } else if (isJarvisEcho(text)) {
                     // The recognizer heard Jarvis's own TTS from the speaker and
@@ -324,6 +365,7 @@ class VoiceSession(
             if (gen != generation.get()) return
             if (ttsActive > 0) ttsActive--
             if (ttsActive == 0) {
+                cancelSpeechWatchdog()
                 openGuardTail()
                 if (_state.value.phase == VoicePhase.SPEAKING) {
                     _state.update { it.copy(phase = VoicePhase.LISTENING) }
@@ -428,9 +470,27 @@ class VoiceSession(
             }
             is VoiceServerEvent.TurnComplete -> {
                 turnBoundary = true
-                ttsActive = 0
-                openGuardTail()
-                _state.update { it.copy(phase = VoicePhase.LISTENING) }
+                // turn_complete means "no more jarvis_text is coming for this turn".
+                // It does NOT mean the loudspeaker went quiet. The server sends
+                // jarvis_text, transcript and turn_complete back to back, microseconds
+                // apart (brain/app/voice.py _serve_turn) -- the device only STARTS
+                // speaking once it has them, and then speaks for seconds.
+                //
+                // Zeroing ttsActive here (as this branch used to) therefore ended the
+                // echo guard at the START of Jarvis's speech: the whole middle of every
+                // reply went unguarded, the recognizer cut Jarvis off again, and the
+                // SPEAKING phase -- hence interrupt(), the tap that REPLACED voice
+                // barge-in -- was unreachable. Only the TTS engine can report that the
+                // sound stopped, and it does: onUtteranceDone.
+                if (ttsActive == 0) {
+                    // Nothing to speak this turn (an empty reply), or every utterance
+                    // already reported done. Settle now -- otherwise the call would wait
+                    // for a callback that is never coming.
+                    openGuardTail()
+                    _state.update { it.copy(phase = VoicePhase.LISTENING) }
+                } else {
+                    armSpeechWatchdog(gen)
+                }
             }
             is VoiceServerEvent.Error ->
                 endSession(gen, errorMessage = "Hata: ${event.message}")
@@ -450,6 +510,8 @@ class VoiceSession(
         if (!generation.compareAndSet(gen, gen + 1)) return
         micJob?.cancel()
         micJob = null
+        speechWatchdog?.cancel()
+        speechWatchdog = null
         sttRestartJob?.cancel()
         sttRestartJob = null
         ttsActive = 0
@@ -488,9 +550,21 @@ class VoiceSession(
         const val STT_RESTART_DELAY_MS = 300L
 
         /** How long after Jarvis stops speaking the microphone is still treated as
-         *  echo. Covers the room's decay and the tail of a TTS utterance the engine
-         *  reports done a beat early. Kept short: it is dead time in the dialogue. */
-        const val ECHO_TAIL_MS = 700L
+         *  echo.
+         *
+         *  Sized against the RECOGNIZER, not the room. AndroidSpeechToText endpoints on
+         *  `COMPLETE_SILENCE_MS = 1500`, so an echo's final text lands roughly a second
+         *  and a half AFTER the sound that produced it stopped. A tail shorter than that
+         *  would let every echo's final arrive with the guard already closed, and the
+         *  only thing left to judge it would be the text gate this class exists to stop
+         *  relying on. 2 s = that endpoint plus room decay and a small margin.
+         *
+         *  The cost is honest: for these 2 s mic PCM is dropped, so if Kadir answers the
+         *  instant Jarvis stops, the opening of his utterance does not reach the
+         *  speaker-ID buffer. It costs identity EVIDENCE for that turn (the rolling
+         *  window still catches the rest, and a very short answer simply goes
+         *  unverified) — never the turn itself, which the on-device recognizer handles. */
+        const val ECHO_TAIL_MS = 2_000L
 
         /** Hard ceiling on one speaking run. If a TTS engine never reports
          *  onUtteranceDone, `ttsActive` never comes back down -- without this the

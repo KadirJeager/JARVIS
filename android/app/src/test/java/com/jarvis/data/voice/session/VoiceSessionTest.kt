@@ -487,14 +487,36 @@ class VoiceSessionTest {
      * test -- phase would stay SPEAKING instead of reverting to LISTENING.
      */
     @Test
-    fun turnComplete_revertsFromSpeakingBackToListening() = runTest {
+    fun theSpokenReplyEnding_notTurnComplete_revertsSpeakingToListening() = runTest {
+        // CONTRACT CHANGE (2026-08-03, echo guard): turn_complete says "no more
+        // jarvis_text is coming", not "the loudspeaker went quiet" -- it arrives
+        // microseconds after jarvis_text, while the device has not started speaking.
+        // Settling the phase there ended the echo guard at the START of every reply.
+        // The TTS engine is the only thing that knows, and it says so with
+        // onUtteranceDone.
         val f = Fixture(backgroundScope)
         f.session.start()
         f.transport.listener!!.onOpen()
         f.transport.listener!!.onText("""{"type":"jarvis_text","text":"selam"}""")
+        f.transport.listener!!.onText("""{"type":"turn_complete"}""")
         assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
 
+        f.tts.listener!!.onUtteranceDone()
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+    }
+
+    @Test
+    fun aTtsThatNeverReportsDone_stillReleasesTheCall() = runTest {
+        // Removing `ttsActive = 0` from turn_complete removed the only thing that
+        // guaranteed SPEAKING ends. A call parked in SPEAKING is deaf AND cannot be
+        // interrupted, so the watchdog is not optional.
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"selam"}""")
         f.transport.listener!!.onText("""{"type":"turn_complete"}""")
+
+        advanceTimeBy(VoiceSession.MAX_SPEAK_GUARD_MS + 100)
         assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
     }
 
@@ -947,10 +969,84 @@ class VoiceSessionTest {
 
     private val Fixture.channelMic: ChannelMicSource get() = mic as ChannelMicSource
 
+    /**
+     * The PRODUCTION frame order. `_serve_turn` (brain/app/voice.py) sends jarvis_text,
+     * transcript and turn_complete back to back, microseconds apart — the device only
+     * STARTS speaking once it has them, and then speaks for seconds.
+     *
+     * Every echo-guard test below drives this, not a bare jarvis_text. The first
+     * version of these tests sent only jarvis_text, so they asserted against an event
+     * sequence production never produces and passed while the guard was, in reality,
+     * off for almost the whole of Jarvis's speech.
+     */
+    private fun Fixture.serveTurn(reply: String) {
+        transport.listener!!.onText("""{"type":"jarvis_text","text":"$reply"}""")
+        transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"$reply"}""")
+        transport.listener!!.onText("""{"type":"turn_complete"}""")
+    }
+
+    @Test
+    fun turnComplete_doesNotEndTheEchoGuard_theDeviceIsStillSpeaking() = runTest {
+        // The regression this whole section exists for: turn_complete means "no more
+        // jarvis_text is coming", NOT "the loudspeaker went quiet". Only the TTS engine
+        // can say the latter, and it says it with onUtteranceDone.
+        val f = speakingFixture()
+        f.serveTurn("Bugün hava güneşli, dışarı çıkabilirsin.")
+
+        f.clock.now += 1_000            // TTS is a second into a multi-second sentence
+        f.channelMic.emit(byteArrayOf(1))
+
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+        assertEquals(1, f.channelMic.readCount)
+        assertEquals(0, f.transport.sentBinaries.size)
+    }
+
+    @Test
+    fun turnComplete_midSpeech_doesNotLetTheEchoCutJarvisOff() = runTest {
+        val f = speakingFixture()
+        f.serveTurn("Bugün hava güneşli, dışarı çıkabilirsin.")
+        val textsBefore = f.transport.sentTexts.size
+
+        f.clock.now += 1_000
+        f.stt.listener!!.onBeginningOfSpeech()
+
+        assertEquals(0, f.tts.stopCalls)
+        assertEquals(textsBefore, f.transport.sentTexts.size)
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+    }
+
+    @Test
+    fun turnComplete_withNoReplyToSpeak_settlesToListeningAtOnce() = runTest {
+        // The empty-reply path: turn_complete with nothing spoken must NOT leave the
+        // call stuck in SPEAKING waiting for an onUtteranceDone that will never come.
+        val f = speakingFixture()
+        f.transport.listener!!.onText("""{"type":"turn_complete"}""")
+
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+        f.clock.now += VoiceSession.ECHO_TAIL_MS + 1
+        f.channelMic.emit(byteArrayOf(4))
+        assertEquals(1, f.transport.sentBinaries.size)
+    }
+
+    @Test
+    fun interrupt_isReachableWhileJarvisActuallySpeaks() = runTest {
+        // The tap replaced voice barge-in, so it must be available for the WHOLE of
+        // Jarvis's speech -- not just the microseconds before turn_complete arrives.
+        val f = speakingFixture()
+        f.serveTurn("Uzun bir cevap veriyorum, birkaç saniye sürüyor.")
+
+        f.clock.now += 2_000
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+
+        f.session.interrupt()
+        assertEquals(1, f.tts.stopCalls)
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+    }
+
     @Test
     fun micFrames_areNotSentWhileJarvisIsSpeaking() = runTest {
         val f = speakingFixture()
-        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Merhaba Kadir."}""")
+        f.serveTurn("Merhaba Kadir.")
 
         f.channelMic.emit(byteArrayOf(1, 2, 3))
 
@@ -964,7 +1060,7 @@ class VoiceSessionTest {
     @Test
     fun micFrames_resumeOnceTheEchoTailHasExpired() = runTest {
         val f = speakingFixture()
-        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Merhaba Kadir."}""")
+        f.serveTurn("Merhaba Kadir.")
         f.channelMic.emit(byteArrayOf(1))
         assertEquals(0, f.transport.sentBinaries.size)
 
@@ -987,7 +1083,7 @@ class VoiceSessionTest {
         // pinned above zero and the call permanently DEAF -- far worse than the bug
         // being fixed. The ceiling is what makes that impossible.
         val f = speakingFixture()
-        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Uzun bir cevap."}""")
+        f.serveTurn("Uzun bir cevap.")
 
         f.clock.now += VoiceSession.MAX_SPEAK_GUARD_MS + 1
         f.channelMic.emit(byteArrayOf(9))
@@ -1062,8 +1158,10 @@ class VoiceSessionTest {
         f.stt.listener!!.onResult("tabii")          // dropped, latch consumed
         advanceTimeBy(400)
 
-        // Jarvis has finished and the tail has passed; Kadir speaks for real.
+        // Jarvis has finished SPEAKING (only onUtteranceDone says that -- turn_complete
+        // does not) and the tail has passed; Kadir speaks for real.
         f.transport.listener!!.onText("""{"type":"turn_complete"}""")
+        f.tts.listener!!.onUtteranceDone()
         f.clock.now += VoiceSession.ECHO_TAIL_MS + 1
         f.stt.listener!!.onBeginningOfSpeech()
         f.stt.listener!!.onResult("yarın hava nasıl olacak")
@@ -1071,6 +1169,45 @@ class VoiceSessionTest {
         val frame = lastSentTextJson(f.transport)
         assertEquals("user_text", frame.getValue("type").jsonPrimitive.content)
         assertEquals("yarın hava nasıl olacak", frame.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun aMergedUtterance_thatStartedAsEchoButEndsAsKadir_isNotSwallowed() = runTest {
+        // The fifth instance of this file's recurring bug class, found in review. One
+        // recognition turn can hold BOTH: the echo trips the onset, Jarvis stops, and
+        // Kadir answers inside the recognizer's 1.5 s silence window so no endpoint
+        // occurs. The single final then carries KADIR's words -- and the latch alone
+        // dropped them silently: his sentence appears on screen, vanishes, no reply.
+        val f = speakingFixture()
+        f.serveTurn("Bugün hava güneşli.")
+        f.stt.listener!!.onBeginningOfSpeech()           // the echo trips the onset
+
+        f.tts.listener!!.onUtteranceDone()               // Jarvis actually stops
+        f.clock.now += VoiceSession.ECHO_TAIL_MS + 1     // ...and the tail runs out
+        f.stt.listener!!.onResult("peki yarın ne olacak")
+
+        val frame = lastSentTextJson(f.transport)
+        assertEquals("user_text", frame.getValue("type").jsonPrimitive.content)
+        assertEquals("peki yarın ne olacak", frame.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun aMangledEchoFinalizingInsideTheTail_isStillDropped() = runTest {
+        // The other side of the same rule: a real echo's final lands ~1.5 s after the
+        // sound stopped (COMPLETE_SILENCE_MS), i.e. INSIDE the tail -- which is exactly
+        // what ECHO_TAIL_MS is sized for. Mangled past textual recognition, so only the
+        // timing can catch it.
+        val f = speakingFixture()
+        f.serveTurn("Yarın sabah dokuzda toplantın var.")
+        f.stt.listener!!.onBeginningOfSpeech()
+        val textsBefore = f.transport.sentTexts.size
+
+        f.tts.listener!!.onUtteranceDone()
+        f.clock.now += 1_500                              // the recognizer's endpoint
+        f.stt.listener!!.onResult("yalın saba do kozda top lantı marş")
+
+        assertEquals(textsBefore, f.transport.sentTexts.size)
+        assertTrue(f.session.state.value.transcript.none { it.role == "user" })
     }
 
     @Test
@@ -1089,7 +1226,7 @@ class VoiceSessionTest {
     @Test
     fun interrupt_cutsJarvisOff_andReopensTheMicImmediately() = runTest {
         val f = speakingFixture()
-        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Uzun bir cevap veriyorum."}""")
+        f.serveTurn("Uzun bir cevap veriyorum.")
 
         f.session.interrupt()
 
