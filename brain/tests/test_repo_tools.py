@@ -8,7 +8,7 @@ import pytest
 
 from app import config, repo_watch, tools
 from app.memory import Memory
-from tests.fakes import FakeDB
+from tests.fakes import FakeDB, wired_into_all_tools
 
 REPO = "owner/repo"
 NOW = "2026-07-30T10:00:00+00:00"
@@ -154,7 +154,7 @@ def test_repo_tools_zones():
 def test_repo_tools_wired_into_all_tools():
     for fn in (tools.watch_repo, tools.unwatch_repo,
                tools.list_watched_repos, tools.get_repo_updates):
-        assert fn in tools.ALL_TOOLS
+        assert wired_into_all_tools(fn)
 
 
 def test_instruction_mentions_get_repo_updates():

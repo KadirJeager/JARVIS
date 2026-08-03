@@ -1,4 +1,7 @@
 """Agent-facing tool functions. Docstrings are the LLM's tool descriptions (Turkish)."""
+import asyncio
+import functools
+import inspect
 import logging
 import re
 import shlex
@@ -419,7 +422,42 @@ async def spawn_specialist(template: str, goal: str, tool_context) -> dict:
         return {"hata": "Uzman ajan şu an çalıştırılamıyor; işi kendi araçlarınla yapmayı dene."}
 
 
-ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
-             get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
-             consult.consult_gemini, consult.consult_claude, check_my_vitals,
-             set_reminder, list_reminders, cancel_reminder, propose_tool, spawn_specialist]
+def _off_loop(fn):
+    """Senkron bir aracı `asyncio.to_thread`e taşıyan async sarmalayıcı.
+
+    Neden var: ADK senkron araç fonksiyonlarını event loop ÜZERİNDE satır içi
+    çağırır (function_tool.py `_invoke_callable`, senkron dal), async olanı
+    await eder. Bu modülün araçları ağ I/O'sudur (Firestore, GitHub, consult
+    HTTP, e5) ve satır içi hâlleri her çağrıda loop'un tamamını — sohbet, ses
+    WS, misafir kapısı — bloke ediyordu; factory'de ölçülen hâl 3.0 sn'lik bir
+    çağrının süre tavanını 6x aşmasıydı. Sarılı araçta bekleme bir `await`
+    noktasıdır: loop nefes alır ve `asyncio.timeout` bekleyişi kesebilir
+    (KESİLEN BEKLEYİŞtir — to_thread iptal edilemez, iş parçacığı arka planda
+    biter; yan etki yine gerçekleşebilir).
+
+    `functools.wraps` şart, süs değil: ADK araç bildirimini ve `tool_context`
+    enjeksiyonunu `inspect.signature(func)` üzerinden türetir; `__wrapped__`
+    olmadan model parametresiz, adı "off_loop" olan bir araç görürdü.
+
+    Zaten async olan araç (spawn_specialist) OLDUĞU GİBİ döner — test_factory
+    kimliğini `in ALL_TOOLS` ile pinliyor.
+
+    YALNIZCA aşağıdaki ALL_TOOLS listesinde uygulanır. Modül seviyesindeki
+    adlar bilinçli olarak senkron kalır: guest_gate onları kendi
+    `asyncio.to_thread`üyle, approvals yürütücüleri ise zaten bir worker
+    thread'in içinden çağırıyor."""
+    if inspect.iscoroutinefunction(fn):
+        return fn
+
+    @functools.wraps(fn)
+    async def off_loop(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    return off_loop
+
+
+ALL_TOOLS = [_off_loop(f) for f in (
+    get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
+    get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
+    consult.consult_gemini, consult.consult_claude, check_my_vitals,
+    set_reminder, list_reminders, cancel_reminder, propose_tool, spawn_specialist)]

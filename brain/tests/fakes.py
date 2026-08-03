@@ -148,3 +148,15 @@ class FakeDB:
 
     def collection(self, name):
         return self.collections.setdefault(name, FakeCollection())
+
+
+def wired_into_all_tools(fn):
+    """fn ALL_TOOLS'a kayıtlı mı — off_loop sarmasının ARKASINDAN, kimlikle.
+
+    tools._off_loop senkron araçları to_thread sarmalıyla katalogda tutar;
+    çıplak `fn in ALL_TOOLS` bu yüzden artık yalnız async araçlar için doğru.
+    İsim karşılaştırması yetmezdi: aynı ada sahip başka bir fonksiyon kayıtlıyken
+    de geçerdi. `__wrapped__` (functools.wraps) gerçek kimliği taşır."""
+    from app import tools
+    return any(f is fn or getattr(f, "__wrapped__", None) is fn
+               for f in tools.ALL_TOOLS)

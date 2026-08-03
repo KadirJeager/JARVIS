@@ -13,7 +13,7 @@ import pytest
 
 from app import approvals, config, reminders, tools
 from app.memory import Memory
-from tests.fakes import FakeDB
+from tests.fakes import FakeDB, wired_into_all_tools
 
 NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
 USER = "kadir@example.com"
@@ -483,7 +483,7 @@ def test_cancel_reminder_tool_is_red_zone():
 
 def test_cancel_reminder_tool_is_wired_into_all_tools():
     """Üretim bağlantısı: model ancak ALL_TOOLS'taki aracı görebilir."""
-    assert tools.cancel_reminder in tools.ALL_TOOLS
+    assert wired_into_all_tools(tools.cancel_reminder)
 
 
 def test_cancel_reminder_tool_body_is_defensive_only():

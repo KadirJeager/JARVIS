@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from app import approvals, config, tool_registry, tools
 from app.memory import Memory
-from tests.fakes import FakeDB
+from tests.fakes import FakeDB, wired_into_all_tools
 
 USER = "kadir@example.com"
 SESSION_ID = "s1"
@@ -201,7 +201,7 @@ def test_propose_tool_returns_an_observation_when_the_backend_fails():
 def test_propose_tool_is_green_and_registered_as_a_tool():
     """Öneri kurmak zararsızdır — asıl karar onay kartındadır (spec §5)."""
     assert config.TOOL_ZONES["propose_tool"] == config.ZONE_GREEN
-    assert tools.propose_tool in tools.ALL_TOOLS
+    assert wired_into_all_tools(tools.propose_tool)
 
 
 # ---------------------------------------------------------------------------

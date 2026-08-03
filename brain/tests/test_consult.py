@@ -311,5 +311,6 @@ def test_consult_tools_are_yellow_zone():
 
 
 def test_consult_tools_registered_in_all_tools():
-    assert consult.consult_gemini in tools.ALL_TOOLS
-    assert consult.consult_claude in tools.ALL_TOOLS
+    from tests.fakes import wired_into_all_tools
+    assert wired_into_all_tools(consult.consult_gemini)
+    assert wired_into_all_tools(consult.consult_claude)

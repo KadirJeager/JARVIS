@@ -215,9 +215,19 @@ def test_a_yellow_tool_still_runs_for_the_specialist():
 # ---------------------------------------------------------------------------
 
 
+def _catalog_tool(name):
+    """Aracın ALL_TOOLS'taki hâli. Senkron araçlar katalogda `tools._off_loop`
+    (to_thread) sarmalıyla durur; resolve_tools kataloğun KENDİ nesnelerini
+    döndürür, modül seviyesindeki senkron adları değil. Kimlik pinleri bu
+    yüzden katalog üzerinden kurulur (zaten async olan spawn_specialist için
+    ikisi aynı nesnedir — tests/test_offloop.py bunu ayrıca pinler)."""
+    return next(f for f in tools_mod.ALL_TOOLS if f.__name__ == name)
+
+
 def test_the_tool_set_is_the_intersection_with_all_tools():
     tpl = _template(tools=("search_memory", "check_my_vitals"))
-    assert factory.resolve_tools(tpl) == [tools_mod.search_memory, tools_mod.check_my_vitals]
+    assert factory.resolve_tools(tpl) == [_catalog_tool("search_memory"),
+                                          _catalog_tool("check_my_vitals")]
 
 
 def test_a_template_name_that_is_not_a_real_tool_is_dropped_and_logged(caplog):
@@ -231,7 +241,7 @@ def test_a_template_name_that_is_not_a_real_tool_is_dropped_and_logged(caplog):
     with caplog.at_level(logging.WARNING):
         chosen = factory.resolve_tools(tpl)
 
-    assert chosen == [tools_mod.search_memory]
+    assert chosen == [_catalog_tool("search_memory")]
     assert "hayali_arac" in caplog.text
 
 
@@ -249,7 +259,8 @@ def test_every_shipped_template_resolves_to_real_tools(caplog):
 def test_the_specialist_agent_carries_exactly_the_resolved_tools():
     tpl = _template(tools=("search_memory", "check_my_vitals"))
     agent = factory.build_specialist(tpl, instance="i1", audit=FakeAudit(), model=MODEL)
-    assert list(agent.tools) == [tools_mod.search_memory, tools_mod.check_my_vitals]
+    assert list(agent.tools) == [_catalog_tool("search_memory"),
+                                 _catalog_tool("check_my_vitals")]
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +283,7 @@ def test_spawn_specialist_is_excluded_even_when_the_template_asks_for_it(caplog)
     with caplog.at_level(logging.WARNING):
         chosen = factory.resolve_tools(tpl)
 
-    assert chosen == [tools_mod.search_memory]
+    assert chosen == [_catalog_tool("search_memory")]
     assert tools_mod.spawn_specialist not in chosen
     assert factory.SPAWN_TOOL_NAME in caplog.text
 
@@ -374,18 +385,20 @@ async def test_a_hung_call_that_never_yields_an_event_still_times_out():
 async def test_a_BLOCKING_tool_call_overruns_the_cap_and_we_say_so():
     """Sert tavanın SINIRI, gizlenmeden pinlenir.
 
-    `asyncio.timeout` yalnız bir `await` noktasında iş görür. ADK senkron araç
-    fonksiyonlarını event loop ÜZERİNDE satır içi çağırır ve bu şablonların
-    araçlarının hepsi senkrondur (Firestore, e5) -- yani BLOKLAYAN bir çağrı
-    tavanı aşar ve o sürede event loop'un tamamı durur.
+    `asyncio.timeout` yalnız bir `await` noktasında iş görür. Sevkiyattaki
+    araçlar artık ALL_TOOLS'ta `tools._off_loop` (to_thread) sarmalıyla sunulur
+    ve bu sınırın DIŞINA çıktı (bir alttaki test + tests/test_offloop.py). Bu
+    test kalan yarıyı belgeler: sarmadan GEÇMEYEN, loop'u satır içi bloklayan
+    kod (ör. üçüncü parti bir kütüphanenin senkron çağrısı) tavanı hâlâ aşar
+    ve o sürede event loop'un tamamı durur.
 
     Yukarıdaki askı testi `await asyncio.sleep(5)` kullanıyor, yani AWAIT EDEN
     bir askı: üretimin bu araçlar için hiç üretmediği bir hâl. Bu oturumda tam
     da bu sınıftan bir hata (üretimin üretmediği olay dizisini ölçen test) bir
     Critical'ı kaçırdı; o yüzden gerçek hâl ayrıca ölçülüyor.
 
-    Test bir GARANTİ değil, bir BELGE: davranış düzelirse (araç çağrıları
-    to_thread'e taşınırsa) bu test kırılır ve o zaman SİLİNMELİDİR."""
+    Test bir GARANTİ değil, bir BELGE: asyncio'nun kendisi değişmedikçe bu
+    davranış değişmez."""
     import time as _time
 
     class BlockingRunner:
@@ -403,6 +416,35 @@ async def test_a_BLOCKING_tool_call_overruns_the_cap_and_we_say_so():
     assert gecen >= 0.30, f"bloklayan çağrı kesilmiş görünüyor ({gecen:.3f} sn)"
     # Ve tavan yine de UYGULANIYOR: ilk olaydan sonraki saat kontrolü yakalıyor.
     assert out["durum"] == factory.STATUS_TIMEOUT
+
+
+async def test_a_wrapped_blocking_tool_is_cut_by_the_time_cap():
+    """Yukarıdaki sınırın KAPANAN yarısı (tools._off_loop dilimi): sevkiyattaki
+    araçlar ALL_TOOLS'ta to_thread sarmalıyla durur, ADK'nın araç çağrısı bir
+    `await` noktası olur ve sert tavan bekleyişi KESER.
+
+    Kontrol grubu bir üstteki test: AYNI 0.30 sn'lik blok sarmasız hâlde tavanı
+    ~6x aşıyor; burada sarılı hâlde ttl=0.05'te kesiliyor. Kesilen BEKLEYİŞtir —
+    to_thread iptal edilemez, iş parçacığı arka planda sonuna kadar koşar, yani
+    aracın yan etkisi yine gerçekleşebilir (bkz. run_specialist docstring).
+
+    ÖLDÜREN MUTASYON: `run_specialist`'teki `asyncio.timeout` sarmalını silmek
+    bu koşuyu 0.30 sn'ye uzatır ve süre assert'i kırılır; ALL_TOOLS'taki
+    sarmayı kaldırmaksa test_offloop'u kırar."""
+    import time as _time
+
+    class WrappedToolRunner:
+        async def run_async(self, *, user_id, session_id, new_message):
+            await tools_mod._off_loop(lambda: _time.sleep(0.30))()
+            yield FakeEvent("geç geldi")
+
+    basladi = _time.monotonic()
+    out = await _spawn(_template(max_steps=1000, ttl_seconds=0.05),
+                       runner=WrappedToolRunner(), clock=_time.monotonic)
+    gecen = _time.monotonic() - basladi
+
+    assert out["durum"] == factory.STATUS_TIMEOUT
+    assert gecen < 0.25, f"sarılı araç bekleyişi kesilmedi ({gecen:.3f} sn)"
 
 
 async def test_a_runner_failure_becomes_an_observation_not_an_exception():

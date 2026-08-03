@@ -12,7 +12,7 @@ from app import config, messages, tools, vitals
 from app.memory import Memory
 from app.policy import make_policy_callback
 from app.voice import VoiceBridge
-from tests.fakes import FakeDB, FakeRunner
+from tests.fakes import FakeDB, FakeRunner, wired_into_all_tools
 
 
 def _counters(db):
@@ -121,7 +121,7 @@ def test_check_my_vitals_tool_returns_vitals_dict():
 
 
 def test_check_my_vitals_is_registered_green():
-    assert tools.check_my_vitals in tools.ALL_TOOLS
+    assert wired_into_all_tools(tools.check_my_vitals)
     assert config.TOOL_ZONES["check_my_vitals"] == config.ZONE_GREEN
 
 

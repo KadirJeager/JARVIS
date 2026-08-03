@@ -5,7 +5,7 @@ from app.agent import build_agent
 from app.memory import Memory
 from app.speaker import make_sample
 from app.speaker_store import enroll_anchors, load_profile, save_profile
-from tests.fakes import FakeDB
+from tests.fakes import FakeDB, wired_into_all_tools
 
 APP_NAME = "jarvis"
 USER = "kadir@example.com"
@@ -193,7 +193,7 @@ def test_get_speaker_status_is_wired_into_all_tools():
     """Production wiring, not just existence: the accessor Agent actually
     consumes must include it (mutation guard -- removing the tool from
     ALL_TOOLS must fail this test)."""
-    assert tools.get_speaker_status in tools.ALL_TOOLS
+    assert wired_into_all_tools(tools.get_speaker_status)
 
 
 def test_instruction_mentions_get_speaker_status():
