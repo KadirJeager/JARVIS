@@ -36,6 +36,7 @@ import com.jarvis.data.net.VoiceSampleDto
 import kotlinx.coroutines.CompletableDeferred
 import org.junit.After
 import org.junit.Assert.assertTrue
+import androidx.test.rule.GrantPermissionRule
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,6 +57,14 @@ import org.junit.runner.RunWith
 class BootFlowTest {
 
     @get:Rule val compose = createEmptyComposeRule()
+
+    // POST_NOTIFICATIONS is now requested at STARTUP (approvals reach Kadir by push,
+    // North Star §4.8), not only inside startVoice(). Without this grant the system
+    // dialog opens over every MainActivity launch here and deadlocks the whole class.
+    @get:Rule
+    val notificationPermission: GrantPermissionRule =
+        GrantPermissionRule.grant(android.Manifest.permission.POST_NOTIFICATIONS)
+
 
     /**
      * Silent sign-in that HANGS. That is the whole point: if the boot path awaits it
