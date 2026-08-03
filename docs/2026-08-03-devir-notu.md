@@ -148,6 +148,12 @@ Kanıt zinciri (yeni oturum, 23:00–23:10):
 
 Onay kaydına DOKUNULMADI — karar Kadir'in (kart 23:52 yerele kadar karar alabilir).
 
+**23:08 — Kadir kartı ONAYLADI ve zincir uçtan uca çalıştı:** POST approve → 200,
+claim kuruldu, `status=approved`, yürütücü koştu ve hatırlatma gerçekten iptal edildi
+(`reminders/ZvHISmfH...` → `cancelled`, karardan 200 ms sonra;
+`outcome="Hatırlatma iptal edildi: 'Su iç'"`). Y3'ün karar+yürütme yolunun
+üretimdeki İLK gerçek E2E kanıtı budur.
+
 Not edilen tasarım gözlemi (değiştirilmedi): istemcinin 404→boş-liste toleransı,
 sürüm kayması için bilinçli bir seçim ama bu olayda gerçek bir prod kesintisini de
 sessizleştirdi. Trafik kök nedeni YAML'da düzeltilip belgelendiği için istemci
