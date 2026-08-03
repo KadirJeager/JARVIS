@@ -226,3 +226,31 @@ def test_the_report_names_the_templates_that_were_used():
     data = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")
     report = retro._build_prompt(data)
     assert "Fabrika (Kademe 1)" in report and "nobetci" in report
+
+
+def test_a_non_string_actor_does_not_take_the_whole_report_down():
+    """audit_log'da string olmayan tek bir `actor` haftalık raporun TAMAMINI
+    AttributeError ile düşürüyordu; aynı döngüdeki `tool` alanı savunmalıydı,
+    bu değildi."""
+    db = FakeDB()
+    db.collection("audit_log").add({
+        "ts": "2026-08-01T12:00:00+00:00", "actor": 123, "tool": "x",
+        "zone": "green", "decision": "allow", "args": {},
+    })
+    out = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")
+    assert out["audit_log"]["total_7d"] == 1
+
+
+def test_spawn_calls_are_reported_even_when_no_specialist_touched_a_tool():
+    """Hiç araç çağırmadan cevap veren bir örnek geriye "factory:" satırı
+    BIRAKMAZ -- rapor o zaman "üretilmiş ajan yok" derdi, 5 koşu yapılmış olsa
+    bile."""
+    db = FakeDB()
+    for _ in range(5):
+        db.collection("audit_log").add({
+            "ts": "2026-08-01T12:00:00+00:00", "actor": "orchestrator",
+            "tool": "spawn_specialist", "zone": "yellow", "decision": "allow", "args": {},
+        })
+    data = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")
+    assert data["factory"]["spawn_calls_7d"] == 5
+    assert "hiçbiri araç kullanmadı" in retro._build_prompt(data)

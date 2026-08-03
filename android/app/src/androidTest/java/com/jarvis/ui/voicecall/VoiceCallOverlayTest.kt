@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.performClick
+import org.junit.Assert.assertEquals
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.click
 import com.jarvis.data.chat.UiMessage
@@ -28,10 +29,20 @@ class VoiceCallOverlayTest {
     @get:Rule
     val rule = createComposeRule()
 
-    private fun show(state: VoiceUiState, onStop: () -> Unit = {}, onDismissError: () -> Unit = {}) {
+    private fun show(
+        state: VoiceUiState,
+        onStop: () -> Unit = {},
+        onDismissError: () -> Unit = {},
+        onInterrupt: () -> Unit = {},
+    ) {
         rule.setContent {
             JarvisTheme {
-                VoiceCallOverlay(state = state, onStop = onStop, onDismissError = onDismissError)
+                VoiceCallOverlay(
+                    state = state,
+                    onStop = onStop,
+                    onDismissError = onDismissError,
+                    onInterrupt = onInterrupt,
+                )
             }
         }
     }
@@ -53,9 +64,30 @@ class VoiceCallOverlayTest {
     }
 
     @Test
-    fun speaking_showsSpeakingLabel() {
+    fun speaking_showsSpeakingLabel_andInvitesTheTapThatReplacedVoiceBargeIn() {
+        // The label carries the affordance now: voice barge-in was given up (the echo
+        // guard cannot tell Kadir from the loudspeaker), so the tap is the ONLY way to
+        // cut Jarvis off and it has to be discoverable.
         show(VoiceUiState(phase = VoicePhase.SPEAKING))
-        rule.onNodeWithText("Konuşuyor…").assertIsDisplayed()
+        rule.onNodeWithText("Konuşuyor…", substring = true).assertIsDisplayed()
+        rule.onNodeWithText("kesmek için dokun", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun tappingTheSpeakingLabel_interruptsJarvis() {
+        var interrupts = 0
+        show(VoiceUiState(phase = VoicePhase.SPEAKING), onInterrupt = { interrupts++ })
+        rule.onNodeWithTag("voice_interrupt").performClick()
+        assertEquals(1, interrupts)
+    }
+
+    @Test
+    fun theInterruptTapIsInertWhileJarvisIsNotSpeaking() {
+        // A stray tap on a listening call must change nothing.
+        var interrupts = 0
+        show(VoiceUiState(phase = VoicePhase.LISTENING), onInterrupt = { interrupts++ })
+        rule.onNodeWithTag("voice_interrupt").performClick()
+        assertEquals(0, interrupts)
     }
 
     @Test

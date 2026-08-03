@@ -172,7 +172,11 @@ def list_granted(db) -> list[dict]:
     """Yalnızca `granted` kayıtlar, ada göre sıralı."""
     rows = [snap.to_dict() for snap in db.collection(COLLECTION).stream()]
     granted = [r for r in rows if r.get("status") == STATUS_GRANTED]
-    granted.sort(key=lambda r: r.get("name") or "")
+    # str() -- modül kayıt-BAŞINA izolasyon vaat ediyor, ama izolasyon
+    # toolset_factory çağrısını sarıyordu, bu listeleme adımını değil:
+    # `name` alanı string olmayan tek bir doküman sort'u TypeError ile
+    # düşürüyor ve SAĞLAM sunucuların hepsi birlikte gidiyordu.
+    granted.sort(key=lambda r: str(r.get("name") or ""))
     return granted
 
 

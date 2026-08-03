@@ -322,13 +322,16 @@ def propose_tool(name: str, kind: str, zone: str, why: str, tool_context,
 
         session = tool_context.session
         user_id, session_id = session.user_id, session.id
-        # Süresi geçmiş kartlar list_pending'de GÖRÜNMEZ (Y3 §4.1) -- yani
-        # cevapsız kalıp süresi dolan bir öneri, aynı aracın yeniden
-        # önerilmesini sonsuza dek kilitlemez.
-        for pending in approvals.list_pending(db, user_id):
-            if pending.get("kind") == approvals.KIND_TOOL_GRANT and pending.get("tool_name") == name:
-                return (f"'{name}' için zaten Kadir'in kararını bekleyen bir öneri var; "
-                        "ikinci kart oluşturmadım.")
+        # find_pending_duplicate, list_pending DEĞİL: ikincisi MAX_PENDING=50 ile
+        # kesiyor, yani 50'den fazla bekleyen onay varken aynı araç için İKİNCİ bir
+        # kart üretilebilirdi. Mükerrer araması sınırsız taramalı; kuyruk listesi
+        # UI içindir, mükerrerlik kontrolü değil.
+        # Süresi geçmiş kartlar mükerrer SAYILMAZ (Y3 §4.1) -- yani cevapsız kalıp
+        # süresi dolan bir öneri, aynı aracın yeniden önerilmesini sonsuza dek
+        # kilitlemez.
+        if approvals.find_pending_duplicate(db, user_id, name, {}, kind=approvals.KIND_TOOL_GRANT):
+            return (f"'{name}' için zaten Kadir'in kararını bekleyen bir öneri var; "
+                    "ikinci kart oluşturmadım.")
 
         # Onay id'si ÖNCEDEN üretilir ve tool_args'a konur: yürütücü sözleşmesi
         # (tool_args, user_id) olduğu için kaydı doğuran onayın kimliği

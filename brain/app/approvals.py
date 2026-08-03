@@ -268,7 +268,8 @@ def list_pending(db, user_id: str, now_fn=_now) -> list[dict]:
 
 
 def find_pending_duplicate(db, user_id: str, tool_name: str,
-                           tool_args: dict | None, now_fn=_now) -> str | None:
+                           tool_args: dict | None, now_fn=_now,
+                           kind: str = KIND_TOOL_CALL) -> str | None:
     """Aynı isteğin ZATEN bekleyen bir kartı varsa onun id'si, yoksa None.
 
     Neden var: kırmızı bölge engeli her turda yeniden tetiklenir. Ajan talimatı
@@ -289,9 +290,14 @@ def find_pending_duplicate(db, user_id: str, tool_name: str,
     )
     for snap in snaps:
         doc = snap.to_dict()
+        if doc.get("kind") != kind:
+            continue
         if doc.get("tool_name") != tool_name:
             continue
-        if doc.get("tool_args") != normalized:
+        # tool_grant önerilerinde argümanlar (gerekçe, mcp url'i) öneriden
+        # öneriye değişebilir ama mükerrerliği belirleyen ARAÇ ADIdır; çağıran
+        # bu yüzden {} geçer ve o durumda argüman karşılaştırması atlanır.
+        if normalized and doc.get("tool_args") != normalized:
             continue
         if _is_expired(doc, parsed_now):
             continue

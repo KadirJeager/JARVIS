@@ -252,9 +252,23 @@ async def run_specialist(template: AgentTemplate, goal: str, *, runner, user_id:
       a) her olaydan SONRA `clock()` kontrolü. Enjekte edilebilir olması testin
          gerçek zaman beklemesini gereksiz kılar (deterministik pim).
       b) tüm döngüyü saran `asyncio.timeout`. (a) tek başına YETMEZ: hiç olay
-         üretmeyen (askıda kalmış tek bir araç çağrısı) bir koşuda o kontrol hiç
-         çalışmaz ve tur sonsuza kadar Kadir'i bekletirdi. İkisi de aynı
-         `ttl_seconds`i, aynı birimi (saniye) kullanır.
+         üretmeyen bir koşuda o kontrol hiç çalışmaz ve tur sonsuza kadar Kadir'i
+         bekletirdi. İkisi de aynı `ttl_seconds`i, aynı birimi (saniye) kullanır.
+
+    (b)'NİN SINIRI, açıkça: `asyncio.timeout` yalnızca bir `await` noktasında iş
+    görür. ADK senkron araç fonksiyonlarını event loop ÜZERİNDE satır içi çağırır
+    (google/adk/tools/function_tool.py: `return target(**args_to_call)`), ve bu
+    şablonların araçlarının hepsi senkrondur (Firestore, e5). Bu yüzden BLOKLAYAN
+    tek bir araç çağrısı tavanı aşabilir: ölçüldü, ttl=0.2 sn iken 3.0 sn süren
+    bir çağrı 3.0 sn sürdü ve o sürede event loop'un tamamı -- sohbet, ses WS,
+    misafir kapısı -- bloklu kaldı. Tavan, AWAIT EDEN bir askıyı (asıl gerçekçi
+    hâl: modelin HTTP çağrısı) bağlar; bloklayan bir çağrıyı bağlamaz. Onun üst
+    sınırı altta yatan istemcinin kendi deadline'ıdır.
+
+    Bunu gizlemek yerine yazıyoruz, çünkü bu koşu Kadir'in sohbet turunun
+    İÇİNDE olur: "TTL var" demek "en fazla TTL kadar beklersin" demek DEĞİLDİR.
+    Gerçek çözüm araç çağrılarını `asyncio.to_thread`'e taşımaktır (enroll ve
+    speaker yolunda zaten yapıldığı gibi) ve bu ayrı bir dilimdir.
 
     Tavan semantiği tasks.py ile AYNI: tavan "tam dolduğunda" durum tavanın
     durumudur — o adım başarılı olsa bile (tasks.step_once'ın

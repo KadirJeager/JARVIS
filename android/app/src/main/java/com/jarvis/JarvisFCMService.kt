@@ -94,11 +94,11 @@ class JarvisFCMService : FirebaseMessagingService() {
 
     private fun buildNotification(title: String, body: String, approvalId: String?): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
-            // MainActivity is launchMode="singleTop", so a live instance is REUSED and gets
-            // the extra through onNewIntent (which MainActivity reads into a flow). CLEAR_TOP
-            // it — which is the point: the approval id is read in `onCreate`'s
-            // LaunchedEffect, and a warm Activity resumed without a restart would never
-            // look at these extras at all.
+            // MainActivity is launchMode="singleTop", so a live instance is REUSED and
+            // receives this intent through onNewIntent — which MainActivity funnels into
+            // a flow precisely because onNewIntent triggers no recomposition, so an
+            // effect keyed on Unit would never see the extra. CLEAR_TOP additionally
+            // pops anything stacked above it, so the tap always lands on the chat.
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             if (approvalId != null) putExtra(EXTRA_APPROVAL_ID, approvalId)
         }

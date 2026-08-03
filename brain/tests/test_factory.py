@@ -177,14 +177,21 @@ def test_a_granted_registry_entry_cannot_widen_the_specialist():
     verilmez.
 
     ÖLDÜREN MUTASYON: build_specialist'in callback'ine
-    `zone_resolver=tool_registry.make_zone_resolver(db)` eklemek."""
+    `zone_resolver=tool_registry.make_zone_resolver(getattr(audit, "db", None))`
+    eklemek.
+
+    audit FakeAudit(db) İLE kurulur, FakeAudit() ile DEĞİL: policy._count_tool_call
+    db'yi audit üzerinden bulur, yani db'nin callback'e ulaşabildiği TEK yol budur.
+    db=None bırakıldığında yukarıdaki mutasyon çözücüyü None ile kurar, hiçbir kayıt
+    okunamaz ve test mutasyonu öldüremez -- gözden geçirmede yakalandı: bu hâliyle
+    süit mutasyonla birlikte 696/696 yeşil kalıyordu, yani iddia ölçülmüyordu."""
     from app import tool_registry
 
     db = FakeDB()
     tool_registry.grant(db, name="github_mcp", kind=tool_registry.KIND_MCP,
                         zone=config.ZONE_GREEN, why="gerekçe", approval_id="ap1",
                         mcp={"transport": "http", "url": "https://mcp.example/mcp"})
-    agent = factory.build_specialist(_template(), instance="i1", audit=FakeAudit(),
+    agent = factory.build_specialist(_template(), instance="i1", audit=FakeAudit(db),
                                      model=MODEL)
 
     sonuc = agent.before_tool_callback(_tool("github_mcp_list_prs"), {}, None)
@@ -362,6 +369,40 @@ async def test_a_hung_call_that_never_yields_an_event_still_times_out():
 
     assert out["durum"] == factory.STATUS_TIMEOUT
     assert out["adim"] == 0
+
+
+async def test_a_BLOCKING_tool_call_overruns_the_cap_and_we_say_so():
+    """Sert tavanın SINIRI, gizlenmeden pinlenir.
+
+    `asyncio.timeout` yalnız bir `await` noktasında iş görür. ADK senkron araç
+    fonksiyonlarını event loop ÜZERİNDE satır içi çağırır ve bu şablonların
+    araçlarının hepsi senkrondur (Firestore, e5) -- yani BLOKLAYAN bir çağrı
+    tavanı aşar ve o sürede event loop'un tamamı durur.
+
+    Yukarıdaki askı testi `await asyncio.sleep(5)` kullanıyor, yani AWAIT EDEN
+    bir askı: üretimin bu araçlar için hiç üretmediği bir hâl. Bu oturumda tam
+    da bu sınıftan bir hata (üretimin üretmediği olay dizisini ölçen test) bir
+    Critical'ı kaçırdı; o yüzden gerçek hâl ayrıca ölçülüyor.
+
+    Test bir GARANTİ değil, bir BELGE: davranış düzelirse (araç çağrıları
+    to_thread'e taşınırsa) bu test kırılır ve o zaman SİLİNMELİDİR."""
+    import time as _time
+
+    class BlockingRunner:
+        async def run_async(self, *, user_id, session_id, new_message):
+            _time.sleep(0.30)          # senkron araç çağrısı gibi: loop'u bloklar
+            yield FakeEvent("geç geldi")
+
+    basladi = _time.monotonic()
+    out = await _spawn(_template(max_steps=1000, ttl_seconds=0.05),
+                       runner=BlockingRunner(), clock=_time.monotonic)
+    gecen = _time.monotonic() - basladi
+
+    # Tavan 0.05 sn; gerçekte en az 0.30 sn sürdü -- yani sert sınır BU HÂLİ
+    # bağlamıyor. DATA: aşım oranı ~6x.
+    assert gecen >= 0.30, f"bloklayan çağrı kesilmiş görünüyor ({gecen:.3f} sn)"
+    # Ve tavan yine de UYGULANIYOR: ilk olaydan sonraki saat kontrolü yakalıyor.
+    assert out["durum"] == factory.STATUS_TIMEOUT
 
 
 async def test_a_runner_failure_becomes_an_observation_not_an_exception():

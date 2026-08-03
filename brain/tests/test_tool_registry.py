@@ -283,3 +283,19 @@ def test_policy_callback_without_resolver_still_blocks_unknown_tools():
     result = cb(_Tool("github_mcp"), {}, None)
     assert result is not None and "POLİTİKA ENGELİ" in result["result"]
     assert audit.entries[0]["zone"] == config.ZONE_RED
+
+
+# -- coverage pin (review minor 7) -------------------------------------------
+
+def test_every_shipped_tool_has_an_explicit_zone_in_code():
+    """Kod-önce sınırı yalnız config'in BİLDİĞİ adları korur.
+
+    `check_zone` sırası TOOL_ZONES -> kayıt defteri -> DEFAULT_ZONE(red). Zone
+    tablosuna yazılmayı unutulan bir araç bugün red olur (güvenli), AMA kayıt
+    defteriyle green/yellow'a çekilebilir hâle gelir -- yani onay merkezini
+    baypas etmenin yolu, yeni bir araca zone yazmayı unutmaktan geçer. Bu test o
+    kapıyı kapatır: ALL_TOOLS'un her üyesi TOOL_ZONES'ta AÇIKÇA yer almalı."""
+    from app.tools import ALL_TOOLS
+
+    eksik = [fn.__name__ for fn in ALL_TOOLS if fn.__name__ not in config.TOOL_ZONES]
+    assert not eksik, f"config.TOOL_ZONES'ta bölgesi yazılmamış araç(lar): {eksik}"

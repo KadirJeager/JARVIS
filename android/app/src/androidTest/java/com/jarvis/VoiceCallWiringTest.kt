@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ActivityScenario
@@ -324,6 +325,13 @@ class VoiceCallWiringTest {
             // The REAL factory seam was exercised and the overlay owns the screen.
             assertEquals(1, transport.connectCalls)
             compose.onNodeWithTag("voice_call_overlay").assertIsDisplayed()
+            // The label is DEBOUNCED by CONNECTING_DEBOUNCE_MS (1200 ms) so a fast dial
+            // never flashes it. waitForIdle() does not cover that wait -- this rule does
+            // not drive the compose clock (the Activity owns it), so asserting straight
+            // after the click is a bet on timing. Wait for it explicitly.
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithText("Bağlanıyor…").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Bağlanıyor…").assertIsDisplayed()
 
             // Server accepts: the session flips to live listening.
