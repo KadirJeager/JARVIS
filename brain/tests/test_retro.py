@@ -174,3 +174,55 @@ def test_obsolete_events_counted_and_not_deleted():
 
     # Verify events collection was NOT mutated (deletion is forbidden in this phase)
     assert len(db.collection("events").docs) == 3
+
+
+# -- factory inventory (North Star §8.5, invariant 6) -------------------------
+# "Haftalık retro üretilmiş ajan envanterini de tarar — ajan sürünmesine karşı
+# temizlik." Tier 1 instances are ephemeral and leave no collection behind, only
+# their audit trail (actor="factory:<template>#<instance>", invariant 5).
+
+
+def _factory_audit(db, actor, ts, tool="search_memory"):
+    db.collection("audit_log").add({
+        "ts": ts, "actor": actor, "tool": tool, "zone": "green",
+        "decision": "allow", "args": {},
+    })
+
+
+def test_retro_counts_factory_runs_per_template_and_distinct_instances():
+    db = FakeDB()
+    now = "2026-08-03T12:00:00+00:00"
+    recent = "2026-08-01T12:00:00+00:00"
+    _factory_audit(db, "factory:arastirmaci#a1", recent)
+    _factory_audit(db, "factory:arastirmaci#a1", recent)   # same instance, 2 calls
+    _factory_audit(db, "factory:arastirmaci#a2", recent)
+    _factory_audit(db, "factory:arsivci#b1", recent)
+    _factory_audit(db, "orchestrator", recent)             # not a factory call
+
+    out = retro.collect_week(db, now_fn=lambda: now)["factory"]
+
+    assert out["tool_calls_7d"] == 4
+    assert out["instances_7d"] == 3
+    assert out["by_template"] == {"arastirmaci": 3, "arsivci": 1}
+
+
+def test_factory_runs_older_than_a_week_are_not_counted():
+    db = FakeDB()
+    _factory_audit(db, "factory:arastirmaci#old", "2026-07-01T12:00:00+00:00")
+    out = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")["factory"]
+    assert out["instances_7d"] == 0
+
+
+def test_the_report_says_so_explicitly_when_no_agent_was_produced():
+    # Silence would leave it ambiguous whether the inventory was scanned at all.
+    db = FakeDB()
+    data = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")
+    assert "üretilmiş ajan yok" in retro._build_prompt(data)
+
+
+def test_the_report_names_the_templates_that_were_used():
+    db = FakeDB()
+    _factory_audit(db, "factory:nobetci#n1", "2026-08-01T12:00:00+00:00")
+    data = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")
+    report = retro._build_prompt(data)
+    assert "Fabrika (Kademe 1)" in report and "nobetci" in report
