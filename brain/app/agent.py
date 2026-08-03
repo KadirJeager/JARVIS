@@ -38,7 +38,7 @@ elindeki araçlarla en iyisini yap.
 
 def build_agent(
     memory: Memory, audit, model: "str | BaseLlm | None" = None, trust_provider=None,
-    approval_sink=None, zone_resolver=None,
+    approval_sink=None, zone_resolver=None, extra_toolsets=None,
 ) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
     (text chat); the voice runner passes whatever main._build_text_model()
@@ -63,13 +63,26 @@ def build_agent(
     `zone_resolver` (Faz Y4, spec §4.2) is how the tool registry reaches the
     policy matrix: it assigns zones to tool names the CODE does not know, and
     can never loosen one config.TOOL_ZONES already states (policy.check_zone).
-    Both production runners get it; left None, zone resolution is pre-Y4."""
+    Both production runners get it; left None, zone resolution is pre-Y4.
+
+    `extra_toolsets` (Faz Y4, spec §6) is the OTHER half of that story: the
+    zone matrix knowing about a granted MCP server is worthless unless the
+    server is actually attached. tool_registry.mcp_toolsets(db) builds these
+    from the granted `kind="mcp"` records; both production runners pass them
+    (main._init / _init_voice), each with its OWN toolset instances -- a
+    toolset owns an MCP session and is closed with its agent, so the two
+    runners must not share one. The guest gate never gets any: it does not go
+    through this factory at all (§4.9).
+
+    Left None or empty, `tools` is tools.ALL_TOOLS itself and the agent is
+    byte-identical to the pre-Y4.1-task-3 one."""
     tools.init(memory)
+    agent_tools = [*tools.ALL_TOOLS, *extra_toolsets] if extra_toolsets else tools.ALL_TOOLS
     return Agent(
         name=AGENT_NAME,
         model=model or config.MODEL_NAME,
         instruction=INSTRUCTION,
-        tools=tools.ALL_TOOLS,
+        tools=agent_tools,
         before_tool_callback=make_policy_callback(
             audit, trust_provider=trust_provider, approval_sink=approval_sink,
             zone_resolver=zone_resolver),

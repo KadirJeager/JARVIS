@@ -242,9 +242,12 @@ def _init() -> None:
         # engel bir onay kartına döner. guest_gate'e ASLA bağlanmaz (§4.9).
         # zone_resolver: kayıt defterindeki KAZANILMIŞ yeteneklerin bölgesi
         # (Faz Y4, §4.2). Koddaki bölgeyi gevşetemez -- policy.check_zone.
+        # extra_toolsets: onaylı MCP sunucuları ajana GERÇEKTEN bağlanır
+        # (§6). Bozuk bir kayıt burada sessizce atlanır, runner yine kurulur.
         agent=build_agent(_memory, _audit, model=_build_text_model(),
                           approval_sink=_approval_sink(),
-                          zone_resolver=tool_registry.make_zone_resolver(db)),
+                          zone_resolver=tool_registry.make_zone_resolver(db),
+                          extra_toolsets=tool_registry.mcp_toolsets(db)),
         session_service=_session_service,
     )
 
@@ -316,6 +319,12 @@ def _init_voice() -> None:
             # Same registry as the text runner (_memory.db is the shared client,
             # not this module-local `db`): one grant, both runners see it.
             zone_resolver=tool_registry.make_zone_resolver(_memory.db),
+            # ...and the same granted MCP servers actually attach here too
+            # (§6). Deliberately a SECOND set of toolset instances rather than
+            # the text runner's: a toolset owns an MCP session and ADK closes
+            # it with its agent, so sharing one across two agents would close
+            # it out from under the other.
+            extra_toolsets=tool_registry.mcp_toolsets(_memory.db),
         ),
         session_service=_session_service,
     )
