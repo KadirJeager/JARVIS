@@ -127,6 +127,19 @@ def test_dispatch_without_tokens_and_without_owner_reports_failure():
     assert _chat_rows(db) == []
 
 
+def test_dispatch_with_fallback_text_none_writes_nothing_to_chat():
+    """`fallback_text=None` = "çağıran zaten sohbete yazdı, düşürme" (spec §7):
+    onay sink'i kartı kendisi yazdığı için ikinci bir satır Kadir'e aynı onayı
+    İKİ kez gösterirdi."""
+    db = FakeDB()
+
+    with patch("app.tasks.default_owner", return_value=OWNER):
+        out = fcm.dispatch(db, title="T", body="B", data={}, fallback_text=None)
+
+    assert out == {"ok": False, "reason": "no_fcm_tokens"}
+    assert _chat_rows(db) == []
+
+
 # ---------------------------------------------------------------------------
 # send_reminder — davranış pimi (Y3 öncesiyle BİREBİR aynı)
 # ---------------------------------------------------------------------------
@@ -198,22 +211,16 @@ def test_send_approval_carries_approval_id_in_data():
     assert all(isinstance(v, str) for v in message["data"].values())
 
 
-def test_send_approval_without_tokens_falls_back_to_the_approvals_own_session():
-    """Kart §7 gereği zaten sohbette; push kaçarsa bildirim de AYNI sohbete
-    düşer, 'reminders' oturumuna değil."""
+def test_send_approval_without_tokens_does_not_duplicate_the_card_in_chat():
+    """TAŞIYICI PİM (çift satır tuzağı): kart §7 gereği ZATEN sohbette — onayı
+    kuran sink onu `kind="approval"` satırı olarak yazdı. Push kaçtığında
+    bildirimin de aynı oturuma düşmesi Kadir'e aynı onayı İKİ satır gösterirdi,
+    o yüzden `send_approval` fallback'i bilinçli olarak KAPATIR. Onay
+    kaybolmaz: kart sohbette, kuyruk GET /api/approvals ile senkron (§4.3)."""
     db = FakeDB()
 
     with patch("app.tasks.default_owner", return_value=OWNER):
         out = fcm.send_approval(db, _approval())
 
-    assert out["ok"] is True and out["reason"] == "no_fcm_tokens"
-    assert _chat_rows(db)[0]["session_id"] == "web-2026-08-03"
-
-
-def test_send_approval_without_session_falls_back_to_the_default_session():
-    db = FakeDB()
-
-    with patch("app.tasks.default_owner", return_value=OWNER):
-        fcm.send_approval(db, _approval(session_id=None))
-
-    assert _chat_rows(db)[0]["session_id"] == fcm.REMINDERS_SESSION_ID
+    assert out == {"ok": False, "reason": "no_fcm_tokens"}
+    assert _chat_rows(db) == []

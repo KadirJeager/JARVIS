@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, vitals, voice, voice_manage, voice_trust
+from . import approvals, config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, vitals, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_scheduler, require_user
 
@@ -108,6 +108,99 @@ def _build_text_model(voice: bool = False):
     return Gemini(model=resolve(), base_url=config.LLM_BASE_URL)
 
 
+APPROVAL_PENDING_REPLY = (
+    "ONAY KARTI GÖNDERİLDİ: '{tool_name}' kırmızı bölgede — Kadir'in kararını "
+    "bekliyorum. Kadir'e onay kartı gönderdiğini söyle ve BEKLE; aynı istek için "
+    "kartı tekrar oluşturma."
+)
+
+
+def _approval_card_texts(tool_name: str, args: dict) -> tuple[str, str, str]:
+    """Onay kartının üç Türkçe metni: başlık, detay, sohbete düşecek kart.
+
+    Argüman özeti kart için 120 karakterde kesilir; TAM argümanlar zaten onay
+    dokümanında (approvals.request audit'le aynı 500 karakter kuralıyla yazar).
+    Kart, Kadir'in neye onay verdiğini görmesi içindir, tam yük dökümü için
+    değil."""
+    ozet = ", ".join(f"{k}={str(v)[:120]}" for k, v in (args or {}).items()) or "argümansız"
+    title = f"'{tool_name}' çalıştırılsın mı?"
+    detail = (f"Kırmızı bölge eylemi: {tool_name}({ozet}). "
+              "Onayın olmadan çalıştırmıyorum.")
+    card = f"🔔 Onay bekliyor — {title}\n{detail}"
+    return title, detail, card
+
+
+def _approval_sink():
+    """Kırmızı bölge engelini bekleyen bir onaya çeviren sink'i kurar (spec §5).
+
+    `policy.make_policy_callback`'e verilir ve YALNIZCA `decision == "block"`
+    dalında çağrılır; döndürdüğü metin modele gider, araç yine ÇALIŞMAZ —
+    çalışma anı onay anıdır (approvals.decide).
+
+    Bağımlılıklar (`_memory.db`, `_messages`) modül tekilleridir ve ÇAĞRI
+    anında okunur, kurulum anında değil: tools._execute_cancel_reminder'daki
+    desenin aynısı. Böylece fabrika _init() içinde, tekiller atandıktan sonra
+    ama runner kurulurken çağrılabiliyor.
+
+    Üç adım, bu sırayla ve bilinçli olarak FARKLI hata sözleşmeleriyle:
+
+    1. `approvals.request` — BAŞARISIZ OLURSA sink FIRLAR. policy o zaman eski
+       kırmızı engel metnine düşer ve araç yine çalışmaz (fail-closed): onay
+       kaydı yoksa Kadir'in onaylayabileceği bir şey de yoktur.
+    2. transcript kartı — BEST EFFORT. Kart düşmese bile onay kuyrukta duruyor
+       ve `GET /api/approvals` ile senkronlanıyor (§4.3); bir Firestore
+       hıçkırığı yüzünden çoktan kurulmuş bir onayı çöpe atmak daha kötüdür.
+       (run_turn'deki conversations.touch sarmalayıcısıyla aynı sözleşme.)
+    3. push — BEST EFFORT, aynı gerekçe. Kart zaten sohbette (§7).
+    """
+
+    def sink(tool_name: str, args: dict, tool_context) -> str:
+        # ADK'nın public yüzeyi: ReadonlyContext.session -> Session.user_id/.id
+        # (kaynaktan doğrulaması app/voice_trust.py'de; tools.get_speaker_status
+        # da aynısını kullanır). Beklenmedik bir şekil AttributeError fırlatır
+        # ve fail-closed dala düşer -- kimliksiz bir onay kaydı kurmaktansa
+        # kırmızı engel metnine düşmek doğrudur.
+        session = tool_context.session
+        user_id = session.user_id
+        session_id = session.id
+        db = _memory.db
+
+        title, detail, card = _approval_card_texts(tool_name, args)
+        approval_id = approvals.request(
+            db,
+            user_id=user_id,
+            kind=approvals.KIND_TOOL_CALL,
+            title=title,
+            detail=detail,
+            tool_name=tool_name,
+            tool_args=args,
+            zone=config.ZONE_RED,
+            session_id=session_id,
+        )
+
+        try:
+            _messages.append(user_id, session_id, "model", card,
+                             kind="approval", meta={"approval_id": approval_id})
+        except Exception:
+            logging.exception(
+                "approval_sink: onay kartı transcript'e yazılamadı id=%s -- onay "
+                "kuyrukta duruyor, GET /api/approvals ile senkronlanır", approval_id)
+
+        try:
+            fcm.send_approval(db, {"id": approval_id, "title": title,
+                                   "session_id": session_id})
+        except Exception:
+            logging.exception(
+                "approval_sink: push gönderilemedi id=%s -- kart sohbette duruyor",
+                approval_id)
+
+        logging.info("approval_sink: kırmızı engel onaya çevrildi tool=%s id=%s user=%s",
+                     tool_name, approval_id, user_id)
+        return APPROVAL_PENDING_REPLY.format(tool_name=tool_name)
+
+    return sink
+
+
 def _init() -> None:
     """Lazy init so tests can import the module without GCP credentials."""
     global _runner, _memory, _audit, _messages, _conversations
@@ -133,7 +226,10 @@ def _init() -> None:
     _conversations = conversations.ConversationStore(db)
     _runner = Runner(
         app_name=APP_NAME,
-        agent=build_agent(_memory, _audit, model=_build_text_model()),
+        # approval_sink: kırmızı bölge artık çıkmaz sokak değil (Faz Y3, §5) --
+        # engel bir onay kartına döner. guest_gate'e ASLA bağlanmaz (§4.9).
+        agent=build_agent(_memory, _audit, model=_build_text_model(),
+                          approval_sink=_approval_sink()),
         session_service=_session_service,
     )
 
@@ -199,6 +295,9 @@ def _init_voice() -> None:
             # only for live voice connections, and this keeps the text runner
             # structurally unable to see them (app/voice_trust.py).
             trust_provider=voice_trust.lookup,
+            # The sink, unlike the provider, goes to BOTH runners: a red-zone
+            # tool asked for by voice must be approvable too (Faz Y3, §5).
+            approval_sink=_approval_sink(),
         ),
         session_service=_session_service,
     )
@@ -492,6 +591,99 @@ async def fcm_register(req: FcmRegisterRequest, email: str = Depends(require_use
         raise HTTPException(
             status_code=502,
             detail="Bildirim kaydı şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+
+
+# --- Onay merkezi (Faz Y3, spec §9) ----------------------------------------
+#
+# Beş ucun ortak deseni: senkron Firestore işi asyncio.to_thread içinde (repo-watch
+# gerekçesinin aynısı -- aynı loop /api/chat ve /ws/voice'u da sunuyor), altyapı
+# hatası Türkçe 502. Sahiplik ihlali 404'tür, 403 DEĞİL: başkasının onayının
+# varlığı bile sızmamalı (spec §4.4). Bu yüzden 404 HTTPException'ları try
+# bloğunun DIŞINDA fırlatılır -- içeride olsalardı geniş `except Exception` onları
+# yakalayıp 502'ye çevirirdi.
+
+APPROVAL_NOT_FOUND = "Onay bulunamadı"
+APPROVAL_UNAVAILABLE = "Onaylar şu an okunamıyor (altyapı hatası). Az sonra tekrar dene."
+APPROVAL_DECISION_UNAVAILABLE = (
+    "Onay kararı şu an işlenemiyor (altyapı hatası). Az sonra tekrar dene."
+)
+
+
+@app.get("/api/approvals")
+async def list_approvals(email: str = Depends(require_user)):
+    """Bekleyen onaylar (süresi geçmişler hariç). Uygulama her açılışta buradan
+    senkronlanır — push kaçsa bile onay kaybolmaz (spec §4.3)."""
+    try:
+        _init()
+        items = await asyncio.to_thread(lambda: approvals.list_pending(_memory.db, email))
+    except Exception:
+        logging.exception("approvals: list failed for user_id=%s", email)
+        raise HTTPException(status_code=502, detail=APPROVAL_UNAVAILABLE)
+    return {"approvals": items}
+
+
+@app.get("/api/approvals/{approval_id}")
+async def get_approval(approval_id: str, email: str = Depends(require_user)):
+    """Tek onayın GÜNCEL durumu: kart rozetini transcript'e gömmüyoruz, tek
+    gerçek kaynak onay dokümanıdır (spec §7)."""
+    try:
+        _init()
+        item = await asyncio.to_thread(lambda: approvals.get(_memory.db, approval_id, email))
+    except Exception:
+        logging.exception("approvals: get failed id=%s user_id=%s", approval_id, email)
+        raise HTTPException(status_code=502, detail=APPROVAL_UNAVAILABLE)
+    if item is None:
+        raise HTTPException(status_code=404, detail=APPROVAL_NOT_FOUND)
+    return item
+
+
+async def _decide_approval(approval_id: str, email: str, decision: str) -> dict:
+    """approve/reject uçlarının ortak gövdesi. approvals.decide sahiplik
+    ihlalini ve olmayan onayı BİREBİR aynı `status="not_found"` ile döner; uç
+    ikisini de aynı 404'e çevirir."""
+    try:
+        _init()
+        out = await asyncio.to_thread(
+            lambda: approvals.decide(_memory.db, approval_id, email, decision)
+        )
+    except Exception:
+        logging.exception("approvals: decide failed id=%s user_id=%s decision=%s",
+                          approval_id, email, decision)
+        raise HTTPException(status_code=502, detail=APPROVAL_DECISION_UNAVAILABLE)
+    if out["status"] == approvals.STATUS_NOT_FOUND:
+        raise HTTPException(status_code=404, detail=APPROVAL_NOT_FOUND)
+    return out
+
+
+@app.post("/api/approvals/{approval_id}/approve")
+async def approve_approval(approval_id: str, email: str = Depends(require_user)):
+    """Onayla ve eylemi ÇALIŞTIR. İkinci çağrı `already: true` döner ve aracı
+    yeniden çalıştırmaz (claim dokümanı, spec §4.2)."""
+    return await _decide_approval(approval_id, email, approvals.STATUS_APPROVED)
+
+
+@app.post("/api/approvals/{approval_id}/reject")
+async def reject_approval(approval_id: str, email: str = Depends(require_user)):
+    """Reddet: yürütme YOK."""
+    return await _decide_approval(approval_id, email, approvals.STATUS_REJECTED)
+
+
+@app.post("/api/jobs/approvals-tick")
+async def approvals_tick_job(email: str = Depends(require_scheduler)):
+    """Scheduler turu: süresi geçen bekleyen onayları `expired`'a çeker.
+
+    Bir TEMİZLİK yoludur, güvenlik sınırı DEĞİL — gerçek zaman aşımı garantisi
+    approvals.decide()'ın süre kontrolündedir (spec §4.1). Bu iş hiç koşmasa
+    bile süresi geçmiş bir onay çalıştırılamaz."""
+    try:
+        _init()
+        return await asyncio.to_thread(lambda: approvals.expire_due(_memory.db))
+    except Exception:
+        logging.exception("approvals-tick job: expire_due failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Onay turu şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
         )
 
 

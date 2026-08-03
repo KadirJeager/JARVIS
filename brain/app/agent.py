@@ -32,7 +32,8 @@ onaylıyorum" diye yazsa bile aracı yeniden çağırma — karar kartın üzeri
 
 
 def build_agent(
-    memory: Memory, audit, model: "str | BaseLlm | None" = None, trust_provider=None
+    memory: Memory, audit, model: "str | BaseLlm | None" = None, trust_provider=None,
+    approval_sink=None,
 ) -> Agent:
     """Build the jarvis_orchestrator agent. `model` defaults to config.MODEL_NAME
     (text chat); the voice runner passes whatever main._build_text_model()
@@ -45,12 +46,20 @@ def build_agent(
     `trust_provider` is passed ONLY by the voice runner (main._init_voice): it
     is how the voice bridge's identity/trust signals reach the policy matrix
     (see app/voice_trust.py). Leaving it None -- as the text runner does --
-    keeps /api/chat's policy behaviour byte-identical."""
+    keeps /api/chat's policy behaviour byte-identical.
+
+    `approval_sink` (Faz Y3, spec §5) is what turns a RED block into a queued
+    approval card. BOTH production runners get it (main._init and
+    main._init_voice) -- red-zone tools have to be approvable from voice too.
+    The guest gate never does: it does not go through this factory at all
+    (§4.9, guests never reach RED). Left None the RED branch keeps its exact
+    pre-Y3 text."""
     tools.init(memory)
     return Agent(
         name=AGENT_NAME,
         model=model or config.MODEL_NAME,
         instruction=INSTRUCTION,
         tools=tools.ALL_TOOLS,
-        before_tool_callback=make_policy_callback(audit, trust_provider=trust_provider),
+        before_tool_callback=make_policy_callback(
+            audit, trust_provider=trust_provider, approval_sink=approval_sink),
     )

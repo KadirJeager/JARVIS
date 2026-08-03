@@ -8,8 +8,10 @@ POST https://fcm.googleapis.com/v1/projects/{JARVIS_FCM_PROJECT_ID}/messages:sen
 Authorization: Bearer <access_token> (google.auth.default ile alınır)
 
 Cihaz token'ı yoksa bildirim bir chat oturumuna düşer (Kadir'in varsayılan
-e-postasına model mesajı olarak eklenir) — varsayılan oturum "reminders",
-onaylar için onayın kendi oturumu.
+e-postasına model mesajı olarak eklenir) — varsayılan oturum "reminders".
+Tek istisna `fallback_text=None`: "çağıran sohbete zaten yazdı, düşürme".
+Onay kartını sohbete sink'in kendisi yazdığı için `send_approval` bunu kullanır
+(aksi hâlde token'sız her onay iki satır olurdu).
 
 Gönderim tek yoldan geçer: `dispatch()`. `send_reminder` (Y2.4) ve
 `send_approval` (Y3) onun ince sarmalayıcılarıdır — bildirim türü eklemek bir
@@ -86,7 +88,7 @@ def _report_to_chat(db, text: str, session_id: str) -> dict:
     return {"ok": True, "fallback": f"chat_{session_id}", "reason": "no_fcm_tokens"}
 
 
-def dispatch(db, *, title: str, body: str, data: dict, fallback_text: str,
+def dispatch(db, *, title: str, body: str, data: dict, fallback_text: str | None,
              session_id: str = REMINDERS_SESSION_ID, send_http_fn=None) -> dict:
     """Kayıtlı her cihaz token'ına bir FCM HTTP v1 bildirimi gönderir.
 
@@ -97,6 +99,13 @@ def dispatch(db, *, title: str, body: str, data: dict, fallback_text: str,
     düşüşün nereye olacağını söyler; varsayılan, Y2.4'ten beri kullanılan
     "reminders" oturumudur.
 
+    `fallback_text=None` bunun İSTİSNASIDIR ve "çağıran sohbete ZATEN yazdı,
+    düşürme" demektir: onay kartı spec §7 gereği transcript'e `kind="approval"`
+    satırı olarak kendisi düşer, bir de bildirim düşerse Kadir aynı onayı İKİ
+    satır olarak görür. O durumda hiçbir şey yazılmaz ve
+    `{"ok": False, "reason": "no_fcm_tokens"}` döner — onay yine kaybolmaz,
+    çünkü kart sohbette ve kuyruk `GET /api/approvals` ile senkronlanıyor (§4.3).
+
     `data` değerleri string OLMALIDIR (FCM HTTP v1 sözleşmesi); sarmalayıcılar
     stringify eder. `send_http_fn` testlerde HTTP'yi taklit etmek için enjekte
     edilir — verildiğinde access token da istenmez, yani gerçek ağa ve
@@ -106,6 +115,9 @@ def dispatch(db, *, title: str, body: str, data: dict, fallback_text: str,
     tokens = [snap.to_dict().get("token") for snap in snaps if snap.to_dict().get("token")]
 
     if not tokens:
+        if fallback_text is None:
+            logging.info("fcm: token yok; çağıran sohbete zaten yazdı, düşürülmedi")
+            return {"ok": False, "reason": "no_fcm_tokens"}
         return _report_to_chat(db, fallback_text, session_id)
 
     try:
@@ -189,14 +201,19 @@ def send_approval(db, approval: dict, send_http_fn=None) -> dict:
     `data.approval_id` sözleşmedir: Android bildirime dokunduğunda uygulamayı
     açıp o kartı gösterir (spec §10). Push kaçarsa onay KAYBOLMAZ — kart zaten
     transcript'te (spec §7) ve kuyruk `GET /api/approvals` ile senkronlanır
-    (§4.3); token yoksa bildirim de onayın kendi sohbet oturumuna düşer.
+    (§4.3).
+
+    `fallback_text` bilinçli olarak None: bu onayın kartını sohbete ÇAĞIRAN
+    (main._approval_sink) zaten yazdı. Sohbet fallback'i burada da açık olsaydı
+    cihaz token'ı olmayan her onay Kadir'e İKİ satır olarak görünürdü.
+    `send_reminder`'ın fallback'i bundan etkilenmez: kimse onun adına sohbete
+    yazmıyor.
     """
     return dispatch(
         db,
         title="Onay bekliyor",
         body=str(approval.get("title", "")),
         data={"approval_id": str(approval.get("id", ""))},
-        fallback_text=f"🔔 Onay bekliyor: {approval.get('title', '')}",
-        session_id=approval.get("session_id") or REMINDERS_SESSION_ID,
+        fallback_text=None,
         send_http_fn=send_http_fn,
     )
