@@ -348,9 +348,15 @@ def test_decide_refuses_tool_without_registered_executor():
     assert _doc(db, approval_id)["status"] == approvals.STATUS_FAILED
 
 
-def test_decide_approves_non_tool_call_kind_without_executing_anything():
+def test_decide_approves_non_executable_kind_without_executing_anything():
+    """Yürütücüsü olmayan bir tür onaylanır, yan etkisi olmaz.
+
+    Örnek tür Y3'te `tool_grant` idi; Faz Y4.1 onu YÜRÜTÜLEBİLİR yaptı
+    (approvals.EXECUTABLE_KINDS -> tool_registry.grant), bu yüzden örnek §8.5'in
+    henüz uygulanmamış türüyle (`agent_spec`) güncellendi. Pimin kendisi
+    değişmedi: tanınmayan bir tür ASLA bir yürütücü çağırmaz."""
     db = FakeDB()
-    approval_id = _request(db, kind="tool_grant", tool_name=None)
+    approval_id = _request(db, kind="agent_spec", tool_name=None)
     ex = CountingExecutor()
 
     out = approvals.decide(db, approval_id, USER, "approved",

@@ -25,8 +25,10 @@ Model (Firestore):
    dokunuş — push bildirimi + kuyruk senkronu aynı anda — kırmızı bir eylemi iki
    kez çalıştıramaz.
 3. **Yürütme bir allowlist'tir** (spec §6). `executors` sözlüğünde kayıtlı
-   olmayan bir `tool_name` ÇALIŞMAZ; onay kaydı, keyfi bir isim yazarak rastgele
-   kod çalıştırmanın yolu değildir.
+   olmayan bir yürütücü ANAHTARI ÇALIŞMAZ; onay kaydı, keyfi bir isim yazarak
+   rastgele kod çalıştırmanın yolu değildir. Anahtar `kind`'a göre seçilir
+   (Faz Y4, `_executor_key`): `tool_call` -> `tool_name`, `tool_grant` ->
+   isim-uzaylı sabit `EXECUTOR_TOOL_GRANT`.
 
 Zaman karşılaştırmaları (süre doldu mu) bilinçli olarak Python tarafındadır,
 Firestore sorgusunda değil: `status == pending` eşitlik filtresi + `expires_at`
@@ -46,6 +48,10 @@ COLLECTION = "approvals"
 CLAIMS_COLLECTION = "approval_claims"
 
 KIND_TOOL_CALL = "tool_call"
+# Faz Y4.1 (§8.5): "eksik yeteneği kendisi tespit eder... öneri onay merkezine
+# düşer, Kadir'in tek tık onayıyla araç kayıt defterine girer". Bu tür bir
+# onayın yürütülmesi = tool_registry.grant().
+KIND_TOOL_GRANT = "tool_grant"
 
 STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
@@ -65,6 +71,20 @@ NO_EXECUTOR_OUTCOME = "bu araç onaydan sonra çalıştırılamıyor (yürütüc
 
 # (tool_args, user_id) -> Türkçe sonuç metni
 Executor = Callable[[dict, str], str]
+
+# `kind=tool_grant` onaylarının yürütücü anahtarı. "kind:" ön eki bir İSİM
+# UZAYI ayracıdır, süs değil: `tool_call` onayları yürütücüyü `tool_name` ile
+# seçer ve araç adları Python tanımlayıcısıdır — iki nokta içeremez. Böylece
+# hiçbir araç çağrısı, adını uydurup kayıt defterine yazan yürütücüyü
+# çağıramaz. _executor_key ayrıca bu ön eki taşıyan tool_name'leri açıkça
+# reddeder (kuşak + kemer).
+EXECUTOR_TOOL_GRANT = "kind:tool_grant"
+_EXECUTOR_KIND_PREFIX = "kind:"
+
+# Onaylandığında bir yürütücü koşan türler. Bu kümede OLMAYAN bir tür (§8.5'in
+# ileride gelecek `agent_spec`'i gibi) onaylanır ama yan etkisi yoktur — Y3'ün
+# "yürütülebilir tek tür tool_call" davranışının genelleştirilmiş hâli.
+EXECUTABLE_KINDS = (KIND_TOOL_CALL, KIND_TOOL_GRANT)
 
 # Onaydan sonra çalıştırılabilecek araçların ALLOWLIST'i (spec §6). Bu modül
 # `tools`'u BİLEREK import etmez: kayıt ters yönde, `tools.py`'nin sonunda
@@ -134,15 +154,45 @@ def _result(status: str, outcome: str | None, already: bool) -> dict:
     return {"status": status, "outcome": outcome, "already": already}
 
 
+def _executor_key(doc: dict) -> str | None:
+    """Yürütülebilir bir onayın yürütücü anahtarı; çözülemezse None (-> failed).
+
+    Yalnızca EXECUTABLE_KINDS için çağrılır. `tool_call` Y3'teki davranışını
+    birebir korur: anahtar `tool_name`'in kendisidir. `tool_grant` sabit,
+    isim-uzaylı bir anahtar kullanır (EXECUTOR_TOOL_GRANT).
+
+    `tool_call` dalındaki `kind:` reddi, isim uzayını sızdırmaz kılar: kendi
+    adını `kind:tool_grant` diye bildiren bir araç, kayıt defterine yazan
+    yürütücüyü ödünç alamaz — anahtar çözülmez, onay `failed` olur."""
+    kind = doc.get("kind")
+    if kind == KIND_TOOL_GRANT:
+        return EXECUTOR_TOOL_GRANT
+    tool_name = doc.get("tool_name")
+    if isinstance(tool_name, str) and tool_name.startswith(_EXECUTOR_KIND_PREFIX):
+        logging.warning("approvals: tool_call '%s' isim uzayını ihlal ediyor -- reddedildi",
+                        tool_name)
+        return None
+    return tool_name
+
+
 def request(db, *, user_id: str, kind: str, title: str, detail: str,
             tool_name: str | None = None, tool_args: dict | None = None,
             zone: str, session_id: str, now_fn=_now,
-            ttl_minutes: int | None = None) -> str:
+            ttl_minutes: int | None = None, doc_id: str | None = None) -> str:
     """Bekleyen bir onay kaydı kurar, onay id'sini döner.
 
     `tool_args` değerleri stringify edilip 500 karakterde kesilir —
     policy.write_audit ile AYNI kural: kayıt yeniden kurmak içindir, tam yük
     dökümü için değil. `ttl_minutes` verilmezse config.APPROVAL_TTL_MINUTES.
+
+    `doc_id` verilirse onay O kimlikle (atomik `create()`) yazılır; verilmezse
+    Firestore auto-id (`add()`) — kırmızı bölge yolunun (main._approval_sink)
+    Y3'ten beri kullandığı davranış, harfi harfine korunur. Çağıranın id'yi
+    ÖNCEDEN bilmesi Y4'ün ihtiyacı: `tool_grant` onaylarının `tool_args`'ı,
+    kaydı doğuran onayın kimliğini taşımak zorunda (spec §3, izlenebilirlik) ve
+    yürütücü sözleşmesi `(tool_args, user_id)` — yürütücü onay id'sini başka
+    hiçbir yerden göremez. Alternatif (id öğrenildikten sonra dokümana geri
+    yazmak) ikinci bir yazma ve yarış penceresi demekti.
     """
     if not user_id or not isinstance(user_id, str):
         raise ValueError("onay için user_id gerekli")
@@ -174,7 +224,11 @@ def request(db, *, user_id: str, kind: str, title: str, detail: str,
         "decided_by": None,
         "outcome": None,
     }
-    _, ref = db.collection(COLLECTION).add(doc)
+    if doc_id:
+        ref = db.collection(COLLECTION).document(doc_id)
+        ref.create(doc)          # AlreadyExists çağırana taşınır: aynı id iki kez yazılamaz
+    else:
+        _, ref = db.collection(COLLECTION).add(doc)
     logging.info("approvals: request id=%s user=%s kind=%s tool=%s ttl=%s dk",
                  ref.id, user_id, kind, tool_name, ttl_minutes)
     return ref.id
@@ -278,19 +332,22 @@ def decide(db, approval_id: str, user_id: str, decision: str,
         logging.info("approvals: reddedildi id=%s by=%s", approval_id, user_id)
         return _result(STATUS_REJECTED, None, False)
 
-    if d.get("kind") != KIND_TOOL_CALL:
-        # Bu dilimde yürütülebilir tek tür tool_call. Diğer türler (§8.5:
-        # tool_grant, agent_spec) onaylanır ama burada bir yan etkileri yoktur.
+    if d.get("kind") not in EXECUTABLE_KINDS:
+        # Yürütücüsü olmayan türler (§8.5: agent_spec) onaylanır ama burada bir
+        # yan etkileri yoktur.
         logging.info("approvals: onaylandı id=%s kind=%s (yürütme yok)",
                      approval_id, d.get("kind"))
         return _result(STATUS_APPROVED, None, False)
 
-    tool_name = d.get("tool_name")
-    executor = (executors or {}).get(tool_name)
+    # Yürütücü seçimi `kind`'a göredir (Faz Y4): tool_call -> tool_name,
+    # tool_grant -> sabit anahtar. Bkz. _executor_key.
+    key = _executor_key(d)
+    executor = (executors or {}).get(key) if key else None
     if executor is None:
         # Allowlist (§6): kayıt defterinde olmayan isim ÇALIŞMAZ.
         ref.set({"status": STATUS_FAILED, "outcome": NO_EXECUTOR_OUTCOME}, merge=True)
-        logging.warning("approvals: yürütücü yok id=%s tool=%s", approval_id, tool_name)
+        logging.warning("approvals: yürütücü yok id=%s kind=%s key=%s",
+                        approval_id, d.get("kind"), key)
         return _result(STATUS_FAILED, NO_EXECUTOR_OUTCOME, False)
 
     try:
@@ -299,7 +356,7 @@ def decide(db, approval_id: str, user_id: str, decision: str,
     except Exception as exc:
         # İlke 4 (hata = gözlem): hata modelden de Kadir'den de saklanmaz. Karar
         # VERİLMİŞ sayılır — ikinci bir onay bu eylemi tekrar DENEMEZ (§4.5).
-        logging.exception("approvals: yürütme hatası id=%s tool=%s", approval_id, tool_name)
+        logging.exception("approvals: yürütme hatası id=%s key=%s", approval_id, key)
         outcome = f"yürütme hatası: {exc}"
         status = STATUS_FAILED
 

@@ -140,6 +140,10 @@ TOOL_ZONES = {
     # alınabilir; o karar bu satırın değiştirilmesidir, modelin ikna edilmesi
     # değil.
     "cancel_reminder": ZONE_RED,
+    # propose_tool (§8.5, Faz Y4.1): araç kazanım merdiveninin ilk basamağı.
+    # YEŞİL, çünkü bir öneri kurmak zararsızdır — kayıt defterine yazmaz, hiçbir
+    # yeteneği etkinleştirmez; asıl karar onay kartındadır ve onu Kadir verir.
+    "propose_tool": ZONE_GREEN,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 

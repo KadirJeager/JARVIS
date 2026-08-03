@@ -1,12 +1,14 @@
 """Agent-facing tool functions. Docstrings are the LLM's tool descriptions (Turkish)."""
 import logging
 import re
+import shlex
+import uuid
 
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import (approvals, consult, reminders, repo_watch, speaker_history, speaker_store,
-               vitals, voice_trust)
+from . import (approvals, consult, reminders, repo_watch, speaker_history,
+               speaker_store, tool_registry, vitals, voice_trust)
 from .memory import Memory
 
 _memory: Memory | None = None
@@ -253,7 +255,139 @@ def _execute_cancel_reminder(tool_args: dict, user_id: str) -> str:
 approvals.register_executor("cancel_reminder", _execute_cancel_reminder)
 
 
+# -- Araç kazanım merdiveni (North Star §8.5, Faz Y4.1) ----------------------
+#
+# "Keşif ve kurulum otonomdur; yetkilendirme her zaman insanidir." Bu iki
+# fonksiyon o cümlenin iki yarısıdır ve bilinçli olarak AYRIKtır:
+# `propose_tool` yalnızca bir onay kurar, `_execute_tool_grant` yalnızca onay
+# sonrası çalışır. Kayıt defterine yazan TEK yer aşağıdaki yürütücüdür.
+
+PROPOSAL_QUEUED = (
+    "ÖNERİ ONAYA GÖNDERİLDİ: '{name}' ({zone} bölge) için Kadir'e onay kartı "
+    "oluşturuldu. Kadir'e öneriyi ve gerekçeni söyle, sonra BEKLE — aynı araç "
+    "için ikinci bir kart oluşturma, kararı kart üzerinden verir."
+)
+
+
+def _mcp_spec(kind: str, mcp_url: str, mcp_command: str, scopes: str) -> dict | None:
+    """Kayıt defterine yazılacak `mcp` alanı (spec §3) — düz string'lerden.
+
+    Onay dokümanındaki `tool_args` değerleri `approvals.request` tarafından
+    stringify edilir (audit ile aynı 500 karakter kuralı), bu yüzden öneri
+    alanları düz string taşınır ve yapıya ANCAK burada, kayıt anında çevrilir.
+    Komut satırı shlex ile ayrılır: `command` + `args` ayrımı MCP stdio
+    ulaşımının istediği şekildir ve tırnaklı argümanları doğru korur."""
+    if kind != tool_registry.KIND_MCP:
+        return None
+    if mcp_url:
+        return {"transport": "http", "url": mcp_url, "command": None, "args": [],
+                "scopes": _scope_list(scopes)}
+    parts = shlex.split(mcp_command)
+    return {"transport": "stdio", "url": None, "command": parts[0] if parts else "",
+            "args": parts[1:], "scopes": _scope_list(scopes)}
+
+
+def _scope_list(scopes: str) -> list[str]:
+    """Virgülle ayrılmış scope metnini listeye çevirir. Bu alan bu dilimde
+    BELGELEYİCİDİR (spec §7): karta yazılır, zorlanmaz — OAuth scope zorlaması
+    MCP sunucusunun kendi işidir."""
+    return [s.strip() for s in (scopes or "").split(",") if s.strip()]
+
+
+def propose_tool(name: str, kind: str, zone: str, why: str, tool_context,
+                 mcp_url: str = "", mcp_command: str = "", scopes: str = "") -> str:
+    """Bir görev için EKSİK olan bir yeteneği Kadir'in onayına önerir. Kendi
+    başına hiçbir şey kurmaz: yalnızca bir onay kartı oluşturur, kararı Kadir
+    verir. `name` aracın/MCP sunucusunun adı; `kind` "mcp" (dış MCP sunucusu)
+    veya "builtin"; `zone` "green" (salt okuma / zararsız) veya "yellow" (yap ve
+    bildir) — KIRMIZI istenemez; `why` Kadir'in kartta okuyacağı Türkçe gerekçe
+    ("GitHub PR'larını okuyabilmem için gerekiyor" gibi). MCP için `mcp_url`
+    (HTTP sunucusu) VEYA `mcp_command` (yerel komut) zorunlu; `scopes` virgülle
+    ayrılmış izin listesidir. Onaydan sonra araç bir sonraki açılışta etkin
+    olur. Bir aracı önerdikten sonra BEKLE, kendin kurmaya çalışma."""
+    try:
+        problem = tool_registry.validate(name, kind, zone)
+        if problem:
+            return problem
+        name = name.strip()
+        if kind == tool_registry.KIND_MCP and not (mcp_url or mcp_command):
+            return ("MCP önerisi için bir ulaşım gerekli: mcp_url (HTTP sunucusu) "
+                    "veya mcp_command (yerel komut) ver.")
+
+        db = _memory.db
+        existing = tool_registry.get(db, name)
+        if existing and existing.get("status") == tool_registry.STATUS_GRANTED:
+            return (f"'{name}' zaten araç kayıt defterinde kayıtlı "
+                    f"(bölge: {existing.get('zone')}); yeni öneri gerekmiyor.")
+
+        session = tool_context.session
+        user_id, session_id = session.user_id, session.id
+        # Süresi geçmiş kartlar list_pending'de GÖRÜNMEZ (Y3 §4.1) -- yani
+        # cevapsız kalıp süresi dolan bir öneri, aynı aracın yeniden
+        # önerilmesini sonsuza dek kilitlemez.
+        for pending in approvals.list_pending(db, user_id):
+            if pending.get("kind") == approvals.KIND_TOOL_GRANT and pending.get("tool_name") == name:
+                return (f"'{name}' için zaten Kadir'in kararını bekleyen bir öneri var; "
+                        "ikinci kart oluşturmadım.")
+
+        # Onay id'si ÖNCEDEN üretilir ve tool_args'a konur: yürütücü sözleşmesi
+        # (tool_args, user_id) olduğu için kaydı doğuran onayın kimliği
+        # (spec §3, izlenebilirlik) yürütücüye ancak böyle ulaşır.
+        approval_id = uuid.uuid4().hex
+        ulasim = mcp_url or mcp_command or "-"
+        approvals.request(
+            db,
+            user_id=user_id,
+            kind=approvals.KIND_TOOL_GRANT,
+            title=f"'{name}' yeteneğini kazanayım mı?",
+            detail=(f"Jarvis yeni bir yetenek istiyor: {name} ({kind}, {zone} bölge).\n"
+                    f"Gerekçe: {why}\n"
+                    f"Ulaşım: {ulasim}\n"
+                    f"İzinler: {scopes or '-'}\n"
+                    "Onaylarsan araç kayıt defterine girer ve bir sonraki açılışta etkin olur."),
+            tool_name=name,
+            tool_args={"name": name, "kind": kind, "zone": zone, "why": why,
+                       "mcp_url": mcp_url, "mcp_command": mcp_command, "scopes": scopes,
+                       "approval_id": approval_id},
+            zone=zone,
+            session_id=session_id,
+            doc_id=approval_id,
+        )
+        logging.info("propose_tool: öneri onaya düştü name=%s kind=%s zone=%s id=%s",
+                     name, kind, zone, approval_id)
+        return PROPOSAL_QUEUED.format(name=name, zone=zone)
+    except Exception:
+        logging.exception("propose_tool: öneri oluşturulamadı name=%r", name)
+        return "Bu öneri şu an oluşturulamıyor; araç kazanım yolu geçici olarak kapalı."
+
+
+def _execute_tool_grant(tool_args: dict, user_id: str) -> str:
+    """`kind=tool_grant` onaylarının yürütücüsü (spec §4.1).
+
+    KAYIT DEFTERİNE YAZAN TEK YERDİR. `approvals.decide(..., "approved")`
+    dışında hiçbir yol buraya varmaz: `propose_tool` yalnızca onay kurar,
+    `tool_registry.grant` de başka hiçbir yerden çağrılmaz. `user_id`
+    kullanılmıyor — kayıt defteri tek kullanıcılıdır ([[kapsam-tek-kullanici]]),
+    sahiplik sınırı bir üst katmanda, decide()'ın sahiplik kontrolündedir
+    (`_execute_cancel_reminder` ile aynı gerekçe)."""
+    args = tool_args or {}
+    kind = str(args.get("kind", ""))
+    return tool_registry.grant(
+        _memory.db,
+        name=str(args.get("name", "")),
+        kind=kind,
+        zone=str(args.get("zone", "")),
+        why=str(args.get("why", "")),
+        approval_id=str(args.get("approval_id", "")),
+        mcp=_mcp_spec(kind, str(args.get("mcp_url", "")), str(args.get("mcp_command", "")),
+                      str(args.get("scopes", ""))),
+    )
+
+
+approvals.register_executor(approvals.EXECUTOR_TOOL_GRANT, _execute_tool_grant)
+
+
 ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
              get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
              consult.consult_gemini, consult.consult_claude, check_my_vitals,
-             set_reminder, list_reminders, cancel_reminder]
+             set_reminder, list_reminders, cancel_reminder, propose_tool]
