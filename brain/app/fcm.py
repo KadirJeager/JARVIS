@@ -167,8 +167,20 @@ def dispatch(db, *, title: str, body: str, data: dict, fallback_text: str | None
         except Exception as exc:
             results.append({"ok": False, "token": token, "error": str(exc)})
 
+    # Akıbet BURADA loglanır, çünkü başka hiçbir yerde loglanmıyor: sink dönüş
+    # değerini bilinçli yok sayar (best-effort sözleşmesi) ve 4 Ağu 01:16
+    # vakasında push'un gidip gitmediği bu yüzden teşhis edilemedi. Token TAM
+    # değeriyle yazılmaz — cihaza gönderim yetkisidir; önek teşhise yeter.
+    basarili = sum(1 for r in results if r.get("ok"))
+    ozet = ", ".join(
+        f"{str(r.get('token'))[:8]}…:"
+        + ("ok" if r.get("ok") else str(r.get("status") or r.get("error") or "?")[:120])
+        for r in results)
     if has_success:
+        logging.info("fcm: dispatch %d/%d token'a ulaştı [%s]", basarili, len(results), ozet)
         return {"ok": True, "fcm_results": results}
+    logging.warning("fcm: dispatch %d/%d — HİÇBİR token'a ulaşılamadı [%s]",
+                    basarili, len(results), ozet)
     return {"ok": False, "error": "fcm_dispatch_failed", "fcm_results": results}
 
 

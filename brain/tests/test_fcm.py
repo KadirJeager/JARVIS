@@ -84,6 +84,46 @@ def test_dispatch_succeeds_when_at_least_one_token_works():
 
 
 # ---------------------------------------------------------------------------
+# dispatch() — sonuç LOGLANIR (4 Ağu 01:16 vakası: onay push'u hiç ulaşmadı ve
+# dispatch sonucu loglamadığı için akıbeti loglar açıkken bile görünmezdi —
+# sink dönüş değerini bilinçli yok sayar, tek iz bu satırdır)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_logs_the_outcome_without_leaking_tokens(caplog):
+    """ÖLDÜREN MUTASYON: dispatch sonundaki özet logunu silmek — push yine
+    sessizce ölür. Token TAM değeriyle loglanamaz: FCM token'ı cihaza gönderim
+    yetkisidir, log bir sızıntı kanalı olamaz (önek yeter, teşhis için)."""
+    import logging as _logging
+
+    db = FakeDB()
+    fcm.register_token(db, "u", "tok-cok-gizli-uzun-deger-1234567890")
+
+    with caplog.at_level(_logging.INFO):
+        fcm.dispatch(db, title="T", body="B", data={}, fallback_text="f",
+                     send_http_fn=Recorder())
+
+    assert "fcm: dispatch 1/1" in caplog.text
+    assert "tok-cok-gizli-uzun-deger-1234567890" not in caplog.text
+
+
+def test_dispatch_logs_a_warning_when_every_token_fails(caplog):
+    """Topyekûn başarısızlık WARNING'dir: INFO akışında kaybolmamalı — bu satır,
+    'push gitti mi' sorusunun loglardan cevaplanabildiği TEK yerdir."""
+    import logging as _logging
+
+    db = FakeDB()
+    fcm.register_token(db, "u", "tok-1")
+
+    with caplog.at_level(_logging.INFO):
+        fcm.dispatch(db, title="T", body="B", data={}, fallback_text="f",
+                     send_http_fn=Recorder(ok=False))
+
+    kayit = [r for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("0/1" in r.getMessage() for r in kayit)
+
+
+# ---------------------------------------------------------------------------
 # dispatch() — token'sız yol (sohbete düşme)
 # ---------------------------------------------------------------------------
 
