@@ -136,6 +136,12 @@ TOOL_ZONES = {
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 
+# Onay merkezi (North Star §4.8, Faz Y3, app/approvals.py): bir onay kartının
+# ömrü. Süre dolunca karar REDDEDİLİR — ve bu, süpürücü iş koşmasa bile karar
+# anında uygulanır (spec §4.1). Kısa tutmak güvenli yöndür: süresi dolan onay
+# kaybolmaz, model yeni bir kart oluşturabilir.
+APPROVAL_TTL_MINUTES = int(os.environ.get("JARVIS_APPROVAL_TTL_MINUTES", "60"))
+
 # Speaker identity (Katman 2b Dilim 3a) — cosine thresholds are starting
 # estimates, calibrated after enrollment (spec §15).
 SPEAKER_ACCEPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ACCEPT", "0.35"))
