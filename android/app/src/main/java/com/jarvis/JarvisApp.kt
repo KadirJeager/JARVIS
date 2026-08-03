@@ -6,6 +6,7 @@ import android.os.Build
 import com.jarvis.data.auth.AndroidBiometricGate
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthManager
+import com.jarvis.data.approvals.ApprovalRepository
 import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.auth.BiometricGate
 import com.jarvis.data.auth.DataStoreAuthStateStore
@@ -80,6 +81,7 @@ class AppContainer(
     val chatRepository = ChatRepository(apis.chat, sessionStore)
     val conversationsRepository = ConversationsRepository(apis.conversations, sessionStore)
     val voiceProfileRepository = VoiceProfileRepository(apis.voice)
+    val approvalRepository = ApprovalRepository(apis.approvals)
 }
 
 class JarvisApp : Application() {

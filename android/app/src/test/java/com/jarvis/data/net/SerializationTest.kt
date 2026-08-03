@@ -3,6 +3,7 @@ package com.jarvis.data.net
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -39,5 +40,29 @@ class SerializationTest {
         val raw = """{"messages":[{"role":"model","text":"ok","ts":"t","extra":1}],"cursor":"x"}"""
         val decoded = json.decodeFromString<HistoryResponse>(raw)
         assertEquals("model", decoded.messages[0].role)
+    }
+
+    /**
+     * The backward-compatibility pin for spec §7. `MessageStore._project` only emits
+     * `kind`/`meta` when the stored row carries them, so EVERY row written before Y3 —
+     * and every plain row written after it — arrives with exactly the three keys it
+     * always had. A build that made those fields required would fail to decode the whole
+     * transcript, not just the new rows.
+     */
+    @Test
+    fun historyMessage_withoutKindOrMeta_stillDecodes_andReadsAsPlainText() {
+        val raw = """{"messages":[{"role":"model","text":"eski satır","ts":"t"}]}"""
+        val decoded = json.decodeFromString<HistoryResponse>(raw)
+        assertNull(decoded.messages[0].kind)
+        assertNull(decoded.messages[0].meta)
+    }
+
+    @Test
+    fun historyMessage_carriesKindAndMetaWhenTheServerSendsThem() {
+        val raw = """{"messages":[{"role":"model","text":"🔔 Onay bekliyor","ts":"t",
+                      "kind":"approval","meta":{"approval_id":"a1"}}]}"""
+        val decoded = json.decodeFromString<HistoryResponse>(raw)
+        assertEquals("approval", decoded.messages[0].kind)
+        assertEquals("a1", decoded.messages[0].meta?.get("approval_id"))
     }
 }

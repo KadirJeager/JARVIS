@@ -7,6 +7,8 @@ import com.jarvis.data.net.HistoryResponse
 import com.jarvis.data.net.JarvisApi
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatRepositoryTest {
@@ -46,6 +48,63 @@ class ChatRepositoryTest {
         val msgs = repo.loadHistory()
 
         assertEquals(listOf(UiMessage("user", "selam"), UiMessage("model", "merhaba")), msgs)
+    }
+
+    /**
+     * Spec §7: an `approval` row becomes a card, and the id it needs is in `meta`. Any
+     * OTHER kind — including one shipped by a future backend — must fall back to the
+     * plain-text bubble this build already draws, which is what makes the wire tolerant.
+     */
+    @Test
+    fun loadHistory_carriesTheApprovalIdOfAnApprovalRow() = runBlocking {
+        val api = FakeApi(
+            cannedHistory = HistoryResponse(
+                listOf(
+                    HistoryMessage(
+                        role = "model",
+                        text = "🔔 Onay bekliyor — 'cancel_reminder' çalıştırılsın mı?",
+                        ts = "t1",
+                        kind = "approval",
+                        meta = mapOf("approval_id" to "a1"),
+                    ),
+                ),
+            ),
+            cannedReply = "x",
+        )
+
+        val msg = ChatRepository(api, FakeSessionStore("s-1")).loadHistory().single()
+
+        assertEquals("approval", msg.kind)
+        assertEquals("a1", msg.approvalId)
+        assertTrue(msg.isApprovalCard)
+    }
+
+    @Test
+    fun loadHistory_readsAnUnknownKindAsPlainText() = runBlocking {
+        val api = FakeApi(
+            cannedHistory = HistoryResponse(
+                listOf(HistoryMessage("model", "gelecekten bir satır", "t", kind = "hologram")),
+            ),
+            cannedReply = "x",
+        )
+
+        val msg = ChatRepository(api, FakeSessionStore("s-1")).loadHistory().single()
+
+        assertFalse("bilinmeyen kind kart olarak çizilmemeli", msg.isApprovalCard)
+        assertEquals("gelecekten bir satır", msg.text)
+    }
+
+    /** An approval row with no id in `meta` has no card to draw; it stays plain text. */
+    @Test
+    fun loadHistory_readsAnApprovalRowWithNoIdAsPlainText() = runBlocking {
+        val api = FakeApi(
+            cannedHistory = HistoryResponse(
+                listOf(HistoryMessage("model", "kart", "t", kind = "approval", meta = emptyMap())),
+            ),
+            cannedReply = "x",
+        )
+
+        assertFalse(ChatRepository(api, FakeSessionStore("s-1")).loadHistory().single().isApprovalCard)
     }
 
     @Test
