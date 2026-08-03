@@ -505,3 +505,60 @@ def test_instruction_tells_the_model_to_wait_for_the_approval_card():
     from app.agent import INSTRUCTION
 
     assert "onay kartı" in INSTRUCTION
+
+
+# -- duplicate cards (review A3) ----------------------------------------------
+# The red block fires on EVERY turn. The agent instruction asks the model not to
+# raise the card again, but asking is not a guarantee: a looping model would mint
+# an approval document, a transcript row and a push per turn.
+
+
+def test_a_pending_card_for_the_same_request_is_found_and_reused():
+    db = FakeDB()
+    first = approvals.request(
+        db, user_id=USER, kind=approvals.KIND_TOOL_CALL, title="t", detail="d",
+        tool_name="cancel_reminder", tool_args={"reminder_id": "r7"},
+        zone="red", session_id="s1",
+    )
+    found = approvals.find_pending_duplicate(
+        db, USER, "cancel_reminder", {"reminder_id": "r7"}
+    )
+    assert found == first
+
+
+def test_a_different_argument_is_not_a_duplicate():
+    db = FakeDB()
+    approvals.request(
+        db, user_id=USER, kind=approvals.KIND_TOOL_CALL, title="t", detail="d",
+        tool_name="cancel_reminder", tool_args={"reminder_id": "r7"},
+        zone="red", session_id="s1",
+    )
+    assert approvals.find_pending_duplicate(
+        db, USER, "cancel_reminder", {"reminder_id": "r8"}
+    ) is None
+
+
+def test_an_expired_card_is_not_a_duplicate_so_the_request_can_be_asked_again():
+    db = FakeDB()
+    approvals.request(
+        db, user_id=USER, kind=approvals.KIND_TOOL_CALL, title="t", detail="d",
+        tool_name="cancel_reminder", tool_args={"reminder_id": "r7"},
+        zone="red", session_id="s1",
+        now_fn=lambda: "2026-08-03T00:00:00+00:00", ttl_minutes=60,
+    )
+    assert approvals.find_pending_duplicate(
+        db, USER, "cancel_reminder", {"reminder_id": "r7"},
+        now_fn=lambda: "2026-08-03T02:00:00+00:00",
+    ) is None
+
+
+def test_another_users_pending_card_is_never_a_duplicate():
+    db = FakeDB()
+    approvals.request(
+        db, user_id="baskasi@example.com", kind=approvals.KIND_TOOL_CALL,
+        title="t", detail="d", tool_name="cancel_reminder",
+        tool_args={"reminder_id": "r7"}, zone="red", session_id="s1",
+    )
+    assert approvals.find_pending_duplicate(
+        db, USER, "cancel_reminder", {"reminder_id": "r7"}
+    ) is None

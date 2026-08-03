@@ -94,7 +94,8 @@ class JarvisFCMService : FirebaseMessagingService() {
 
     private fun buildNotification(title: String, body: String, approvalId: String?): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
-            // MainActivity has the default launch mode, so CLEAR_TOP finishes and RECREATES
+            // MainActivity is launchMode="singleTop", so a live instance is REUSED and gets
+            // the extra through onNewIntent (which MainActivity reads into a flow). CLEAR_TOP
             // it — which is the point: the approval id is read in `onCreate`'s
             // LaunchedEffect, and a warm Activity resumed without a restart would never
             // look at these extras at all.

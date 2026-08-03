@@ -10,8 +10,9 @@ monkeypatch desenini kullanır.
 - `test_sink_writes_exactly_one_chat_row_when_there_are_no_fcm_tokens` — sink
   kartı zaten sohbete yazıyor; FCM fallback'i de yazarsa Kadir aynı onayı İKİ
   satır olarak görür.
-- `test_production_runners_get_the_sink_but_the_guest_gate_cannot` — sink
-  yalnızca metin + ses runner'ına bağlanır; misafirler kırmızıya asla (§4.9).
+- `test_production_runners_get_the_sink` — sink yalnızca metin + ses runner'ına
+  bağlanır. Misafir tarafının pimi burada DEĞİL, `tests/test_guest_gate.py`
+  içindeki `test_red_zone_call_never_creates_an_approval`'dadır (§4.9).
 """
 import types
 from types import SimpleNamespace
@@ -330,6 +331,31 @@ def test_sink_creates_an_approval_a_chat_card_and_a_push(wired):
     # Push da gitti ve onay id'sini taşıyor.
     approval_id = list(db.collection(approvals.COLLECTION).docs)[0]
     assert len(sent) == 1 and sent[0]["id"] == approval_id
+
+
+def test_sink_reuses_a_pending_card_instead_of_minting_a_second(wired):
+    """Kırmızı engel HER TURDA tetiklenir. agent.py talimatı "kartı tekrar
+    oluşturma" diye yalnızca rica eder; döngüye giren bir model tur başına bir
+    onay dokümanı, bir transcript satırı ve bir push üretirdi."""
+    sink, db, sent = wired
+
+    first = sink("cancel_reminder", {"reminder_id": "r1"}, _ctx())
+    second = sink("cancel_reminder", {"reminder_id": "r1"}, _ctx())
+
+    assert len(_approval_docs(db)) == 1, "ikinci kart kurulmamalı"
+    assert len(sent) == 1, "ikinci push gitmemeli"
+    rows = [m for m in MessageStore(db).history(USER, SESSION) if m.get("kind") == "approval"]
+    assert len(rows) == 1, "ikinci transcript satırı yazılmamalı"
+    assert first == second, "model her iki turda da aynı 'bekle' cevabını almalı"
+
+
+def test_sink_mints_a_new_card_for_a_different_argument(wired):
+    sink, db, _sent = wired
+
+    sink("cancel_reminder", {"reminder_id": "r1"}, _ctx())
+    sink("cancel_reminder", {"reminder_id": "r2"}, _ctx())
+
+    assert len(_approval_docs(db)) == 2
 
 
 def test_sink_card_is_a_model_row_carrying_the_approval_id(wired):

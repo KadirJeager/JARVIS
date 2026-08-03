@@ -304,7 +304,9 @@ class VoiceBridge:
         except Exception:
             logging.exception("voice bridge: text turn failed for %s", self._user_id)
             await self._safe_send(ws, vp.evt_error("İstek işlenemedi, tekrar dene"))
-            self._model_speaking = False
+            # NOT: _speaking_until burada sıfırlanmaz. Bu dalda hiç jarvis_text
+            # gitmedi, yani zaten bir konuşma penceresi açılmadı; açılmış olsaydı
+            # da onu erken kapatmak yalnızca adaptasyonu erken serbest bırakırdı.
             await self._safe_send(ws, vp.evt_turn_complete())
             return
         if reply:

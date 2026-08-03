@@ -175,6 +175,17 @@ def _executor_key(doc: dict) -> str | None:
     return tool_name
 
 
+def _normalize_args(tool_args: dict | None) -> dict:
+    """`tool_args`'ın kayda YAZILAN biçimi: değerler stringify edilip 500
+    karakterde kesilir — policy.write_audit ile AYNI kural (kayıt yeniden kurmak
+    içindir, tam yük dökümü için değil).
+
+    Ayrı bir fonksiyon, çünkü mükerrer kart araması (find_pending_duplicate)
+    kayıtlı biçimle karşılaştırmak zorunda: ham argümanla karşılaştırsaydı 500
+    karakteri aşan her istek kendi kartını asla mükerrer bulamazdı."""
+    return {k: str(v)[:500] for k, v in (tool_args or {}).items()}
+
+
 def request(db, *, user_id: str, kind: str, title: str, detail: str,
             tool_name: str | None = None, tool_args: dict | None = None,
             zone: str, session_id: str, now_fn=_now,
@@ -214,7 +225,7 @@ def request(db, *, user_id: str, kind: str, title: str, detail: str,
         "title": title,
         "detail": detail,
         "tool_name": tool_name,
-        "tool_args": {k: str(v)[:500] for k, v in (tool_args or {}).items()},
+        "tool_args": _normalize_args(tool_args),
         "zone": zone,
         "session_id": session_id,
         "status": STATUS_PENDING,
@@ -254,6 +265,38 @@ def list_pending(db, user_id: str, now_fn=_now) -> list[dict]:
     ]
     items.sort(key=lambda i: i.get("created_at") or "", reverse=True)
     return items[:MAX_PENDING]
+
+
+def find_pending_duplicate(db, user_id: str, tool_name: str,
+                           tool_args: dict | None, now_fn=_now) -> str | None:
+    """Aynı isteğin ZATEN bekleyen bir kartı varsa onun id'si, yoksa None.
+
+    Neden var: kırmızı bölge engeli her turda yeniden tetiklenir. Ajan talimatı
+    "kartı tekrar oluşturma" diye RİCA eder, ama bu bir garanti değildir — model
+    döngüye girerse her tur bir onay dokümanı, bir transcript satırı ve bir push
+    üretirdi. Bir kartın zaten beklediği bir istek için ikincisini kurmak hiçbir
+    şey kazandırmaz: Kadir'in vereceği karar aynı karardır.
+
+    Süresi geçmiş kartlar mükerrer SAYILMAZ (list_pending ile aynı kural): süresi
+    dolmuş bir istek yeniden sorulabilir olmalıdır."""
+    normalized = _normalize_args(tool_args)
+    parsed_now = _parse_iso(now_fn())
+    snaps = (
+        db.collection(COLLECTION)
+        .where(filter=FieldFilter("user_id", "==", user_id))
+        .where(filter=FieldFilter("status", "==", STATUS_PENDING))
+        .stream()
+    )
+    for snap in snaps:
+        doc = snap.to_dict()
+        if doc.get("tool_name") != tool_name:
+            continue
+        if doc.get("tool_args") != normalized:
+            continue
+        if _is_expired(doc, parsed_now):
+            continue
+        return snap.reference.id
+    return None
 
 
 def get(db, approval_id: str, user_id: str) -> dict | None:
@@ -357,7 +400,10 @@ def decide(db, approval_id: str, user_id: str, decision: str,
         # İlke 4 (hata = gözlem): hata modelden de Kadir'den de saklanmaz. Karar
         # VERİLMİŞ sayılır — ikinci bir onay bu eylemi tekrar DENEMEZ (§4.5).
         logging.exception("approvals: yürütme hatası id=%s key=%s", approval_id, key)
-        outcome = f"yürütme hatası: {exc}"
+        # Ham istisna metni KORUNUR (İlke 4: hata = gözlem — model ve Kadir
+        # neyin patladığını görmeli), ama kartta çıplak JVM/gRPC nesri
+        # görünmesin diye Türkçe bir çerçeveye alınır.
+        outcome = f"Yürütme başarısız ({type(exc).__name__}). Ayrıntı: {exc}"
         status = STATUS_FAILED
 
     ref.set({"status": status, "outcome": outcome}, merge=True)

@@ -165,6 +165,18 @@ def _approval_sink():
         session_id = session.id
         db = _memory.db
 
+        # Bu istek için ZATEN bekleyen bir kart varsa ikincisini kurma. Kırmızı
+        # engel her turda yeniden tetiklenir ve ajan talimatı "kartı tekrar
+        # oluşturma" diye yalnızca RİCA eder; döngüye giren bir model tur başına
+        # bir onay dokümanı + bir transcript satırı + bir push üretirdi. Kadir'in
+        # vereceği karar zaten aynı karar.
+        existing = approvals.find_pending_duplicate(db, user_id, tool_name, args)
+        if existing:
+            logging.info(
+                "approval_sink: aynı istek için kart zaten bekliyor id=%s tool=%s",
+                existing, tool_name)
+            return APPROVAL_PENDING_REPLY.format(tool_name=tool_name)
+
         title, detail, card = _approval_card_texts(tool_name, args)
         approval_id = approvals.request(
             db,
