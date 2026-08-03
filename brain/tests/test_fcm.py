@@ -107,6 +107,49 @@ def test_dispatch_logs_the_outcome_without_leaking_tokens(caplog):
     assert "tok-cok-gizli-uzun-deger-1234567890" not in caplog.text
 
 
+def test_dispatch_prunes_a_token_fcm_reports_unregistered():
+    """404/UNREGISTERED = kayıt ölü (FCM v1 sözleşmesi: uygulama silinmiş ya da
+    token dönmüş). Budanmazsa her gönderim sonsuza dek cesede de gider — 4 Ağu
+    gecesi 15 saatlik ölü bir token her dispatch'te 404 üretiyordu.
+
+    ÖLDÜREN MUTASYON: budama dalını silmek — ölü token koleksiyonda kalır."""
+    db = FakeDB()
+    fcm.register_token(db, "u", "olu-token")
+    fcm.register_token(db, "u", "iyi-token")
+
+    def http(url, payload, token):
+        t = payload["message"]["token"]
+        if t == "olu-token":
+            return {"ok": False, "token": t, "status": 404, "error": "UNREGISTERED"}
+        return {"ok": True, "token": t}
+
+    out = fcm.dispatch(db, title="T", body="B", data={}, fallback_text="f",
+                       send_http_fn=http)
+
+    kalan = [s.to_dict()["token"]
+             for s in db.collection(fcm.FCM_TOKENS_COLLECTION).stream()]
+    assert kalan == ["iyi-token"]
+    assert out["ok"] is True
+
+
+def test_a_transient_failure_does_not_prune_the_token():
+    """5xx/ağ hatası GEÇİCİDİR: budamak, bir FCM kesintisinde bütün cihaz
+    kayıtlarını silip push'u kalıcı olarak öldürürdü. Yalnız 404 budanır."""
+    db = FakeDB()
+    fcm.register_token(db, "u", "tok-1")
+
+    def http(url, payload, token):
+        return {"ok": False, "token": payload["message"]["token"],
+                "status": 500, "error": "backend hiccup"}
+
+    fcm.dispatch(db, title="T", body="B", data={}, fallback_text="f",
+                 send_http_fn=http)
+
+    kalan = [s.to_dict()["token"]
+             for s in db.collection(fcm.FCM_TOKENS_COLLECTION).stream()]
+    assert kalan == ["tok-1"]
+
+
 def test_dispatch_logs_a_warning_when_every_token_fails(caplog):
     """Topyekûn başarısızlık WARNING'dir: INFO akışında kaybolmamalı — bu satır,
     'push gitti mi' sorusunun loglardan cevaplanabildiği TEK yerdir."""

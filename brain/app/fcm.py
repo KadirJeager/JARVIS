@@ -167,6 +167,16 @@ def dispatch(db, *, title: str, body: str, data: dict, fallback_text: str | None
         except Exception as exc:
             results.append({"ok": False, "token": token, "error": str(exc)})
 
+    # 404 = kayıt ölü (FCM v1: UNREGISTERED — uygulama silinmiş ya da token
+    # dönmüş) ve KALICIDIR: budanmazsa her gönderim sonsuza dek cesede de gider.
+    # Yalnız 404 budanır — 5xx/ağ hatası geçicidir ve bir FCM kesintisinde
+    # bütün kayıtları silmek push'u kalıcı öldürürdü.
+    for r in results:
+        if not r.get("ok") and r.get("status") == 404:
+            key = doc_id(r["token"])
+            db.collection(FCM_TOKENS_COLLECTION).document(key).delete()
+            logging.info("fcm: ölü token budandı doc_id=%s", key[:12])
+
     # Akıbet BURADA loglanır, çünkü başka hiçbir yerde loglanmıyor: sink dönüş
     # değerini bilinçli yok sayar (best-effort sözleşmesi) ve 4 Ağu 01:16
     # vakasında push'un gidip gitmediği bu yüzden teşhis edilemedi. Token TAM
