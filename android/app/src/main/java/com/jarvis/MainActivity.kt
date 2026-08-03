@@ -263,6 +263,7 @@ class MainActivity : FragmentActivity() {
                         state = voiceCallState,
                         onStop = voiceCallVm::stop,
                         onDismissError = voiceCallVm::stop,
+                        onInterrupt = voiceCallVm::interrupt,
                     )
                 }
             }

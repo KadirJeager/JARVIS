@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,6 +58,7 @@ fun VoiceCallOverlay(
     state: VoiceUiState,
     onStop: () -> Unit,
     onDismissError: () -> Unit,
+    onInterrupt: () -> Unit = {},
 ) {
     // Surface, not a bare Column: Material3 Surface blocks touch propagation, so a tap
     // beside the hang-up button cannot fall through to the chat underneath and focus
@@ -66,7 +68,7 @@ fun VoiceCallOverlay(
         color = JarvisBg,
         modifier = Modifier.fillMaxSize().testTag("voice_call_overlay"),
     ) {
-        OverlayContent(state, onStop, onDismissError)
+        OverlayContent(state, onStop, onDismissError, onInterrupt)
     }
 }
 
@@ -75,6 +77,7 @@ private fun OverlayContent(
     state: VoiceUiState,
     onStop: () -> Unit,
     onDismissError: () -> Unit,
+    onInterrupt: () -> Unit,
 ) {
     Column(
         Modifier
@@ -164,16 +167,24 @@ private fun OverlayContent(
                     )
                     Spacer(Modifier.size(10.dp))
                 }
+                // Tapping while Jarvis speaks is the ONLY way to cut him off now: voice
+                // barge-in was removed because these devices' AEC cannot tell Kadir from
+                // the loudspeaker (see VoiceSession's echo guard). A tap can't be
+                // confused with an echo, so it works where the recognizer could not.
                 Text(
                     when {
                         showConnecting -> "Bağlanıyor…"
                         state.phase == VoicePhase.CONNECTING -> ""  // debounce window: hide
                         state.phase == VoicePhase.LISTENING -> "Dinliyorum"
-                        state.phase == VoicePhase.SPEAKING -> "Konuşuyor…"
+                        state.phase == VoicePhase.SPEAKING -> "Konuşuyor… • kesmek için dokun"
                         else -> ""
                     },
                     color = JarvisTextMuted,
                     style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier
+                        .testTag("voice_interrupt")
+                        .semantics { contentDescription = "Jarvis'i kes" }
+                        .clickable(enabled = state.phase == VoicePhase.SPEAKING) { onInterrupt() },
                 )
             }
             Box(Modifier.padding(bottom = 32.dp)) {

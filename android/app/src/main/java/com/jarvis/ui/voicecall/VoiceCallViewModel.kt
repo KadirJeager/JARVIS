@@ -37,6 +37,10 @@ class VoiceCallViewModel(
 
     fun stop() = session.stop()
 
+    /** Deterministic barge-in from the UI: cut Jarvis off and take the floor.
+     *  Replaces voice barge-in, which the echo guard had to give up. */
+    fun interrupt() = session.interrupt()
+
     /** The Activity reports a denied RECORD_AUDIO here; the session shows it as ERROR. */
     fun onMicPermissionDenied() =
         session.reportError("Mikrofon izni gerekli. Ayarlar > Uygulamalar > Jarvis'ten izin ver.")

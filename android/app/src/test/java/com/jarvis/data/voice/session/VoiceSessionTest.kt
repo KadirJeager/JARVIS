@@ -2,6 +2,7 @@ package com.jarvis.data.voice.session
 
 import com.jarvis.data.voice.protocol.TranscriptLine
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -119,9 +120,52 @@ class VoiceSessionTest {
         }
     }
 
-    private class Fixture(scope: CoroutineScope, token: String? = "tok-xyz") {
+    /** Movable wall clock for the echo guard's deadlines. The guard is a DEADLINE, so
+     *  it needs a clock the test can push forward independently of virtual coroutine
+     *  time (the two are unrelated: the guard never sleeps, it compares timestamps). */
+    private class FakeClock(var now: Long = 1_000_000L) : () -> Long {
+        override fun invoke(): Long = now
+    }
+
+    /** A mic that SUSPENDS when it has nothing rather than ending the capture loop, so
+     *  one test can span several guard states. [FakeMicSource] returns null on empty,
+     *  which breaks the loop for good and cannot express "and then, later, more audio". */
+    private class ChannelMicSource : MicSource {
+        var startedRate: Int? = null
+        var stopCalls = 0
+
+        /** How many frames the capture loop actually pulled. Without this an
+         *  "assertEquals(0, sentBinaries.size)" would also pass when the loop never ran
+         *  at all -- a vacuous green. Every drop assertion pairs the two. */
+        var readCount = 0
+        private val channel = Channel<ByteArray>(Channel.UNLIMITED)
+
+        fun emit(frame: ByteArray) {
+            channel.trySend(frame)
+        }
+
+        override fun start(sampleRateHz: Int) {
+            startedRate = sampleRateHz
+        }
+
+        override suspend fun readFrame(): ByteArray? {
+            val frame = channel.receive()
+            readCount++
+            return frame
+        }
+
+        override fun stop() {
+            stopCalls++
+        }
+    }
+
+    private class Fixture(
+        scope: CoroutineScope,
+        token: String? = "tok-xyz",
+        val clock: FakeClock = FakeClock(),
+        val mic: MicSource = FakeMicSource(),
+    ) {
         val transport = FakeVoiceTransport()
-        val mic = FakeMicSource()
         val stt = FakeSpeechToText()
         val tts = FakeSpeechSynthesis()
         val session = VoiceSession(
@@ -133,7 +177,11 @@ class VoiceSessionTest {
             deviceHint = "android-phone",
             scope = scope,
             voiceUrl = "wss://jarvis-voice.example/ws/voice",
+            nowMs = clock,
         )
+
+        /** Most tests still use the null-terminating fake; this keeps them readable. */
+        val fakeMic: FakeMicSource get() = mic as FakeMicSource
     }
 
     private fun lastSentTextJson(transport: FakeVoiceTransport) =
@@ -204,7 +252,7 @@ class VoiceSessionTest {
         val f = Fixture(backgroundScope)
         f.session.start()
         f.transport.listener!!.onOpen()
-        assertEquals(16000, f.mic.startedRate)
+        assertEquals(16000, f.fakeMic.startedRate)
         assertEquals(1, f.stt.startCalls)
         assertEquals(1, f.stt.listenCalls)
         assertEquals(1, f.tts.startCalls)
@@ -473,7 +521,7 @@ class VoiceSessionTest {
 
         assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
         assertTrue(f.session.state.value.errorMessage!!.contains("model kullanilamiyor"))
-        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.fakeMic.stopCalls)
         assertEquals(1, f.stt.destroyCalls)
         assertEquals(1, f.tts.destroyCalls)
         assertEquals(1, f.transport.closeCalls)
@@ -516,7 +564,7 @@ class VoiceSessionTest {
 
         assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
         assertTrue(f.session.state.value.errorMessage!!.contains("soket koptu"))
-        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.fakeMic.stopCalls)
         assertEquals(1, f.stt.destroyCalls)
         assertEquals(1, f.tts.destroyCalls)
     }
@@ -612,24 +660,31 @@ class VoiceSessionTest {
      * server exactly once per utterance via a speech_start frame.
      */
     @Test
-    fun sttBeginningOfSpeech_bargeIn_stopsTts_sendsSpeechStart_returnsToListening() = runTest {
+    fun sttBeginningOfSpeech_whileJarvisSpeaks_isEcho_soNothingIsCutOff() = runTest {
         val f = Fixture(backgroundScope)
         f.session.start()
         f.transport.listener!!.onOpen()
         f.transport.listener!!.onText("""{"type":"jarvis_text","text":"uzun bir cevap"}""")
         assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
 
+        val textsBefore = f.transport.sentTexts.size
         f.stt.listener!!.onBeginningOfSpeech()
 
-        assertEquals(1, f.tts.stopCalls)
-        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
-        assertEquals("speech_start", lastSentTextJson(f.transport).getValue("type").jsonPrimitive.content)
+        // CONTRACT CHANGE (2026-08-03, echo guard): while Jarvis's own voice is coming
+        // out of the loudspeaker, a recognizer onset is that voice -- not Kadir. The
+        // old contract (stop TTS + send speech_start) is exactly what made Jarvis cut
+        // ITSELF off mid-sentence and trim the server's speaker-ID buffer to the echo.
+        // Voice barge-in during Jarvis's speech is deliberately gone; interrupt() is
+        // its deterministic replacement (see the interrupt_* tests).
+        assertEquals(0, f.tts.stopCalls)
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+        assertEquals(textsBefore, f.transport.sentTexts.size)
     }
 
-    /** A TTS done arriving AFTER the barge-in (the interrupted utterance reporting back)
-     *  must not corrupt the phase or the multi-part counter. */
+    /** A TTS done arriving after an echo onset (the utterance reporting back) must not
+     *  corrupt the phase or the multi-part counter. */
     @Test
-    fun ttsDoneArrivingAfterBargeIn_doesNotCorruptPhase() = runTest {
+    fun ttsDoneArrivingAfterAnEchoOnset_doesNotCorruptPhase() = runTest {
         val f = Fixture(backgroundScope)
         f.session.start()
         f.transport.listener!!.onOpen()
@@ -681,7 +736,7 @@ class VoiceSessionTest {
 
         assertEquals(VoicePhase.ERROR, f.session.state.value.phase)
         assertTrue(f.session.state.value.errorMessage!!.contains("Ses tanıma"))
-        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.fakeMic.stopCalls)
         assertEquals(1, f.tts.destroyCalls)
         assertEquals(1, f.transport.closeCalls)
     }
@@ -766,8 +821,8 @@ class VoiceSessionTest {
         // and synchronously inside onOpen() -- no scheduler-advance ambiguity.
         val loopScope = CoroutineScope(UnconfinedTestDispatcher())
         val f = Fixture(loopScope)
-        f.mic.frames += byteArrayOf(1, 2, 3)
-        f.mic.frames += byteArrayOf(4, 5, 6)
+        f.fakeMic.frames += byteArrayOf(1, 2, 3)
+        f.fakeMic.frames += byteArrayOf(4, 5, 6)
 
         f.session.start()
         f.transport.listener!!.onOpen()
@@ -795,7 +850,7 @@ class VoiceSessionTest {
         f.session.stop()
 
         assertEquals(1, f.transport.closeCalls)
-        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.fakeMic.stopCalls)
         assertEquals(1, f.stt.destroyCalls)
         assertEquals(1, f.tts.destroyCalls)
         assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
@@ -809,7 +864,7 @@ class VoiceSessionTest {
         f.transport.listener!!.onOpen()
         f.session.stop()
 
-        assertEquals(1, f.mic.stopCalls)
+        assertEquals(1, f.fakeMic.stopCalls)
         assertEquals(1, f.stt.destroyCalls)
         assertEquals(1, f.tts.destroyCalls)
         assertEquals(1, f.transport.closeCalls)
@@ -870,5 +925,206 @@ class VoiceSessionTest {
         f.session.stop()
         assertEquals(VoicePhase.IDLE, f.session.state.value.phase)
         assertNull(f.session.state.value.errorMessage)
+    }
+
+    // -- echo GUARD (half-duplex while Jarvis speaks) ---------------------------------------
+    // Production evidence (2026-08-03): 27 of the last 50 verified utterances scored in
+    // the different-speaker band (~0.16) -- Jarvis's own TTS reaching the speaker-ID
+    // machine. These tests pin the four ways that happened.
+
+    /**
+     * The capture loop must actually RUN inside these tests, so they use an
+     * UnconfinedTestDispatcher exactly like [micFrames_areForwardedAsBinary_toTheTransport]:
+     * a `channel.receive()` resumed by `emit()` then continues eagerly, with no
+     * scheduler-advance ambiguity about whether the drop or the send has happened yet.
+     */
+    private fun speakingFixture(): Fixture {
+        val f = Fixture(CoroutineScope(UnconfinedTestDispatcher()), mic = ChannelMicSource())
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        return f
+    }
+
+    private val Fixture.channelMic: ChannelMicSource get() = mic as ChannelMicSource
+
+    @Test
+    fun micFrames_areNotSentWhileJarvisIsSpeaking() = runTest {
+        val f = speakingFixture()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Merhaba Kadir."}""")
+
+        f.channelMic.emit(byteArrayOf(1, 2, 3))
+
+        // Read off the mic but NOT forwarded: the server's speaker-ID buffer must never
+        // contain Jarvis's own voice. Both halves asserted -- a silent loop would make
+        // the second assertion meaningless on its own.
+        assertEquals(1, f.channelMic.readCount)
+        assertEquals(0, f.transport.sentBinaries.size)
+    }
+
+    @Test
+    fun micFrames_resumeOnceTheEchoTailHasExpired() = runTest {
+        val f = speakingFixture()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Merhaba Kadir."}""")
+        f.channelMic.emit(byteArrayOf(1))
+        assertEquals(0, f.transport.sentBinaries.size)
+
+        // Jarvis finishes; the tail still swallows audio...
+        f.tts.listener!!.onUtteranceDone()
+        f.channelMic.emit(byteArrayOf(2))
+        assertEquals(0, f.transport.sentBinaries.size)
+
+        // ...until it expires, and then Kadir's audio flows again.
+        f.clock.now += VoiceSession.ECHO_TAIL_MS + 1
+        f.channelMic.emit(byteArrayOf(3))
+        assertEquals(3, f.channelMic.readCount)
+        assertEquals(1, f.transport.sentBinaries.size)
+        assertTrue(byteArrayOf(3).contentEquals(f.transport.sentBinaries[0]))
+    }
+
+    @Test
+    fun micFrames_resumeAfterTheHardCeiling_evenIfTtsNeverReportsDone() = runTest {
+        // A TTS engine that never fires onUtteranceDone would otherwise leave ttsActive
+        // pinned above zero and the call permanently DEAF -- far worse than the bug
+        // being fixed. The ceiling is what makes that impossible.
+        val f = speakingFixture()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Uzun bir cevap."}""")
+
+        f.clock.now += VoiceSession.MAX_SPEAK_GUARD_MS + 1
+        f.channelMic.emit(byteArrayOf(9))
+
+        assertEquals(1, f.transport.sentBinaries.size)
+    }
+
+    @Test
+    fun onsetDuringJarvisSpeech_doesNotCutJarvisOff_andSendsNoSpeechStart() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Bugün hava güneşli."}""")
+        val textsBefore = f.transport.sentTexts.size
+
+        // The recognizer hears the loudspeaker and reports speech onset.
+        f.stt.listener!!.onBeginningOfSpeech()
+
+        // Jarvis must NOT interrupt itself, and no speech_start may reach the server
+        // (it would trim the speaker-ID buffer to the echo's onset).
+        assertEquals(0, f.tts.stopCalls)
+        assertEquals(textsBefore, f.transport.sentTexts.size)
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+    }
+
+    @Test
+    fun shortEcho_thatTheTextGateCannotJudge_isStillDropped() = runTest {
+        // ECHO_MIN_CHARS deliberately lets short finals through, so the text gate can
+        // never catch this one. Timing can.
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Tabii."}""")
+        val textsBefore = f.transport.sentTexts.size
+
+        f.stt.listener!!.onBeginningOfSpeech()
+        f.stt.listener!!.onResult("tabii")
+
+        assertEquals(textsBefore, f.transport.sentTexts.size)
+        assertTrue(f.session.state.value.transcript.none { it.role == "user" })
+    }
+
+    @Test
+    fun mangledEcho_thatNoLongerMatchesTheText_isStillDropped() = runTest {
+        // The recognizer garbles what it hears off the speaker, so normalized
+        // containment fails and isJarvisEcho() returns false. The onset latch does not
+        // care what the words turned into.
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText(
+            """{"type":"jarvis_text","text":"Yarın sabah dokuzda toplantın var, hazırlıklı ol."}"""
+        )
+        val textsBefore = f.transport.sentTexts.size
+
+        f.stt.listener!!.onBeginningOfSpeech()
+        f.stt.listener!!.onResult("yalın saba do kozda top lantı marş")
+
+        assertEquals(textsBefore, f.transport.sentTexts.size)
+        assertTrue(f.session.state.value.transcript.none { it.role == "user" })
+    }
+
+    @Test
+    fun theOnsetLatch_doesNotLeakIntoTheNextUtterance() = runTest {
+        // The failure class this file's history is full of: a per-turn flag set in one
+        // branch and cleared in another. The latch's life is exactly one listen cycle.
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Tabii."}""")
+        f.stt.listener!!.onBeginningOfSpeech()
+        f.stt.listener!!.onResult("tabii")          // dropped, latch consumed
+        advanceTimeBy(400)
+
+        // Jarvis has finished and the tail has passed; Kadir speaks for real.
+        f.transport.listener!!.onText("""{"type":"turn_complete"}""")
+        f.clock.now += VoiceSession.ECHO_TAIL_MS + 1
+        f.stt.listener!!.onBeginningOfSpeech()
+        f.stt.listener!!.onResult("yarın hava nasıl olacak")
+
+        val frame = lastSentTextJson(f.transport)
+        assertEquals("user_text", frame.getValue("type").jsonPrimitive.content)
+        assertEquals("yarın hava nasıl olacak", frame.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun realBargeIn_whenJarvisIsSilent_stillStopsTtsAndSendsSpeechStart() = runTest {
+        // The guard must not disable ordinary onset handling on a listening call.
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.stt.listener!!.onBeginningOfSpeech()
+
+        assertEquals(1, f.tts.stopCalls)
+        assertEquals("speech_start", lastSentTextJson(f.transport).getValue("type").jsonPrimitive.content)
+    }
+
+    @Test
+    fun interrupt_cutsJarvisOff_andReopensTheMicImmediately() = runTest {
+        val f = speakingFixture()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Uzun bir cevap veriyorum."}""")
+
+        f.session.interrupt()
+
+        assertEquals(1, f.tts.stopCalls)
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+        // No tail is served: Kadir asked for the floor, so his audio flows at once.
+        f.channelMic.emit(byteArrayOf(7))
+        assertEquals(1, f.transport.sentBinaries.size)
+    }
+
+    @Test
+    fun interrupt_thenSpeaking_isNotReadAsTheEchoOfTheCutOffSentence() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText("""{"type":"jarvis_text","text":"Uzun bir cevap veriyorum."}""")
+
+        f.session.interrupt()
+        f.stt.listener!!.onBeginningOfSpeech()
+        f.stt.listener!!.onResult("dur bir saniye")
+
+        val frame = lastSentTextJson(f.transport)
+        assertEquals("user_text", frame.getValue("type").jsonPrimitive.content)
+        assertEquals("dur bir saniye", frame.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun interrupt_onAListeningCall_isANoOp() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.session.interrupt()
+
+        assertEquals(0, f.tts.stopCalls)
+        assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
     }
 }

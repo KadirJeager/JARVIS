@@ -56,6 +56,10 @@ class VoiceSession(
     private val deviceHint: String,
     private val scope: CoroutineScope,
     private val voiceUrl: String,
+    // Wall clock behind the echo guard below. A seam, not a knob: the guard is a
+    // DEADLINE, and a deadline needs a clock the tests can move. Production passes
+    // the real clock; VoiceSessionTest passes a fake it can advance.
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
     private val _state = MutableStateFlow(VoiceUiState())
     val state: StateFlow<VoiceUiState> = _state.asStateFlow()
@@ -92,6 +96,60 @@ class VoiceSession(
     // Reset on barge-in and turn_complete (guarded against going negative).
     // Only touched under [lock].
     private var ttsActive = 0
+
+    // -- Echo guard (half-duplex while Jarvis speaks) --------------------------
+    // Measured in production (2026-08-03, speaker_history for owner@example.com):
+    // of the last 50 verified utterances only 23 cleared ACCEPT, and the failures
+    // clustered at cosine 0.10-0.24 -- the SAME band as the committed
+    // different-speaker fixture (0.1603). That band is Jarvis's own TTS coming back
+    // through the loudspeaker and being scored against Kadir's gallery. The passing
+    // ones sat at 0.38-0.59 instead of the fixture's same-speaker 0.7251, which is
+    // what a buffer holding Kadir AND an echo tail averages to.
+    //
+    // The text-level gate below (isJarvisEcho) cannot close this: it only ever sees
+    // the transcript, so the PCM reaches the speaker-ID machine no matter what it
+    // decides, and it structurally cannot judge a short echo (ECHO_MIN_CHARS) or one
+    // the recognizer mangled. The fact is not a similarity estimate: WHILE THE
+    // SPEAKER IS PLAYING JARVIS'S VOICE, NOTHING THE MICROPHONE HEARS IS KADIR.
+    //
+    // Deliberate trade: voice barge-in DURING Jarvis's speech is given up (these
+    // devices' AEC does not separate the two -- that is what the numbers above say).
+    // interrupt() replaces it with a deterministic, user-driven cut.
+    //
+    // Modelled as DEADLINES, not as a per-turn flag. The ledger records four separate
+    // bugs in this file's history where a boolean was set in one event branch and
+    // cleared in another whose arrival was not guaranteed. A deadline expires by the
+    // passage of time, so no missing event can leave the microphone shut forever --
+    // and the MAX_SPEAK_GUARD_MS ceiling bounds even a ttsActive that never comes
+    // back down (a TTS engine that never reports onUtteranceDone would otherwise
+    // leave the call permanently deaf, which is far worse than a flickering label).
+    // Only touched under [lock].
+    private var guardStartedAtMs = 0L
+    private var guardTailUntilMs = 0L
+
+    // "The utterance the recognizer is working on right now BEGAN while Jarvis was
+    // speaking." Latched at onset, read at the final -- because a recognizer needs
+    // ~0.5-1.5 s to finalize, so by the time the echo's text arrives the guard has
+    // long closed and a deadline check at that moment would let it through.
+    // Its lifetime is exactly one listen() cycle: relisten() clears it, and every
+    // terminal recognizer callback goes through relisten(). Only touched under [lock].
+    private var onsetDuringJarvisSpeech = false
+
+    /**
+     * True while Jarvis's voice is (or has just been) coming out of the speaker.
+     * `ttsActive > 0` is the live signal; the tail covers the room's decay and the
+     * recognizer's own latency; both are bounded so neither can latch open.
+     */
+    private fun echoGuardActive(): Boolean {
+        val now = nowMs()
+        if (ttsActive > 0 && now < guardStartedAtMs + MAX_SPEAK_GUARD_MS) return true
+        return now < guardTailUntilMs
+    }
+
+    /** Jarvis stopped talking: start the decay tail. */
+    private fun openGuardTail() {
+        guardTailUntilMs = nowMs() + ECHO_TAIL_MS
+    }
 
     // Delayed recognizer re-arm after a final result / recoverable error. The small
     // delay keeps a pathological device (instant NO_MATCH loops) from hot-spinning the
@@ -177,9 +235,39 @@ class VoiceSession(
         _state.update { it.copy(phase = VoicePhase.ERROR, errorMessage = message) }
     }
 
+    /**
+     * Deterministic barge-in: cut Jarvis off and start listening NOW.
+     *
+     * This is what replaces voice barge-in while the echo guard is up (see the guard's
+     * comment for why that had to go). A tap cannot be confused with the loudspeaker,
+     * so it works where the recognizer provably could not. No-op unless Jarvis is
+     * actually speaking, so a stray tap on a listening call changes nothing.
+     */
+    fun interrupt(): Unit = synchronized(lock) {
+        if (_state.value.phase != VoicePhase.SPEAKING && ttsActive == 0) return
+        tts.stop()
+        ttsActive = 0
+        // Kadir asked for the floor: open the mic immediately rather than serving out
+        // the decay tail, and clear the latch so the words he is about to say are not
+        // read as the echo of the sentence he just cut off.
+        guardTailUntilMs = 0L
+        onsetDuringJarvisSpeech = false
+        _state.update { it.copy(phase = VoicePhase.LISTENING) }
+    }
+
     private fun sttListener(gen: Int) = object : SpeechToTextListener {
         override fun onBeginningOfSpeech(): Unit = synchronized(lock) {
             if (gen != generation.get()) return
+            if (echoGuardActive()) {
+                // The speaker is playing Jarvis's own voice, so this onset is that
+                // voice -- not Kadir. Doing the barge-in dance here is what made
+                // Jarvis CUT ITSELF OFF mid-sentence and what pushed a `speech_start`
+                // to the server, trimming the speaker-ID buffer to the echo's onset.
+                // Latch it so this utterance's final is dropped too, and otherwise do
+                // nothing: no tts.stop(), no frame, no phase change.
+                onsetDuringJarvisSpeech = true
+                return
+            }
             // Barge-in: the user cutting in kills the assistant's voice immediately --
             // and one speech_start frame per utterance (the recognizer fires this at
             // most once per listen() turn, so no extra dedup is needed here).
@@ -197,7 +285,13 @@ class VoiceSession(
         override fun onResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (text.isNotBlank()) {
-                if (isJarvisEcho(text)) {
+                if (onsetDuringJarvisSpeech) {
+                    // This utterance BEGAN while the speaker was playing Jarvis's own
+                    // voice (latched in onBeginningOfSpeech). Timing, not similarity:
+                    // this catches the short echoes ECHO_MIN_CHARS lets through and
+                    // the ones the recognizer mangled beyond textual recognition.
+                    _state.update { it.copy(partialText = null) }
+                } else if (isJarvisEcho(text)) {
                     // The recognizer heard Jarvis's own TTS from the speaker and
                     // transcribed it as user speech. Answering it would put Jarvis
                     // in a self-reply loop (prod report, 2026-07-31: "kendini
@@ -229,8 +323,11 @@ class VoiceSession(
         override fun onUtteranceDone(): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (ttsActive > 0) ttsActive--
-            if (ttsActive == 0 && _state.value.phase == VoicePhase.SPEAKING) {
-                _state.update { it.copy(phase = VoicePhase.LISTENING) }
+            if (ttsActive == 0) {
+                openGuardTail()
+                if (_state.value.phase == VoicePhase.SPEAKING) {
+                    _state.update { it.copy(phase = VoicePhase.LISTENING) }
+                }
             }
         }
     }
@@ -282,6 +379,11 @@ class VoiceSession(
      * keeps a teardown that happened mid-pause from resurrecting the recognizer.
      */
     private fun relisten(gen: Int) {
+        // The latch describes ONE recognition cycle and is consumed by that cycle's
+        // end. Every terminal recognizer callback (final result, recoverable error)
+        // funnels through here, so the latch can never survive into a later utterance
+        // -- the failure mode this file's history is full of.
+        onsetDuringJarvisSpeech = false
         sttRestartJob?.cancel()
         sttRestartJob = scope.launch {
             delay(STT_RESTART_DELAY_MS)
@@ -313,6 +415,10 @@ class VoiceSession(
                 _state.update { it.copy(transcript = merged) }
             }
             is VoiceServerEvent.JarvisText -> {
+                // The speaking run starts at the FIRST utterance of a reply; a reply
+                // arriving as several jarvis_text events must not keep pushing the
+                // MAX_SPEAK_GUARD_MS ceiling forward.
+                if (ttsActive == 0) guardStartedAtMs = nowMs()
                 ttsActive++
                 recordJarvisSpeech(event.text)
                 tts.speak(event.text)
@@ -323,6 +429,7 @@ class VoiceSession(
             is VoiceServerEvent.TurnComplete -> {
                 turnBoundary = true
                 ttsActive = 0
+                openGuardTail()
                 _state.update { it.copy(phase = VoicePhase.LISTENING) }
             }
             is VoiceServerEvent.Error ->
@@ -364,15 +471,31 @@ class VoiceSession(
             while (isActive && gen == generation.get()) {
                 val frame = mic.readFrame() ?: break
                 if (gen != generation.get()) break
-                transport.sendBinary(frame)
+                // The mic is never closed (closing and reopening AudioRecord mid-call
+                // is slow and can fail), but while the echo guard is up its frames are
+                // DROPPED rather than sent: the server's speaker-ID buffer must never
+                // contain Jarvis's own voice. This is the structural half of the fix --
+                // it holds no matter what the recognizer decides about the text.
+                val send = synchronized(lock) { !echoGuardActive() }
+                if (send) transport.sendBinary(frame)
             }
         }
     }
 
-    private companion object {
+    internal companion object {
         /** Pause before re-arming the recognizer after a turn or a recoverable error.
          *  Short enough to feel continuous, long enough to break instant-NO_MATCH loops. */
         const val STT_RESTART_DELAY_MS = 300L
+
+        /** How long after Jarvis stops speaking the microphone is still treated as
+         *  echo. Covers the room's decay and the tail of a TTS utterance the engine
+         *  reports done a beat early. Kept short: it is dead time in the dialogue. */
+        const val ECHO_TAIL_MS = 700L
+
+        /** Hard ceiling on one speaking run. If a TTS engine never reports
+         *  onUtteranceDone, `ttsActive` never comes back down -- without this the
+         *  guard would hold and the call would go permanently deaf. */
+        const val MAX_SPEAK_GUARD_MS = 30_000L
 
         /** Echo gate window: only the last few Jarvis utterances are kept. */
         const val ECHO_WINDOW = 3
