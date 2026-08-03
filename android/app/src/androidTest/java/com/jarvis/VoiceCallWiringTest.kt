@@ -21,6 +21,9 @@ import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.FcmApi
+import com.jarvis.data.net.FcmRegisterResponse
+import com.jarvis.data.net.FcmTokenRequest
 import com.jarvis.data.net.ConversationDeletedResponse
 import com.jarvis.data.net.ConversationsApi
 import com.jarvis.data.net.ConversationsResponse
@@ -84,6 +87,15 @@ class VoiceCallWiringTest {
         override suspend fun hasSignedInBefore() = true
         override suspend fun markSignedIn() {}
         override suspend fun clearSignedIn() {}
+    }
+
+    /**
+     * The push path is wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers locally rather than reaching the deployed backend: a test
+     * suite must not talk to production at all.
+     */
+    private class FakeFcmApi : FcmApi {
+        override suspend fun register(req: FcmTokenRequest) = FcmRegisterResponse(true)
     }
 
     /**
@@ -193,7 +205,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -243,7 +255,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -288,7 +300,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(

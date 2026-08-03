@@ -40,10 +40,10 @@ import kotlinx.coroutines.launch
  * `data.approval_id`, and Firebase copies a notification's `data` map into the launch
  * intent's extras verbatim. One concept, one name, end to end.
  *
- * NOTE: nothing in this app produces this extra yet — there is no
- * `FirebaseMessagingService`, because `firebase-messaging` is not a dependency of this
- * module (only `google-services.json` is present). This is the receiving half of the
- * contract; the service that delivers the tap is a separate slice.
+ * Two producers put it here, and neither is optional. Backgrounded, the system tray draws
+ * the push and Firebase copies `data` into the launch intent verbatim; in the foreground
+ * [JarvisFCMService] builds the notification and sets the extra itself. Both land on the
+ * same key, which is why it is read here once and nowhere else.
  */
 const val EXTRA_APPROVAL_ID = "approval_id"
 
@@ -226,6 +226,10 @@ class MainActivity : FragmentActivity() {
                     if (container.authManager.silentSignIn().isSuccess) {
                         container.authStateStore.markSignedIn()
                         if (!returning) vm.onSignedIn()
+                        // Only now: /api/fcm/register is require_user, so before a session
+                        // exists this is a guaranteed 401. Last in the branch because a
+                        // push registration must never delay the chat becoming usable.
+                        container.registerForPush()
                     } else if (returning) {
                         container.authStateStore.clearSignedIn()
                         vm.onSilentSignInFailed()
@@ -260,6 +264,11 @@ class MainActivity : FragmentActivity() {
                                     // Remember it, so every later launch skips the splash.
                                     container.authStateStore.markSignedIn()
                                     vm.onSignedIn()
+                                    // The FIRST-EVER launch never reaches the boot path's
+                                    // registration (silent sign-in fails before an account
+                                    // is chosen). Without this line a brand-new install
+                                    // would receive no push until its second launch.
+                                    container.registerForPush()
                                 },
                                 onFailure = { vm.onSignInFailed(it.message) },
                             )

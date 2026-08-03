@@ -28,6 +28,28 @@
             android:name=".VoiceCallService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Push (Faz Y3). exported=false is correct even though the platform starts it:
+             the MESSAGING_EVENT intent comes from Play Services through the Firebase SDK
+             in this same process, not from another app. -->
+        <service
+            android:name=".JarvisFCMService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Used ONLY on the background/system-tray path, where JarvisFCMService is never
+             called and Firebase builds the notification itself. Without these two it would
+             fall back to a "Miscellaneous" channel and the launcher icon. The channel is
+             created in JarvisApp.onCreate so it exists by the time a push arrives. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="jarvis_push" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/logo_kj" />
     </application>
 
 </manifest>

@@ -18,6 +18,7 @@ class ApiSet(
     val voice: VoiceApi,
     val conversations: ConversationsApi,
     val approvals: ApprovalApi,
+    val fcm: FcmApi,
 )
 
 object NetworkModule {
@@ -62,6 +63,7 @@ object NetworkModule {
             voice = retrofit.create(VoiceApi::class.java),
             conversations = retrofit.create(ConversationsApi::class.java),
             approvals = retrofit.create(ApprovalApi::class.java),
+            fcm = retrofit.create(FcmApi::class.java),
         )
     }
 }

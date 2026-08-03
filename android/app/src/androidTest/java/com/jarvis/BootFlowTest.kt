@@ -20,6 +20,9 @@ import com.jarvis.data.net.ConversationsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.FcmApi
+import com.jarvis.data.net.FcmRegisterResponse
+import com.jarvis.data.net.FcmTokenRequest
 import com.jarvis.data.net.HistoryResponse
 import com.jarvis.data.net.JarvisApi
 import com.jarvis.data.net.LabelPatch
@@ -86,6 +89,15 @@ class BootFlowTest {
     }
 
     /**
+     * The push path is wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers locally rather than reaching the deployed backend: a test
+     * suite must not talk to production at all.
+     */
+    private class FakeFcmApi : FcmApi {
+        override suspend fun register(req: FcmTokenRequest) = FcmRegisterResponse(true)
+    }
+
+    /**
      * Approvals are wired into [AppContainer] like every other API, so this test has to
      * supply one. It answers "no approvals" rather than reaching the deployed backend: a
      * test suite must not talk to production at all.
@@ -125,7 +137,7 @@ class BootFlowTest {
         app.container = AppContainer(
             app,
             authManager = HangingAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
             authStateStore = state,
         )
     }

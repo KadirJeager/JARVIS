@@ -3,6 +3,7 @@ package com.jarvis
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.jarvis.data.auth.AndroidBiometricGate
 import com.jarvis.data.auth.AuthClient
 import com.jarvis.data.auth.AuthManager
@@ -16,6 +17,9 @@ import com.jarvis.data.chat.DataStoreSessionStore
 import com.jarvis.data.net.ApiSet
 import com.jarvis.data.net.NetworkModule
 import com.jarvis.data.net.VOICE_WS_URL
+import com.jarvis.data.push.FcmTokenRegistrar
+import com.jarvis.data.push.PUSH_LOG_TAG
+import com.jarvis.data.push.firebaseMessagingToken
 import com.jarvis.data.voice.VoiceProfileRepository
 import com.jarvis.data.voice.session.AndroidMicSource
 import com.jarvis.data.voice.session.AndroidSpeechToText
@@ -82,6 +86,29 @@ class AppContainer(
     val conversationsRepository = ConversationsRepository(apis.conversations, sessionStore)
     val voiceProfileRepository = VoiceProfileRepository(apis.voice)
     val approvalRepository = ApprovalRepository(apis.approvals)
+
+    /**
+     * Shared by BOTH producers of a token: `JarvisFCMService.onNewToken` and the app-open
+     * path below. One instance, so its "already registered this token" guard actually
+     * spans them instead of each holding its own idea of what was sent.
+     */
+    val fcmTokenRegistrar = FcmTokenRegistrar(
+        api = apis.fcm,
+        // The same signal AuthInterceptor uses to decide whether to attach a Bearer
+        // header. Anything else here would let the two disagree about "signed in".
+        isSignedIn = { authManager.currentToken() != null },
+        currentToken = { firebaseMessagingToken() },
+    )
+
+    /**
+     * Registers this device for push. Called on every app open once a session exists,
+     * because `onNewToken` fires only when the token CHANGES and therefore never fires at
+     * all on a device whose token predates this build.
+     */
+    suspend fun registerForPush() {
+        val outcome = fcmTokenRegistrar.registerCurrentToken()
+        Log.i(PUSH_LOG_TAG, "fcm: uygulama açılışı kayıt sonucu=$outcome")
+    }
 }
 
 class JarvisApp : Application() {
@@ -95,5 +122,10 @@ class JarvisApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // The channel must exist BEFORE the first notification lands on it. A backgrounded
+        // app's push is drawn by the system tray, which never calls JarvisFCMService — so
+        // creating the channel only there would leave the production path (approval
+        // arrives while the app is closed) posting onto a channel that does not exist.
+        JarvisFCMService.ensureChannel(this)
     }
 }
