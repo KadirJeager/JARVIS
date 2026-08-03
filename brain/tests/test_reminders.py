@@ -5,6 +5,8 @@ from unittest.mock import patch
 import pytest
 
 from app import fcm, main as main_mod, reminders
+from app.reminders import (REMINDERS_COLLECTION, STATUS_CANCELLED, STATUS_PENDING,
+                           cancel, dispatch_due, set_reminder)
 from tests.fakes import FakeDB
 
 NOW = datetime(2026, 7, 31, 12, 0, 0, tzinfo=timezone.utc)
@@ -251,3 +253,55 @@ def test_workspace_poll_requires_scheduler():
     client = TestClient(main_mod.app)
     resp = client.post("/api/jobs/workspace-poll")
     assert resp.status_code in (401, 503)
+
+
+# -- dispatch_due must not undo an approved cancellation (review C2) ----------
+# The tick reads its candidates, then spends network time in send_fn. A
+# cancellation approved in that window (Y3: cancel_reminder is a RED tool, so
+# Kadir signed for it) must survive -- writing the pre-read status back would
+# silently reverse a decision the approval centre made.
+
+
+def test_a_cancellation_landing_mid_dispatch_survives_a_failed_send():
+    db = FakeDB()
+    set_reminder(db, "su iç", "2026-07-31T15:00:00Z", now_fn=lambda: "2026-07-31T14:00:00Z")
+    rid = next(iter(db.collection(REMINDERS_COLLECTION).docs))
+
+    def send_and_cancel_midway(_db, _reminder):
+        cancel(db, rid)                       # Kadir's approval lands mid-send
+        return {"ok": False, "error": "fcm down"}
+
+    dispatch_due(db, send_and_cancel_midway, now_fn=lambda: "2026-07-31T16:00:00Z")
+
+    assert db.collection(REMINDERS_COLLECTION).docs[rid]["status"] == STATUS_CANCELLED
+
+
+def test_a_cancellation_landing_mid_dispatch_survives_a_successful_send():
+    db = FakeDB()
+    set_reminder(db, "su iç", "2026-07-31T15:00:00Z", now_fn=lambda: "2026-07-31T14:00:00Z")
+    rid = next(iter(db.collection(REMINDERS_COLLECTION).docs))
+
+    def send_and_cancel_midway(_db, _reminder):
+        cancel(db, rid)
+        return {"ok": True}
+
+    dispatch_due(db, send_and_cancel_midway, now_fn=lambda: "2026-07-31T16:00:00Z")
+
+    # The push did go out (nothing can unsend it), but the record must not claim
+    # the reminder is "sent" -- it was cancelled, and a later reader would
+    # otherwise see a cancelled reminder resurrected as delivered.
+    assert db.collection(REMINDERS_COLLECTION).docs[rid]["status"] == STATUS_CANCELLED
+
+
+def test_an_ordinary_failed_send_still_records_the_error_and_stays_pending():
+    db = FakeDB()
+    set_reminder(db, "su iç", "2026-07-31T15:00:00Z", now_fn=lambda: "2026-07-31T14:00:00Z")
+    rid = next(iter(db.collection(REMINDERS_COLLECTION).docs))
+
+    out = dispatch_due(db, lambda *_: {"ok": False, "error": "fcm down"},
+                       now_fn=lambda: "2026-07-31T16:00:00Z")
+
+    doc = db.collection(REMINDERS_COLLECTION).docs[rid]
+    assert doc["status"] == STATUS_PENDING
+    assert doc["fcm_result"] == {"ok": False, "error": "fcm down"}
+    assert out["failed"] == 1

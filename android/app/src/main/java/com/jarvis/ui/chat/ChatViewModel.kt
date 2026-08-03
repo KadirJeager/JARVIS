@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.jarvis.data.approvals.Approval
 import com.jarvis.data.approvals.ApprovalRepository
+import com.jarvis.data.approvals.ApprovalStatus
 import com.jarvis.data.chat.ChatRepository
 import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.UiMessage
@@ -303,6 +304,19 @@ class ChatViewModel(
                     },
                 )
             }
+            // The claim race (approvals.py: the loser re-reads the document, and the
+            // winner may not have written its status projection yet) can answer
+            // `already` while still reporting "pending". Adopted as-is, the card would
+            // sit there looking decidable although the action had already run. One
+            // re-read settles it; nothing else depends on it, so a failure is ignored.
+            val decision = result.getOrNull()
+            if (decision != null && decision.already &&
+                decision.status == ApprovalStatus.PENDING
+            ) {
+                runCatching { repoRef.get(approvalId) }.getOrNull()?.let { fresh ->
+                    _state.update { it.copy(approvals = it.approvals + (fresh.id to fresh)) }
+                }
+            }
         }
     }
 
@@ -330,10 +344,22 @@ class ChatViewModel(
                         messages = it.messages.dropLast(1),
                         input = text,
                         sending = false,
-                        error = "Gönderilemedi: ${e.message}",
+                        error = e.userMessage("Gönderilemedi. Az sonra tekrar dene."),
                     )
                 }
+                return@launch
             }
+            // A turn can RAISE an approval: a red-zone tool call becomes a pending card
+            // via the server's sink (spec §5), which writes it into the transcript and
+            // pushes it. The transcript is not re-read here (the reply is appended
+            // locally), so without this the card is invisible in exactly the flow that
+            // created it — Kadir reads "onay kartı gönderdim" and sees no card, with no
+            // pull-to-refresh to rescue him.
+            //
+            // OUTSIDE the try: the catch above rolls back by dropping the LAST message,
+            // which by this point is the reply, not the optimistic bubble. A stumble
+            // while syncing must never delete a reply that was actually delivered.
+            syncApprovals()
         }
     }
 }

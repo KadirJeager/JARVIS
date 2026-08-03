@@ -170,6 +170,34 @@ def dispatch_due(db, send_fn, now_fn=_now) -> dict:
             success = False
 
         ref = snap.reference
+        # RE-READ before writing. The candidate list is a snapshot taken before
+        # send_fn, and send_fn is network time (an FCM round trip per token). A
+        # cancellation can land inside that window -- and since Faz Y3 that
+        # cancellation is a RED action Kadir personally approved
+        # (tools.cancel_reminder -> approvals.decide). Writing the pre-read status
+        # back would silently reverse his decision: the failure branch used to
+        # restore "pending" unconditionally, resurrecting a cancelled reminder for
+        # the next tick, and the success branch would stamp it "sent".
+        #
+        # Not atomic -- a compare-and-set would need a transaction. It closes the
+        # window that actually exists (hundreds of ms of network I/O) and leaves
+        # only the microseconds between this read and the write. The failure
+        # direction is also the safe one: worst case a cancelled reminder keeps its
+        # cancelled status and one push already went out, which nothing can unsend.
+        current = ref.get()
+        if not current.exists or current.to_dict().get("status") != STATUS_PENDING:
+            logging.info(
+                "reminders: dispatch_due id=%s artik pending degil (%s) -- durum "
+                "YAZILMADI (iptal/karar korunuyor)",
+                reminder["id"],
+                current.to_dict().get("status") if current.exists else "silinmis",
+            )
+            if success:
+                sent_count += 1
+            else:
+                failed_count += 1
+            continue
+
         if success:
             update = {
                 "status": STATUS_SENT,
@@ -185,7 +213,7 @@ def dispatch_due(db, send_fn, now_fn=_now) -> dict:
             }
             failed_count += 1
             logging.warning("reminders: dispatch_due basarisiz id=%s res=%s", reminder["id"], res)
-            
+
         ref.set(update, merge=True)
 
     return {"handled": True, "sent": sent_count, "failed": failed_count}

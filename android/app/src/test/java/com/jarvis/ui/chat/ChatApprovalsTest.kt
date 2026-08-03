@@ -457,4 +457,72 @@ class ChatApprovalsTest {
         assertTrue(vm.state.value.approvals.isEmpty())
         assertNull(vm.state.value.error)
     }
+
+    // --- 5. a turn that RAISES an approval (review C1) -----------------------------
+
+    /**
+     * The flow that creates the card must also show it. A red-zone tool call becomes a
+     * pending approval inside the turn (spec §5): the server writes the card into the
+     * transcript and pushes it, but [ChatViewModel.send] appends the reply LOCALLY and
+     * never re-reads history. Without a sync here Kadir reads "onay kartı gönderdim" and
+     * sees no card at all — and there is no pull-to-refresh in this screen.
+     */
+    @Test
+    fun aTurnThatRaisesAnApproval_showsTheCardWithoutARestart() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi()
+        val vm = vm(approvals = approvals)
+        advanceUntilIdle()
+        val listCallsBeforeTurn = approvals.listCalls
+
+        // The turn happens, and the server raises the card while serving it.
+        approvals.queue = listOf(dto("7"))
+        vm.onInputChange("su iç hatırlatmasını iptal et")
+        vm.send()
+        advanceUntilIdle()
+
+        assertEquals(listCallsBeforeTurn + 1, approvals.listCalls)
+        assertEquals(ApprovalStatus.PENDING, vm.state.value.approvals["7"]?.status)
+        assertTrue(vm.state.value.pinnedApprovals.any { it.id == "7" })
+    }
+
+    /** A stumble while syncing must not delete a reply that was actually delivered. */
+    @Test
+    fun aFailedApprovalSyncAfterASend_keepsTheReply() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi(listFailure = IOException("ağ yok"))
+        val vm = vm(approvals = approvals)
+        advanceUntilIdle()
+
+        vm.onInputChange("merhaba")
+        vm.send()
+        advanceUntilIdle()
+
+        val texts = vm.state.value.messages.map { it.text }
+        assertTrue("kullanıcı balonu duruyor", texts.contains("merhaba"))
+        assertTrue("cevap duruyor", texts.contains("ok"))
+        assertEquals("", vm.state.value.input)
+    }
+
+    /**
+     * The claim race: the loser re-reads the approval document, and the winner may not
+     * have written its status projection yet, so the answer can be `already` + still
+     * "pending". Adopted as-is the card would look decidable although the action had
+     * already run — one re-read settles it.
+     */
+    @Test
+    fun anAlreadyDecidedRaceLoser_refetchesInsteadOfStayingPending() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi(
+            queue = listOf(dto("9")),
+            decision = ApprovalDecisionDto("pending", null, already = true),
+            singles = mapOf("9" to dto("9", status = "approved")),
+        )
+        val vm = vm(approvals = approvals)
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.approveApproval("9")
+        advanceUntilIdle()
+
+        assertTrue("onay yeniden okundu", approvals.fetched.contains("9"))
+        assertEquals(ApprovalStatus.APPROVED, vm.state.value.approvals["9"]?.status)
+    }
 }
