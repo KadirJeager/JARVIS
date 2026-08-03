@@ -7,9 +7,9 @@ import uuid
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import (approvals, consult, reminders, repo_watch, speaker_history,
-               speaker_store, tool_registry, vitals, voice_trust)
-from .memory import Memory
+from . import (approvals, consult, factory, reminders, repo_watch,
+               speaker_history, speaker_store, tool_registry, vitals, voice_trust)
+from .memory import FirestoreAudit, Memory
 
 _memory: Memory | None = None
 _github_client: "repo_watch.GitHubClient | None" = None
@@ -387,7 +387,36 @@ def _execute_tool_grant(tool_args: dict, user_id: str) -> str:
 approvals.register_executor(approvals.EXECUTOR_TOOL_GRANT, _execute_tool_grant)
 
 
+# -- Ajan fabrikası Kademe 1 (North Star §8.5, Faz Y4.2) ---------------------
+
+
+async def spawn_specialist(template: str, goal: str, tool_context) -> dict:
+    """Dar kapsamlı, ÇOK ADIMLI bir işi geçici bir uzman ajana devreder ve
+    sonucunu getirir. `template` şu kalıplardan biridir: "arastirmaci" (bir
+    konuyu hafızadan ve izlenen repo'lardan toplayıp özetler), "arsivci" (bir
+    konuşmadan çıkan kalıcı bilgiyi profile/derslere işler), "nobetci" (sistem
+    sağlığını ve bekleyen işleri derleyip rapor eder). `goal` uzmana verilecek
+    tek cümlelik Türkçe görevdir — ne istediğini SOMUT yaz, çünkü uzman senin
+    sohbetini görmez. Uzman geçicidir: yalnızca kendi araç alt kümesini
+    kullanır, bütçesi (adım + süre) sınırlıdır ve iş bitince ölür. Bilinmeyen
+    bir şablon adı verirsen kullanılabilir şablonların listesi döner. Tek adımda
+    kendin yapabileceğin bir işi buraya devretme."""
+    try:
+        session = tool_context.session
+        return await factory.spawn(
+            template, goal,
+            user_id=session.user_id,
+            # Audit yazıcısı ÇAĞRI anında modül tekilinden kurulur --
+            # _execute_cancel_reminder'daki desenin aynısı. Aynı `audit_log`
+            # koleksiyonu: tek iz, tek defter (§8.5 değişmez 5).
+            audit=FirestoreAudit(_memory.db),
+        )
+    except Exception:
+        logging.exception("spawn_specialist: uzman ajan çalıştırılamadı sablon=%r", template)
+        return {"hata": "Uzman ajan şu an çalıştırılamıyor; işi kendi araçlarınla yapmayı dene."}
+
+
 ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
              get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
              consult.consult_gemini, consult.consult_claude, check_my_vitals,
-             set_reminder, list_reminders, cancel_reminder, propose_tool]
+             set_reminder, list_reminders, cancel_reminder, propose_tool, spawn_specialist]

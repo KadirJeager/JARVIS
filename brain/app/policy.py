@@ -67,9 +67,10 @@ def write_audit(
     """Append one decision entry to the audit trail (spec §7: the trail must
     reconstruct WHY a decision was made, not just what it was).
 
-    Shared by the ADK policy callback (actor "orchestrator") and the guest
-    gate (actor "guest:<email>", app/guest_gate.py) so both paths emit the
-    SAME entry shape. Args are stringified and cut at 500 chars per value:
+    Shared by the ADK policy callback (actor "orchestrator", or
+    "factory:<şablon>#<örnek>" for a derived agent -- app/factory.py) and the
+    guest gate (actor "guest:<email>", app/guest_gate.py) so every path emits
+    the SAME entry shape. Args are stringified and cut at 500 chars per value:
     the audit is for reconstruction, not a full payload dump. The voice
     evidence fields stay None (not a fabricated "foreground") when there is
     no voice context -- e.g. every text-chat and every guest call."""
@@ -189,9 +190,13 @@ def _red_block_text(tool_name: str, args: dict[str, Any],
     return RED_BLOCK_TEMPLATE.format(tool_name=tool_name)
 
 
+ACTOR_ORCHESTRATOR = "orchestrator"
+
+
 def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | None = None,
                          approval_sink: ApprovalSink | None = None,
-                         zone_resolver: "ZoneResolver | None" = None):
+                         zone_resolver: "ZoneResolver | None" = None,
+                         actor: str = ACTOR_ORCHESTRATOR):
     """`trust_provider` is how voice identity reaches the policy matrix: ONLY
     the voice runner's agent is built with one (main._init_voice), so the text
     runner's callback is structurally incapable of seeing voice trust and the
@@ -209,7 +214,13 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
     tools the CODE does not know -- granted MCP servers and capabilities Jarvis
     acquired after this build shipped. It can never loosen a zone that
     config.TOOL_ZONES already states; see check_zone for why that ordering is
-    the security boundary. Left None, zone resolution is exactly pre-Y4."""
+    the security boundary. Left None, zone resolution is exactly pre-Y4.
+
+    `actor` (Faz Y4.2, §8.5 değişmez 5) is WHO the audit line is attributed to.
+    It changes NO decision -- only the trail. The factory (app/factory.py)
+    passes "factory:<şablon>#<örnek>" so a derived agent's work can never be
+    confused with the orchestrator's own; left at its default every caller
+    writes "orchestrator" exactly as before Y4.2."""
 
     def policy_callback(tool, args: dict[str, Any], tool_context) -> dict[str, Any] | None:
         zone = check_zone(tool.name, zone_resolver)
@@ -218,7 +229,7 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
         decision = _decide(zone, trust_level)
         write_audit(
             audit,
-            actor="orchestrator",
+            actor=actor,
             tool_name=tool.name,
             args=args,
             zone=zone,
