@@ -57,22 +57,46 @@ belgelenen diğer beş iş hiç oluşturulmamıştı — yani Y1 ve Y2 kod olara
 hiç tetiklenmiyordu. Altısı da kuruldu; ikisi zorla çalıştırılıp uygulama logunda 200
 görülerek doğrulandı.
 
+## Oturum kapanışında ölçülenler (22:53)
+
+**Yankı düzeltmesi ÇALIŞTI — artık sayıyla.** AEC düzeltmesinden sonraki 6 doğrulama:
+
+| | Öncesi (50 kayıt) | Sonrası (6 kayıt) |
+|---|---|---|
+| imposter bandı (<0.25) | 23/50 = **%46** | 1/6 = **%17** |
+| ortalama skor | 0.366 | **0.4256** |
+| en yüksek | 0.749 | 0.6402 |
+| tanındı | 23/50 | **5/6** |
+
+Kadir de bağımsız olarak "yankı düzeldi" dedi. Örneklem küçük (6), ama yön net ve
+hipotez (TTS'i AEC referans yoluna almak) destekleniyor.
+
+**Onay kartı: SUNUCU TARAFI ÇALIŞIYOR, sorun İSTEMCİDE.** Bu ayrım ölçüldü:
+
+- audit: `19:52:47 tool=cancel_reminder zone=red karar=block` — politika doğru çalıştı
+- `approvals` koleksiyonu: **1 doküman**, `status=pending`,
+  `tool_args={'reminder_id': 'ZvHISmfHoreoe6HvHFch'}`
+
+Yani kırmızı bölge → engel → onay kaydı zinciri uçtan uca kuruldu. Kart Android'de
+görünmüyor. Sıradaki oturum doğrudan istemciye bakmalı (sunucuyu tekrar kurcalamasın):
+`ChatViewModel.syncApprovals` / `pinnedApprovals` / kartın çizim yolu. İnceleme için
+bekleyen gerçek bir onay kaydı Firestore'da duruyor.
+
+**Ses mimarisi kararı verildi:** cihaz üstü kalıyor, Live API'ye geçilmiyor;
+iyileştirmeler devam edecek.
+
 ## KANITLANMADI — sıradaki kişinin ilk işi
 
-- **Yankı düzeltmesinin akustik doğrulaması.** Bu gece eklenen 4 `speaker_history`
-  kaydından 2'si hâlâ imposter bandında (0.0169, 0.0376) — ama ikisi de **AEC
-  düzeltmesinden ÖNCEki** turlardan (18:42–19:03 UTC). Düzeltmeden sonra hiç kayıt yok,
-  yani **ölçülmedi**. Bir sesli arama yapıp bu tabloya yeniden bakmak gerekiyor:
-  `speaker_history/owner@example.com`, skorlar 0.25 altındaysa yankı hâlâ geçiyor.
+- ~~Yankı düzeltmesinin akustik doğrulaması~~ — **ÖLÇÜLDÜ, yukarı bakın.** Kalan: örneklem
+  küçük, birkaç gün sonra tabloya tekrar bakıp %17'nin sabit olup olmadığını görmek.
 - **TTS'in AEC yoluna alınması bir hipotez.** Mikrofon tarafı `VOICE_COMMUNICATION`
   kullanıyordu ama TTS varsayılan `STREAM_MUSIC`'ten çalıyordu; artık ikisi aynı yolda.
   AEC davranışı HAL'e özgü, cihazda ölçülmeli.
 - **`EXTRA_BIASING_STRINGS` de hipotez.** API 33, kurulu SDK'da doğrulandı, ama AOSP
   değerin tipini dokümante etmiyor ve kardeş sabitte "etkisi olmayabilir" yazıyor.
   Kadir "Jarvis artık doğru yazılıyor" dedi — tek gözlem, tekrar edilmeli.
-- **Onay merkezi uçtan uca denenmedi.** Uçlar canlı ve auth'lu, ama gerçek bir
-  "kırmızı araç → kart → onayla → çalıştı" turu henüz yapılmadı. Deneme cümlesi:
-  *"su iç hatırlatmasını iptal et"*.
+- **Onay kartı Android'de görünmüyor** (sunucu tarafı kanıtlanmış durumda, yukarı bakın).
+  Bu, yeni oturumun İLK işi.
 - **Fabrika tavanları ölçülmedi.** Adım/süre tavanları gerekçeli tahmin. Bilinen ve
   belgelenmiş açık: senkron bir araç çağrısı event loop'u bloklar, süre tavanı onu
   kesemez (`factory.py` docstring'inde yazılı). Gerçek çözüm çağrıları
