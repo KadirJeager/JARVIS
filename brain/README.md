@@ -525,3 +525,63 @@ açılınca `GET /api/approvals` ile senkronlanır.
 > `FirebaseMessagingService` yoktu. Android istemcisi eklendikten sonra
 > doğrulandı: `fcm_tokens` 0 → 1 doküman, gerçek push cihazda
 > `channel=jarvis_push` bildirimi olarak çizildi.
+
+## Araç kayıt defteri ve kazanım merdiveni (Faz Y4.1)
+
+Yeni bir yetenek artık kod değil, **onaylanmış bir kayıttır** (North Star §8.5:
+*"Keşif ve kurulum otonomdur; yetkilendirme her zaman insanlıdır"*).
+
+Akış: Jarvis eksik yeteneği fark eder → `propose_tool` ile öneri kurar (yeşil bölge:
+öneri kurmak zararsızdır) → öneri `kind="tool_grant"` bir **onay kartına** düşer (Y3)
+→ Kadir onaylarsa `tool_registry` koleksiyonuna kayıt yazılır → bir sonraki açılışta
+etkin olur.
+
+**Kayıt defterine yazan TEK yer onay yürütücüsüdür.** `propose_tool` defterin kendisine
+dokunmaz; bu, "yetkilendirme insanidir" cümlesinin koddaki karşılığıdır.
+
+**Kayıt defteri koddaki bölgeyi GEVŞETEMEZ.** `check_zone` sırası: `config.TOOL_ZONES`
+(kod) → kayıt defteri → `DEFAULT_ZONE` (red). Kod bir aracı biliyorsa kod kazanır —
+aksi hâlde onaylanmış tek bir kayıt `cancel_reminder`'ı yeşile çekip onay merkezini
+tümüyle baypas edebilirdi. Kayıt defteri yalnızca kodun *bilmediği* adlara bölge atar.
+
+**Kırmızı öneri kabul edilmez:** `propose_tool` yalnızca `green`/`yellow` isteyebilir
+(§8.5 değişmez 1). Kırmızı bir yetenek hâlâ insan eliyle koda girer.
+
+**MCP sunucuları gerçekten bağlanır.** `kind="mcp"` granted kayıtlar ADK `McpToolset`
+nesnelerine dönüşür ve ajana eklenir. Üç şey bilinçlidir: bir kaydın kurulumu fırlarsa
+o kayıt **atlanır** (tek bozuk kayıt Jarvis'i susturmaz); toolset ön-eki kaydın adıdır,
+çünkü bölge eşlemesi ön-ek üzerinden yapılır; ve ön-eki eşleşmeyen bir araç adı
+`DEFAULT_ZONE` = **red** olur. Çakışan ön-eklerde en kısıtlayıcı bölge kazanır.
+
+| Değişken | Varsayılan | Anlam |
+|---|---|---|
+| `JARVIS_APPROVAL_TTL_MINUTES` | `60` | Bir onay kartının ömrü (Y3) |
+
+## Ajan fabrikası — Kademe 1 (Faz Y4.2)
+
+`app/factory.py`: derleme anında sabit **şablonlar**, çalışma anında parametreyle
+örneklenen geçici uzmanlar (§8.5 Kademe 1 "kalıphane"). Şablon eklemek bir kod
+değişikliğidir — Kademe 1'in tanımı budur, ve debug yüzeyini statik mimariye yakın
+tutan da budur.
+
+Çağrı: `spawn_specialist(template, goal)` — sarı bölge. Şablonlar: `arastirmaci`,
+`arsivci`, `nobetci`.
+
+Fabrika anayasası (§8.5), hepsi testle pinli:
+
+1. **Misafir muamelesi.** Türetilmiş ajanın politika callback'ine `approval_sink`
+   VERİLMEZ: kırmızı bir araç çağrısı onay kartına bile dönüşemez, düz engellenir.
+2. **Yalnız kayıt defterinden araç** — şablonun izin verdiği adlar ∩ `ALL_TOOLS`.
+   Bulunamayan ad sessizce atlanmaz, loglanır.
+3. **Ajan üretemez.** `spawn_specialist` türetilmiş ajanın araç kümesinde hiçbir yoldan
+   bulunamaz; şablon açıkça istese bile dışlanır.
+4. **İki bağımsız tavan:** adım sayısı ve duvar saati. Biri diğerinin yerine geçmez —
+   tek bir araç çağrısı dakikalarca sürebilir (adım tavanı yakalamaz), hızlı bir döngü
+   saniyeler içinde yüzlerce adım atabilir (süre tavanı yakalamaz). Hiç olay üretmeyen
+   askıda çağrı için ayrıca sert bir `asyncio.timeout` vardır.
+5. **İz zorunlu:** her araç çağrısı audit'e `actor="factory:<şablon>#<örnek>"` yazılır.
+6. **Retro envanteri tarar:** haftalık rapor şablon başına koşu ve ayrı örnek sayısını
+   verir; hiç üretim yoksa bunu açıkça söyler.
+
+Örnek Kadir'in sohbet oturumunu kirletmez: kendi oturum kimliğiyle koşar
+(`factory-<şablon>-<örnek>`).
