@@ -19,6 +19,17 @@ from .auth import require_scheduler, require_user
 if TYPE_CHECKING:
     from .memory import Memory
 
+# INFO logları Cloud Logging'e düşsün: root logger yapılandırılmazsa WARNING'de
+# kalır ve uygulamanın bütün iz satırları (approval_sink:/fcm:/factory:) üretimde
+# görünmez — 4 Ağu 01:19 vakasında onay push'unun akıbeti bu yüzden teşhis
+# edilemedi. uvicorn root'a handler koymaz -> üretimde basicConfig dalı çalışır;
+# pytest kendi handler'larını koyar -> orada yalnız seviye düşürülür (basicConfig
+# handler varken sessizce hiçbir şey yapmazdı).
+if logging.getLogger().handlers:
+    logging.getLogger().setLevel(logging.INFO)
+else:
+    logging.basicConfig(level=logging.INFO)
+
 APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
 app.include_router(voice.router)

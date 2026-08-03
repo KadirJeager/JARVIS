@@ -1,9 +1,16 @@
+from datetime import datetime, timedelta, timezone
+
 from google.adk.agents import Agent
 from google.adk.models.base_llm import BaseLlm
 
 from . import config, tools
 from .memory import Memory
 from .policy import make_policy_callback
+
+# Türkiye 2016'dan beri kalıcı UTC+3 (DST yok). Sabit offset bilinçli: zoneinfo
+# "Europe/Istanbul" slim imajda tzdata paketi ister; sabit offset istemez ve
+# Türkiye için ikisi aynı sonucu verir.
+TZ_TR = timezone(timedelta(hours=3), name="TSİ")
 
 # Shared with app/main.py so rehydrated (cold-start) events are attributed to
 # the SAME author ADK uses for live events (author=agent.name) -- see
@@ -39,6 +46,31 @@ uygun şablonla spawn_specialist çağır ve dönen özeti Kadir'e aktar. Uzman 
 sohbetini görmez: goal'ü tek başına anlaşılır yaz. Tek adımda kendin yapabileceğin \
 bir işi devretme.
 - Türkçe konuş; samimi ama profesyonel ol."""
+
+
+def instruction_with_clock(ctx=None, *, now_fn=None) -> str:
+    """ADK InstructionProvider: talimatın sonuna her turda TSİ saat çapası ekler.
+
+    Neden provider, string değil: statik INSTRUCTION imaj başlangıcında donar;
+    saat ancak tur anında bilinir. ADK `instruction`ı çağrılabilir kabul eder ve
+    her model isteğinde yeniden çağırır (llm_agent.py: InstructionProvider).
+
+    4 Ağu 01:19 vakası: model saat çapasız çalışıyordu; kayıtları UTC yazıyordu
+    (kayıt biçimi doğru ve DEĞİŞMEDİ) ama Kadir'e saatleri UTC söylüyordu —
+    "Ayağa kalk" 23:00Z = 02:00 TSİ iken "23:00'te" dedi. Çapa + dönüşüm kuralı
+    bu ikiliği kapatır: makine tarafı UTC kalır, insan tarafı TSİ olur.
+
+    `ctx` ADK'nın geçtiği ReadonlyContext'tir ve kullanılmaz; `now_fn` yalnız
+    testler içindir (üretimde gerçek saat)."""
+    now = now_fn() if now_fn is not None else datetime.now(TZ_TR)
+    return INSTRUCTION + f"""
+
+Saat bilgisi: şu an {now:%d.%m.%Y %H:%M} TSİ (UTC+3).
+- Kadir'e saat ve tarihlerden bahsederken HER ZAMAN TSİ kullan.
+- Araçlardan dönen zaman damgaları UTC'dir ("Z" ya da +00:00 sonekli): Kadir'e
+  söylemeden önce 3 saat İLERİ al. Kadir'in söylediği saatler TSİ'dir: bir araca
+  UTC damga yazman gerekiyorsa 3 saat GERİ al.
+- Emin olamadığın belirsiz bir saatte ("akşam 9 mu, 21:00 mi?") varsayma, sor."""
 
 
 def build_agent(
@@ -86,7 +118,7 @@ def build_agent(
     return Agent(
         name=AGENT_NAME,
         model=model or config.MODEL_NAME,
-        instruction=INSTRUCTION,
+        instruction=instruction_with_clock,
         tools=agent_tools,
         before_tool_callback=make_policy_callback(
             audit, trust_provider=trust_provider, approval_sink=approval_sink,

@@ -70,7 +70,9 @@ def test_agent_wires_tools_and_policy():
     tool_names = {getattr(t, "__name__", getattr(t, "name", "")) for t in agent.tools}
     assert "get_user_profile" in tool_names
     assert agent.before_tool_callback is not None
-    assert "Jarvis" in agent.instruction
+    # instruction artık her turda çağrılan bir provider (saat çapası,
+    # tests/test_agent_clock.py) -- içerik pinleri çıktısı üzerinden kurulur.
+    assert "Jarvis" in agent.instruction(None)
 
 
 def test_agent_defaults_to_config_model_name():
