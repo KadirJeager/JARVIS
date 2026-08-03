@@ -28,7 +28,7 @@ spec:
       timeoutSeconds: 3600
       containers:
       - name: voice
-        image: gcr.io/your-gcp-project/jarvis-brain:y2c-7e35746
+        image: gcr.io/your-gcp-project/jarvis-brain:y3y4-e6fb446
         ports:
         - containerPort: 8080
           name: http1
@@ -96,7 +96,19 @@ spec:
           - key: latest
             path: claude.json
   traffic:
+  # latestRevision, PINNED BİR REVİZYON DEĞİL.
+  #
+  # 3 Ağustos 2026 olayı: burada `revisionName: jarvis-voice-00008-p89` yazıyordu (bir
+  # rollout denemesinden kalma) ve README `services replace`'i TEK deploy yolu
+  # olarak tarif ediyor. Yani "deploy" komutu yeni revizyonu kurup trafiği
+  # 30 Temmuz'daki revizyona GERİ ALDI: canlı uygulama Y2'nin uçlarını
+  # (fcm/register, reminders-tick, event) bir anda kaybetti. Sağlık kontrolü
+  # 200 döndüğü için de sessizce oldu.
+  #
+  # Bir revizyonu bilerek pinlemek istersen bunu ELLE yap
+  # (`gcloud run services update-traffic ... --to-revisions <rev>=100`) ve
+  # burayı değiştirme; bu dosya "deploy ettiğin şey yayına girsin" demeli.
   - percent: 100
-    revisionName: jarvis-voice-00008-p89
+    latestRevision: true
   - tag: noapi
     latestRevision: true
