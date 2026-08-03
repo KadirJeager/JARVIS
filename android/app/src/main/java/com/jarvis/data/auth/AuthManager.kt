@@ -22,7 +22,10 @@ const val WEB_CLIENT_ID =
 interface AuthClient {
     fun currentToken(): String?
     suspend fun signIn(activityContext: Context): Result<String>
-    suspend fun silentSignIn(): Result<String>
+    /** [force] = mint a NEW token even if the cached one is still fresh; the 401
+     *  retry path must, because a 401 means the cached token is bad regardless
+     *  of what its `exp` claims. */
+    suspend fun silentSignIn(force: Boolean = false): Result<String>
 }
 
 /**
@@ -30,12 +33,26 @@ interface AuthClient {
  * backend verifies as `Authorization: Bearer <token>`.
  *
  * - [signIn] is interactive (account picker) and needs an Activity [Context].
- * - [silentSignIn] re-auths without UI (single authorized account auto-selected) and may
- *   run from a background thread with the application context — used by the 401 retry.
+ * - [silentSignIn] reuses the token it already holds while that token is still fresh,
+ *   and only calls Credential Manager when it is not. This is what keeps Play Services'
+ *   "Oturumunuz açılıyor" sheet off the screen: the nonce below deliberately defeats the
+ *   credential cache (that is why it fixes the stale-token lockout), so EVERY call into
+ *   Credential Manager shows that sheet. Not calling it is the only way to not show it.
  *
- * The last obtained token is cached in [currentToken] for the request interceptor.
+ * The token is persisted (app-private DataStore, [TokenStore]) rather than kept only in
+ * memory, because the case Kadir actually hits is a COLD start: an in-memory cache is
+ * empty there and the sheet would still appear on every launch. An ID token lives about
+ * an hour, so reopening the app inside that window now costs no UI at all.
+ *
+ * The persisted token is a bearer credential and is treated as one: app-private storage,
+ * cleared by [clear]. It is the same secret the app already holds in memory and puts on
+ * the wire with every request — persisting it widens the window, not the class.
  */
-class AuthManager(private val appContext: Context) : AuthClient {
+class AuthManager(
+    private val appContext: Context,
+    private val tokenStore: TokenStore = DataStoreTokenStore(appContext),
+    private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
+) : AuthClient {
 
     private val credentialManager = CredentialManager.create(appContext)
 
@@ -48,13 +65,28 @@ class AuthManager(private val appContext: Context) : AuthClient {
         token = null
     }
 
+    /** Loads the persisted token, if any, so a cold start can skip Credential Manager. */
+    private suspend fun cached(): String? {
+        token?.let { return it }
+        return tokenStore.read()?.also { token = it }
+    }
+
     /** Interactive sign-in; [activityContext] must be an Activity to show the picker. */
     override suspend fun signIn(activityContext: Context): Result<String> =
         get(activityContext, filterByAuthorized = false, autoSelect = false)
 
-    /** Silent re-auth (no UI); safe to call off the main thread with the app context. */
-    override suspend fun silentSignIn(): Result<String> =
-        get(appContext, filterByAuthorized = true, autoSelect = true)
+    /** Silent re-auth; safe to call off the main thread with the app context.
+     *
+     *  Reuses the held token while it is still fresh -- no Credential Manager call, and
+     *  therefore no "Oturumunuz açılıyor" sheet. `force` skips the reuse: the 401 retry
+     *  must mint a new one, because a 401 means the token is bad whatever `exp` says. */
+    override suspend fun silentSignIn(force: Boolean): Result<String> {
+        if (!force) {
+            val held = cached()
+            if (isIdTokenFresh(held, nowEpochSeconds())) return Result.success(held!!)
+        }
+        return get(appContext, filterByAuthorized = true, autoSelect = true)
+    }
 
     private suspend fun get(
         context: Context,
@@ -84,6 +116,7 @@ class AuthManager(private val appContext: Context) : AuthClient {
         ) {
             val idToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
             token = idToken
+            tokenStore.write(idToken)
             Result.success(idToken)
         } else {
             Result.failure(IllegalStateException("Beklenmeyen kimlik türü"))

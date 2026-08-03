@@ -307,6 +307,13 @@ class VoiceSession(
 
         override fun onPartialResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
+            // The guard covers PARTIALS too. Only the onset and the final were gated, so
+            // while Jarvis spoke the recognizer's running hypothesis -- his own words,
+            // off the loudspeaker -- was drawn as Kadir's dimmed bubble (saha, S23,
+            // 2026-08-03: "selam kadir iyiyim teşekkürler sanırım ses tanıma" appeared
+            // under Jarvis's own reply). Nothing was sent anywhere, but seeing your
+            // assistant put words in your mouth reads as a much worse bug than it is.
+            if (onsetDuringJarvisSpeech || echoGuardActive()) return
             _state.update { it.copy(partialText = text) }
         }
 
@@ -452,9 +459,20 @@ class VoiceSession(
     private fun handleServerEvent(gen: Int, event: VoiceServerEvent?) {
         when (event) {
             is VoiceServerEvent.Transcript -> {
-                val merged = appendLine(_state.value, event.role, event.text)
-                turnBoundary = false
-                _state.update { it.copy(transcript = merged) }
+                // A "jarvis" transcript row is a DUPLICATE of the jarvis_text that came
+                // immediately before it: _serve_turn sends both for the same reply, one
+                // to be spoken and one "for the UI history". Rendering both drew every
+                // answer TWICE, merged into a single bubble because the role and the turn
+                // boundary matched (saha, S23, 2026-08-03 -- Kadir's screenshot).
+                //
+                // Dropped HERE rather than fixed on the server, deliberately: the client
+                // must be right against the server that is DEPLOYED, not only against the
+                // one on this branch. Rows for any other role still render.
+                if (event.role != "jarvis") {
+                    val merged = appendLine(_state.value, event.role, event.text)
+                    turnBoundary = false
+                    _state.update { it.copy(transcript = merged) }
+                }
             }
             is VoiceServerEvent.JarvisText -> {
                 // The speaking run starts at the FIRST utterance of a reply; a reply

@@ -361,22 +361,38 @@ class VoiceSessionTest {
      * into one line; a role change starts a new line.
      */
     @Test
-    fun transcriptFragments_fromSameRole_mergeIntoOneLine() = runTest {
+    fun theProductionTurn_drawsTheReplyExactlyOnce() = runTest {
+        // Kadir's screenshot (S23, 2026-08-03): every answer appeared TWICE inside one
+        // bubble. _serve_turn sends jarvis_text ("speak this") AND transcript("jarvis")
+        // ("show this") for the same reply, and the client rendered both -- merged into
+        // a single line because the role and the turn boundary matched.
         val f = Fixture(backgroundScope)
         f.session.start()
         f.transport.listener!!.onOpen()
 
-        f.transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"Merhaba"}""")
-        f.transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"Kadir!"}""")
+        f.serveTurn("Selam Kadir! İyiyim, teşekkürler.")
+
+        assertEquals(
+            listOf(TranscriptLine("jarvis", "Selam Kadir! İyiyim, teşekkürler.")),
+            f.session.state.value.transcript,
+        )
+    }
+
+    @Test
+    fun transcriptFragments_fromANonJarvisRole_stillMergeIntoOneLine() = runTest {
+        // The merging rule itself is unchanged -- only the duplicate jarvis echo is
+        // dropped. Any other role still merges consecutive fragments into one bubble.
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
         f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"selam"}""")
         f.transport.listener!!.onText("""{"type":"transcript","role":"user","text":"jarvis"}""")
-        f.transport.listener!!.onText("""{"type":"transcript","role":"jarvis","text":"Buyur"}""")
 
-        val lines = f.session.state.value.transcript
-        assertEquals(3, lines.size)
-        assertEquals("jarvis" to "Merhaba Kadir!", lines[0].role to lines[0].text)
-        assertEquals("user" to "selam jarvis", lines[1].role to lines[1].text)
-        assertEquals("jarvis" to "Buyur", lines[2].role to lines[2].text)
+        assertEquals(
+            listOf(TranscriptLine("user", "selam jarvis")),
+            f.session.state.value.transcript,
+        )
     }
 
     /** Review Minor #8: two consecutive USER turns are separate utterances — a

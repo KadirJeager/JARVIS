@@ -52,7 +52,9 @@ class AppContainer(
     private val apis: ApiSet = NetworkModule.createApis(
         tokenProvider = { authManager.currentToken() },
         // Runs on OkHttp's background thread, so blocking here is fine.
-        tokenRefresher = { runBlocking { authManager.silentSignIn().getOrNull() } },
+        // force=true: a 401 means the held token is bad no matter what its `exp`
+        // claims, so this path must bypass the freshness reuse and actually mint.
+        tokenRefresher = { runBlocking { authManager.silentSignIn(force = true).getOrNull() } },
     ),
     // Swappable so a test can say "this device has signed in before" and assert the boot
     // path actually skips the splash — otherwise only the ViewModel would be pinned, and
