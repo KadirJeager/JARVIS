@@ -66,6 +66,22 @@ NO_EXECUTOR_OUTCOME = "bu araç onaydan sonra çalıştırılamıyor (yürütüc
 # (tool_args, user_id) -> Türkçe sonuç metni
 Executor = Callable[[dict, str], str]
 
+# Onaydan sonra çalıştırılabilecek araçların ALLOWLIST'i (spec §6). Bu modül
+# `tools`'u BİLEREK import etmez: kayıt ters yönde, `tools.py`'nin sonunda
+# yapılır (app/tools.py: register_executor("cancel_reminder", ...)). Aksi hâlde
+# approvals -> tools -> reminders/policy -> approvals döngüsü kurulurdu ve bu
+# modül test edilemez hâle gelirdi.
+EXECUTORS: dict[str, Executor] = {}
+
+
+def register_executor(name: str, fn: Executor) -> None:
+    """Bir aracı onay-sonrası yürütülebilir olarak kaydeder.
+
+    İsim `approvals` dokümanındaki `tool_name` ile aynı olmalıdır; kayıtlı
+    olmayan isim decide() içinde `failed` olur (allowlist)."""
+    EXECUTORS[name] = fn
+    logging.info("approvals: yürütücü kaydedildi tool=%s", name)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -200,11 +216,16 @@ def get(db, approval_id: str, user_id: str) -> dict | None:
 
 
 def decide(db, approval_id: str, user_id: str, decision: str,
-           executors: dict[str, Executor], now_fn=_now) -> dict:
+           executors: dict[str, Executor] | None = None, now_fn=_now) -> dict:
     """Bir onayı karara bağlar ve onaysa eylemi ÇALIŞTIRIR.
 
     Dönen dict: {status, outcome, already}. `already=True`, bu çağrının kararı
     vermediği (başkası verdi / süre verdi) anlamına gelir; yürütücü çağrılmaz.
+
+    `executors` VERİLMEZSE modül kayıt defteri (EXECUTORS) kullanılır — üretim
+    yolu budur. Açıkça `{}` geçmek "hiçbir yürütücü yok" demektir ve kayıt
+    defterine SESSİZCE düşmez: testlerin izolasyonu buna bağlıdır (None ile {}
+    ayrımı bilinçlidir).
 
     Sıra sözleşmedir, gevşetilemez:
     oku → sahiplik → status pending mi → SÜRE → claim create() → status yaz →
@@ -214,6 +235,8 @@ def decide(db, approval_id: str, user_id: str, decision: str,
     """
     if decision not in DECISIONS:
         raise ValueError(f"geçersiz karar: {decision!r} (beklenen: {DECISIONS})")
+    if executors is None:
+        executors = EXECUTORS
 
     ref = db.collection(COLLECTION).document(approval_id)
     snap = ref.get()

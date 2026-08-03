@@ -66,10 +66,11 @@ def test_list_reminders_sorted_by_due_at():
 def _seed(db, text, due_at, status="pending"):
     """dispatch testleri için doğrudan koleksiyona hatırlatma yazar
     (set_reminder geçmişi reddettiğinden 'due' vakası ancak böyle kurulur)."""
-    db.collection("reminders").add({
+    _, ref = db.collection("reminders").add({
         "text": text, "due_at": due_at, "status": status,
         "created_at": _now(), "sent_at": None, "fcm_result": None,
     })
+    return ref.id
 
 
 def test_dispatch_due_sends_only_due_and_marks_sent():
@@ -96,6 +97,91 @@ def test_dispatch_due_failure_keeps_pending_and_records_error():
     assert out["sent"] == 0 and out["failed"] == 1
     doc = list(db.collection("reminders").stream())[0].to_dict()
     assert doc["status"] == "pending" and doc["fcm_result"]["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# reminders.cancel (Faz Y3, Görev 2) — onaydan sonra çalışan tek kırmızı eylem
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_marks_cancelled_and_stamps_time():
+    db = FakeDB()
+    reminder_id = _seed(db, "su iç", _future(2))
+
+    out = reminders.cancel(db, reminder_id, now_fn=_now)
+
+    assert "iptal edildi" in out and "su iç" in out
+    d = db.collection("reminders").document(reminder_id).get().to_dict()
+    assert d["status"] == "cancelled"
+    assert d["cancelled_at"] == _now()
+
+
+def test_cancel_unknown_id_returns_turkish_error_and_writes_nothing():
+    db = FakeDB()
+    reminder_id = _seed(db, "duruyor", _future(2))
+
+    out = reminders.cancel(db, "yok-boyle-bir-id", now_fn=_now)
+
+    assert out.startswith("Hata")
+    # Hiçbir şey yazılmadı: ne yeni doküman, ne de mevcut olanda bir değişiklik.
+    docs = list(db.collection("reminders").stream())
+    assert len(docs) == 1
+    d = db.collection("reminders").document(reminder_id).get().to_dict()
+    assert d["status"] == "pending" and "cancelled_at" not in d
+
+
+def test_cancel_is_idempotent_on_already_cancelled():
+    db = FakeDB()
+    reminder_id = _seed(db, "su iç", _future(2))
+    reminders.cancel(db, reminder_id, now_fn=_now)
+
+    out = reminders.cancel(db, reminder_id, now_fn=lambda: _future(1))
+
+    assert "zaten iptal" in out
+    d = db.collection("reminders").document(reminder_id).get().to_dict()
+    assert d["status"] == "cancelled"
+    assert d["cancelled_at"] == _now()  # ikinci çağrı damgayı EZMEZ
+
+
+def test_cancel_refuses_a_sent_reminder():
+    """Gönderilmiş bir hatırlatma iptal EDİLEMEZ — geçmiş geri alınamaz."""
+    db = FakeDB()
+    reminder_id = _seed(db, "gitti", _past(1), status="sent")
+
+    out = reminders.cancel(db, reminder_id, now_fn=_now)
+
+    assert "gönderil" in out.lower()
+    d = db.collection("reminders").document(reminder_id).get().to_dict()
+    assert d["status"] == "sent" and "cancelled_at" not in d
+
+
+def test_cancel_rejects_blank_id_without_touching_firestore():
+    class BoomDB:
+        def collection(self, name):
+            raise AssertionError("boş id için Firestore'a dokunulmamalı")
+
+    assert reminders.cancel(BoomDB(), "  ", now_fn=_now).startswith("Hata")
+
+
+def test_cancelled_reminder_leaves_the_pending_list():
+    db = FakeDB()
+    reminder_id = _seed(db, "gidecek", _future(2))
+    _seed(db, "kalacak", _future(3))
+
+    reminders.cancel(db, reminder_id, now_fn=_now)
+
+    assert [r["text"] for r in reminders.list_reminders(db)["hatirlatmalar"]] == ["kalacak"]
+
+
+def test_cancelled_reminder_is_never_dispatched():
+    db = FakeDB()
+    reminder_id = _seed(db, "iptal", _past(1))
+    reminders.cancel(db, reminder_id, now_fn=_now)
+    sent = []
+
+    out = reminders.dispatch_due(db, lambda _db, r: sent.append(r["text"]) or {"ok": True}, now_fn=_now)
+
+    assert out == {"handled": True, "sent": 0, "failed": 0} and sent == []
 
 
 # ---------------------------------------------------------------------------

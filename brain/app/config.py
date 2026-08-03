@@ -133,6 +133,13 @@ TOOL_ZONES = {
     # Reminders (§4.4, Faz Y2.4): sarı bölge ("yap + bildir") ve yeşil bölge (salt okuma)
     "set_reminder": ZONE_YELLOW,
     "list_reminders": ZONE_GREEN,
+    # cancel_reminder (Faz Y3, spec §2): onay merkezinin ilk GERÇEK kırmızı
+    # aracı — §9'un "bir şey silme" örneğinin en küçük, en zararsız hâli.
+    # Bilinçli olarak muhafazakâr: §9 "eşikler konfigürasyondur; güven arttıkça
+    # gevşetilebilir — kodda, sohbette değil". Mekanizma oturduktan sonra sarıya
+    # alınabilir; o karar bu satırın değiştirilmesidir, modelin ikna edilmesi
+    # değil.
+    "cancel_reminder": ZONE_RED,
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 

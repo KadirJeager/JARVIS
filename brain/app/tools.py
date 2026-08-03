@@ -5,7 +5,8 @@ import re
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import consult, reminders, repo_watch, speaker_history, speaker_store, vitals, voice_trust
+from . import (approvals, consult, reminders, repo_watch, speaker_history, speaker_store,
+               vitals, voice_trust)
 from .memory import Memory
 
 _memory: Memory | None = None
@@ -222,7 +223,37 @@ def list_reminders() -> dict:
         return {"hata": "Hatırlatmalar şu an okunamıyor"}
 
 
+def cancel_reminder(reminder_id: str) -> str:
+    """Bekleyen bir hatırlatmayı iptal eder. reminder_id, list_reminders'ın döndürdüğü ID'dir. KIRMIZI bölge: bu araç bir kayıt siler, bu yüzden Kadir'in ONAYINI gerektirir — çağırdığında bir onay kartı oluşur ve iptal ancak Kadir onayladıktan sonra gerçekleşir. Gönderilmiş bir hatırlatma iptal edilemez."""
+    # Bu gövde SAVUNMA amaçlıdır, üretim yolu değildir: kırmızı bölge
+    # before_tool_callback'i (app/policy.py) çağrıyı buraya varmadan keser ve
+    # yerine bir onay kartı oluşturur. Gövdeye ulaşılıyorsa politika bağlantısı
+    # kopmuş demektir — o hâlde araç hatırlatmaya DOKUNMAZ (fail-closed) ve
+    # durumu gözlem olarak bildirir. Gerçek iptal approvals.decide() içinden,
+    # aşağıdaki yürütücü üzerinden çalışır.
+    logging.warning("cancel_reminder: politika kesmeden gövdeye ulaşıldı id=%r — iptal YAPILMADI",
+                    reminder_id)
+    return "Bu araç yalnızca Kadir'in onayından sonra çalışır."
+
+
+def _execute_cancel_reminder(tool_args: dict, user_id: str) -> str:
+    """`cancel_reminder`'ın onay-sonrası yürütücüsü: (tool_args, user_id) -> metin.
+
+    db, çağrı anında modül tekili `_memory.db`'den okunur — bu dosyadaki her
+    araç gövdesinin zaten kullandığı desen. Alternatif (yürütücüye db enjekte
+    etmek) kayıt defterini bir fabrikaya çevirir ve `main._init()` sırasına bağlı
+    bir kurulum adımı daha ekler; `_memory` ise `tools.init(memory)` ile zaten
+    kurulmuş oluyor. `user_id` şu an kullanılmıyor: `reminders` koleksiyonu tek
+    kullanıcılıdır ([[kapsam-tek-kullanici]]); sahiplik sınırı bir üst katmanda,
+    approvals.decide()'ın sahiplik kontrolündedir.
+    """
+    return reminders.cancel(_memory.db, str((tool_args or {}).get("reminder_id", "")))
+
+
+approvals.register_executor("cancel_reminder", _execute_cancel_reminder)
+
+
 ALL_TOOLS = [get_user_profile, update_user_profile, remember_fact, add_lesson, search_memory,
              get_speaker_status, watch_repo, unwatch_repo, list_watched_repos, get_repo_updates,
              consult.consult_gemini, consult.consult_claude, check_my_vitals,
-             set_reminder, list_reminders]
+             set_reminder, list_reminders, cancel_reminder]

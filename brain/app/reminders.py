@@ -2,7 +2,13 @@
 
 Model (Firestore `reminders` koleksiyonu): her hatırlatma tek doküman —
 {text: str, due_at: str (ISO UTC), status: "pending"|"sent"|"cancelled",
- created_at: str, sent_at: str|None, fcm_result: dict|str|None}.
+ created_at: str, sent_at: str|None, cancelled_at: str|None,
+ fcm_result: dict|str|None}.
+
+`cancel()` (Faz Y3) bu modülün tek YIKICI işlemidir: kaydı silmez, `cancelled`
+damgalar — geçmiş okunabilir kalsın diye. Kırmızı bölgededir ve normal akışta
+yalnızca Kadir'in onayından sonra, `approvals.decide()` üzerinden çağrılır
+(app/tools.py'deki yürütücü kaydı).
 """
 import logging
 from datetime import datetime, timezone
@@ -64,6 +70,43 @@ def set_reminder(db, text: str, due_at: str, now_fn=_now) -> str:
     _, ref = db.collection(REMINDERS_COLLECTION).add(doc)
     logging.info("reminders: set_reminder id=%s text=%r due_at=%s", ref.id, text, due_at_utc)
     return f"Hatırlatma kuruldu: '{text.strip()}' ({due_at_utc}) [ID: {ref.id}]"
+
+
+def cancel(db, reminder_id: str, now_fn=_now) -> str:
+    """Bekleyen bir hatırlatmayı iptal eder; Türkçe sonuç metni döner.
+
+    Modül deseni (set_reminder ile aynı): exception FIRLATMAZ, gözlem döner —
+    bu metin hem modele hem de onay kaydının `outcome` alanına gider.
+
+    Kayıt silinmez, `status=cancelled` + `cancelled_at` damgalanır: iptal de bir
+    olaydır, geçmişten kazınmaz. Üç durum ayrı ayrı ele alınır:
+    - yoksa: hata metni, HİÇBİR yazma yapılmaz (var olmayan id'ye doküman
+      yaratmak — Firestore'da set() bunu sessizce yapar — iptali bir yazma
+      aracına çevirirdi);
+    - zaten `cancelled`: idempotent, ilk damga korunur (çift dokunuş, ör. push
+      + kuyruk senkronu, damgayı ileri kaydırmasın);
+    - `sent`: iptal EDİLEMEZ — bildirim gitmiştir, geçmiş geri alınamaz.
+    """
+    if not isinstance(reminder_id, str) or not reminder_id.strip():
+        return "Hata: Hatırlatma ID'si gerekli."
+
+    ref = db.collection(REMINDERS_COLLECTION).document(reminder_id.strip())
+    snap = ref.get()
+    if not snap.exists:
+        return f"Hata: '{reminder_id.strip()}' kimlikli bir hatırlatma bulunamadı."
+
+    d = snap.to_dict()
+    text = d.get("text", "")
+    status = d.get("status")
+
+    if status == STATUS_CANCELLED:
+        return f"'{text}' hatırlatması zaten iptal edilmişti."
+    if status == STATUS_SENT:
+        return f"'{text}' hatırlatması zaten gönderilmiş; gönderilmiş bir hatırlatma iptal edilemez."
+
+    ref.set({"status": STATUS_CANCELLED, "cancelled_at": now_fn()}, merge=True)
+    logging.info("reminders: cancel id=%s text=%r", reminder_id.strip(), text)
+    return f"Hatırlatma iptal edildi: '{text}'"
 
 
 def list_reminders(db) -> dict:

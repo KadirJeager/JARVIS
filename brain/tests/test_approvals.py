@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-from app import approvals
+from app import approvals, config, reminders, tools
+from app.memory import Memory
 from tests.fakes import FakeDB
 
 NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
@@ -384,3 +385,117 @@ def test_expire_due_leaves_decided_approvals_alone():
 
     assert out["expired"] == 0
     assert _doc(db, approval_id)["status"] == approvals.STATUS_REJECTED
+
+
+# ---------------------------------------------------------------------------
+# Yürütücü kayıt defteri + ilk gerçek kırmızı araç (Görev 2)
+# ---------------------------------------------------------------------------
+
+
+def _seed_reminder(db, text="su iç", status="pending"):
+    _, ref = db.collection(reminders.REMINDERS_COLLECTION).add({
+        "text": text, "due_at": _at(120), "status": status,
+        "created_at": _now(), "sent_at": None, "fcm_result": None,
+    })
+    return ref.id
+
+
+def test_register_executor_fills_the_default_registry():
+    def noop(tool_args, user_id):
+        return "tamam"
+
+    original = dict(approvals.EXECUTORS)
+    try:
+        approvals.register_executor("deneme_araci", noop)
+        assert approvals.EXECUTORS["deneme_araci"] is noop
+    finally:
+        approvals.EXECUTORS.clear()
+        approvals.EXECUTORS.update(original)
+
+
+def test_decide_falls_back_to_the_module_registry_when_no_executors_passed():
+    db = FakeDB()
+    approval_id = _request(db)
+    ex = CountingExecutor(result="kayıt defterinden çalıştı")
+
+    original = dict(approvals.EXECUTORS)
+    try:
+        approvals.register_executor("cancel_reminder", ex)
+        out = approvals.decide(db, approval_id, USER, "approved", now_fn=_now)
+    finally:
+        approvals.EXECUTORS.clear()
+        approvals.EXECUTORS.update(original)
+
+    assert out["status"] == approvals.STATUS_APPROVED
+    assert out["outcome"] == "kayıt defterinden çalıştı"
+    assert len(ex.calls) == 1
+
+
+def test_explicit_empty_executors_still_means_empty_not_the_registry():
+    """`{}` bilinçli bir "hiçbir yürütücü yok" ifadesidir; varsayılan kayıt
+    defterine SESSİZCE düşmez — yoksa bir test kendi izolasyonunu kaybeder."""
+    db = FakeDB()
+    approval_id = _request(db)
+
+    out = approvals.decide(db, approval_id, USER, "approved", {}, now_fn=_now)
+
+    assert out["status"] == approvals.STATUS_FAILED
+    assert "yürütücü kayıtlı değil" in out["outcome"]
+
+
+def test_registered_cancel_reminder_executor_really_cancels_the_reminder():
+    """Uçtan uca: onay verildiğinde kayıt defterindeki yürütücü gerçekten
+    `reminders.cancel`'a düşer ve Firestore'daki hatırlatma iptal olur."""
+    db = FakeDB()
+    tools.init(Memory(db))
+    reminder_id = _seed_reminder(db, "su iç")
+    approval_id = _request(db, tool_args={"reminder_id": reminder_id})
+
+    out = approvals.decide(db, approval_id, USER, "approved", now_fn=_now)
+
+    assert out["status"] == approvals.STATUS_APPROVED
+    assert "iptal edildi" in out["outcome"] and "su iç" in out["outcome"]
+    d = db.collection(reminders.REMINDERS_COLLECTION).document(reminder_id).get().to_dict()
+    assert d["status"] == reminders.STATUS_CANCELLED
+
+
+def test_cancel_reminder_executor_reports_missing_reminder_as_observation():
+    """İlke 4: yürütücü fırlatmaz, gözlem döner — onay `approved` kalır ama
+    outcome hatayı taşır, Kadir ne olduğunu görür."""
+    db = FakeDB()
+    tools.init(Memory(db))
+    approval_id = _request(db, tool_args={"reminder_id": "yok-boyle-bir-id"})
+
+    out = approvals.decide(db, approval_id, USER, "approved", now_fn=_now)
+
+    assert out["outcome"].startswith("Hata")
+
+
+def test_cancel_reminder_tool_is_red_zone():
+    assert config.TOOL_ZONES["cancel_reminder"] == config.ZONE_RED
+
+
+def test_cancel_reminder_tool_is_wired_into_all_tools():
+    """Üretim bağlantısı: model ancak ALL_TOOLS'taki aracı görebilir."""
+    assert tools.cancel_reminder in tools.ALL_TOOLS
+
+
+def test_cancel_reminder_tool_body_is_defensive_only():
+    """Gövde savunma amaçlıdır: kırmızı bölge callback'i çağrıyı zaten önce
+    keser. Buraya ULAŞILIRSA (politika bağlantısı kopmuşsa) araç hatırlatmayı
+    silmez, onaya işaret eden bir gözlem döner."""
+    db = FakeDB()
+    tools.init(Memory(db))
+    reminder_id = _seed_reminder(db, "dokunulmayacak")
+
+    out = tools.cancel_reminder(reminder_id)
+
+    assert "onay" in out.lower()
+    d = db.collection(reminders.REMINDERS_COLLECTION).document(reminder_id).get().to_dict()
+    assert d["status"] == reminders.STATUS_PENDING
+
+
+def test_instruction_tells_the_model_to_wait_for_the_approval_card():
+    from app.agent import INSTRUCTION
+
+    assert "onay kartı" in INSTRUCTION
