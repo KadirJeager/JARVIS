@@ -89,6 +89,9 @@ def _decide(zone: str, trust_level: str) -> str:
 
 TrustProvider = Callable[[Any], VoiceSignals | None]
 
+# (tool_name, args, tool_context) -> modele gidecek Türkçe metin.
+ApprovalSink = Callable[[str, dict, Any], str]
+
 
 def _count_tool_call(audit: AuditWriter) -> None:
     """North Star §4.5: allow kararlarını vitals/counters'a sayar (best effort).
@@ -123,12 +126,47 @@ def _voice_signals(trust_provider: TrustProvider | None, tool_context) -> VoiceS
         return None
 
 
-def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | None = None):
+RED_BLOCK_TEMPLATE = (
+    "POLİTİKA ENGELİ: '{tool_name}' kırmızı bölgede — onaysız çalıştırılamaz. "
+    "Kadir'e ne yapmak istediğini söyle ve onay iste."
+)
+
+
+def _red_block_text(tool_name: str, args: dict[str, Any],
+                    tool_context, approval_sink: "ApprovalSink | None") -> str:
+    """Kırmızı bölge engelinin modele dönecek metni (spec §5, Faz Y3).
+
+    `approval_sink` YOKSA metin Y3 öncesiyle BİREBİR aynıdır — guest_gate ve
+    sink'siz kurulan her callback bu yoldan geçer.
+
+    Sink varsa bir onay kaydı kurar ve "kart gönderildi" metnini döndürür. Sink
+    FIRLARSA eski metne düşülür: onayın kurulamaması bir aracın çalışmasına ASLA
+    yol açmaz (fail-closed). Her iki dalda da bu fonksiyonun dönüşü bir METİNDİR,
+    yani callback None DEĞİL bir sonuç döndürür ve ADK aracı çalıştırmaz."""
+    if approval_sink is not None:
+        try:
+            return approval_sink(tool_name, args, tool_context)
+        except Exception:
+            logging.exception(
+                "policy: onay kartı oluşturulamadı tool=%s -- kırmızı engel metnine "
+                "düşülüyor (araç YİNE çalışmıyor)", tool_name)
+    return RED_BLOCK_TEMPLATE.format(tool_name=tool_name)
+
+
+def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | None = None,
+                         approval_sink: ApprovalSink | None = None):
     """`trust_provider` is how voice identity reaches the policy matrix: ONLY
     the voice runner's agent is built with one (main._init_voice), so the text
     runner's callback is structurally incapable of seeing voice trust and the
     /api/chat path keeps its exact previous behaviour. See voice_trust.py for
-    why the signals cannot simply ride ADK session state."""
+    why the signals cannot simply ride ADK session state.
+
+    `approval_sink` (Faz Y3, spec §5) is the same idea one layer up: it turns a
+    RED block into a queued approval card. It is passed ONLY by the text and
+    voice runners (main._init / main._init_voice) -- never by the guest gate,
+    which does not use this factory at all (§4.9: guests never reach RED). Left
+    None -- as every other caller does -- the RED branch keeps its exact
+    pre-Y3 text, and the tool is blocked exactly as before."""
 
     def policy_callback(tool, args: dict[str, Any], tool_context) -> dict[str, Any] | None:
         zone = check_zone(tool.name)
@@ -157,10 +195,7 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
             # Sayaç yazımı da asla aracın önünü kesmez — logla, geç.
             _count_tool_call(audit)
         if decision == "block":
-            return {"result": (
-                f"POLİTİKA ENGELİ: '{tool.name}' kırmızı bölgede — onaysız çalıştırılamaz. "
-                "Kadir'e ne yapmak istediğini söyle ve onay iste."
-            )}
+            return {"result": _red_block_text(tool.name, args, tool_context, approval_sink)}
         if decision == "confirm":
             return {"result": (
                 f"GÜVEN DÜŞÜK: '{tool.name}' şu an düşük-güven bağlamında (kimlik doğrulanmadı). "
