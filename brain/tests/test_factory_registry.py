@@ -5,8 +5,18 @@ Taşıyıcı pimler:
 - TEMPLATES kayıt defterini GÖLGELER (derleme anı her zaman kazanır).
 - revoked/bozuk doküman fail-closed: spawn bilinmeyen şablon menüsüne düşer.
 - Menü iki kaynağı etiketleriyle listeler.
+- ÜRETİM okuma yolu (`_registry_template`/`_registry_menu` -> `agent_registry.get`/
+  `list_granted` -> gerçek `tools._memory.db`) en az bir kez UÇTAN UCA koşar --
+  yukarıdaki testlerin çoğu `registry_lookup`/`registry_menu` enjekte ederek bu
+  yolu BAYPAS EDER (review bulgusu 2026-08-04: `agent_registry.get`'e ters
+  argüman sırası ya da `doc.get("status")` karşılaştırmasının tersi, tüm süit
+  yeşilken üretimde her kayıt-defteri spawn'ını sessizce kırardı).
 """
+import pytest
+
 from app import agent_registry, factory
+from app import tools as tools_mod
+from app.memory import Memory
 from tests.fakes import FakeDB
 from tests.test_factory import FakeAudit, FakeEvent, FakeRunner, _runner_factory
 
@@ -105,3 +115,92 @@ def test_the_menu_lists_both_sources_with_labels():
     assert kaynaklar == {"sevkiyat", "kayit_defteri"}
     adlar = [s["ad"] for s in reply["kullanilabilir_sablonlar"]]
     assert "ozel_arastirmaci" in adlar and "arastirmaci" in adlar
+
+
+# ---------------------------------------------------------------------------
+# ÜRETİM YOLU — GERÇEK `agent_registry.get`/`list_granted` + `tools._memory.db`
+# (yukarıdaki testler `registry_lookup`/`registry_menu` ikizleriyle bu okuma
+# yolunu hiç koşturmuyordu; review bulgusu bunu kapatır).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _registry_db():
+    """`tools._memory`'i gerçek bir FakeDB'ye bağlar (test_agent_proposals.py'nin
+    `_db()` deseni), böylece `_registry_template`/`_registry_menu` PRODUCTION
+    varsayılanlarıyla (enjeksiyonsuz) koşar. `tools._memory` süreç-geneli bir
+    modül tekili olduğu için önceki değeri saklayıp testten sonra geri
+    yüklüyoruz -- aksi hâlde bu dosyanın son testinin durumu başka test
+    dosyalarına SIZAR (çalışma sırasına bağlı, kırılgan bir bağımlılık)."""
+    previous = tools_mod._memory
+    db = FakeDB()
+    tools_mod.init(Memory(db))
+    yield db
+    tools_mod._memory = previous
+
+
+def _grant_ozel_arastirmaci(db):
+    return agent_registry.grant(
+        db, name="ozel_arastirmaci", purpose="Özel araştırma.",
+        instruction="Sen özel bir araştırmacısın.", tool_names=["search_memory"],
+        max_steps=10, ttl_seconds=30, why="w", evidence="e", approval_id="ap1")
+
+
+async def test_a_really_granted_agent_spawns_through_the_real_registry_read(_registry_db):
+    """TAŞIYICI PİM (review bulgusu): `registry_lookup`/`registry_menu`
+    ENJEKTE EDİLMEZ -- `spawn` üretim varsayılanlarına (`_registry_template`)
+    düşer, o da `agent_registry.get(tools_mod._memory.db, ...)` ile GERÇEKTEN
+    okur. Yukarıdaki testlerin hiçbiri `agent_registry.get`i hiç çağırmıyordu."""
+    db = _registry_db
+    outcome = _grant_ozel_arastirmaci(db)
+    assert "yazıldı" in outcome
+
+    result = await factory.spawn(
+        "ozel_arastirmaci", "hedef", user_id=USER, audit=FakeAudit(),
+        model="fake-model", instance="i1",
+        runner_factory=_runner_factory(FakeRunner([FakeEvent("bitti")])),
+        clock=lambda: 0.0)
+
+    assert result["durum"] == factory.STATUS_OK
+    assert result["sablon"] == "ozel_arastirmaci"
+    assert result["sonuc"] == "bitti"
+
+
+async def test_a_really_revoked_agent_falls_through_to_the_unknown_template_menu(_registry_db):
+    """`_registry_template`'in `doc.get("status") != STATUS_GRANTED` dalını
+    GERÇEK bir revoke ile tetikler -- `registry_lookup=lambda name: None`
+    veren eski test bu dalı hiç koşturmuyordu, "bulunamadı" ile "revoked"i
+    ayırt edemiyordu."""
+    db = _registry_db
+    _grant_ozel_arastirmaci(db)
+    revoke_outcome = agent_registry.revoke(db, "ozel_arastirmaci")
+    assert "geri alındı" in revoke_outcome
+
+    result = await factory.spawn(
+        "ozel_arastirmaci", "hedef", user_id=USER, audit=FakeAudit(),
+        model="fake-model", instance="i1",
+        runner_factory=_runner_factory(FakeRunner([FakeEvent("x")])),
+        clock=lambda: 0.0)
+
+    assert result["durum"] == factory.STATUS_ERROR
+    assert "kullanilabilir_sablonlar" in result
+
+
+async def test_the_real_menu_merges_shipped_and_registry_sources(_registry_db):
+    """`_registry_menu()` GERÇEKTEN `agent_registry.list_granted`i çağırır ve
+    `spawn`'ın enjeksiyonsuz bilinmeyen-şablon yanıtı iki kaynağı da taşır."""
+    db = _registry_db
+    _grant_ozel_arastirmaci(db)
+
+    menu = factory._registry_menu()
+    assert any(d.get("name") == "ozel_arastirmaci" for d in menu)
+
+    result = await factory.spawn(
+        "hayalet", "hedef", user_id=USER, audit=FakeAudit(), model="fake-model",
+        instance="i1", runner_factory=_runner_factory(FakeRunner([FakeEvent("x")])),
+        clock=lambda: 0.0)
+
+    kaynaklar = {s.get("kaynak") for s in result["kullanilabilir_sablonlar"]}
+    assert kaynaklar == {"sevkiyat", "kayit_defteri"}
+    adlar = [s["ad"] for s in result["kullanilabilir_sablonlar"]]
+    assert "ozel_arastirmaci" in adlar
