@@ -6,11 +6,13 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.MaterialTheme
 import com.jarvis.wear.data.JarvisApi
 import com.jarvis.wear.data.TokenStore
@@ -18,6 +20,7 @@ import com.jarvis.wear.ui.ChatScreen
 import com.jarvis.wear.ui.ChatViewModel
 import com.jarvis.wear.ui.PairScreen
 import java.time.LocalDate
+import kotlinx.coroutines.cancel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,6 +48,17 @@ class MainActivity : ComponentActivity() {
  * (JVM testli) kalsın diye, "sakladığı token'ı silme" kararı Android tarafında (burada)
  * verilir. `clear()` sonrası `hasToken` akışı `false`'a düşer, `rootRoute` kendiliğinden
  * [Route.Pair]'e geçer -- ölü token'la sonsuza dek yeniden denemek yerine dürüst ekran.
+ *
+ * Task 5 review fix #2 (Finding 1): [ChatViewModel] burada `remember` ile YARATILIR ama
+ * [androidx.lifecycle.ViewModelStore]/`viewModel()` ile YÖNETİLMEZ -- bilinçli tercih:
+ * `viewModel()`'e geçmek, [Route.Chat] koluna yeniden girildiğinde (eşleştirme sonrası)
+ * AYNI eski örneği geri getirir -- üstünde hâlâ `needsPairing = true` duran bir örnek --
+ * ve efekt YENİ token'ı anında bir daha temizler (sonsuz döngü). `remember(api)` composition
+ * pozisyonuna bağlı: [Route.Chat] koludan ayrılıp (Pair'e düşünce) yeniden girildiğinde bu
+ * `when` dalı sıfırdan komposed edilir, dolayısıyla HER giriş taze `ChatState()`'li taze bir
+ * örnek alır -- döngü riski yok. Bunun bedeli: hiçbir çerçeve `onCleared()` çağırmaz, o yüzden
+ * [androidx.compose.runtime.DisposableEffect] ile `viewModelScope`'u elle iptal ediyoruz --
+ * aksi halde ekran Pair'e düşse bile devam eden bir `chat()` çağrısının coroutine'i sızar.
  */
 @Composable
 fun WearRoot(tokenStore: TokenStore, api: JarvisApi) {
@@ -55,11 +69,16 @@ fun WearRoot(tokenStore: TokenStore, api: JarvisApi) {
             Route.Pair -> PairScreen()
             Route.Chat -> {
                 // Oturum kimliği telefonun oturum düzeniyle aynı aile (spec §5); sunucu
-                // sanitize eder. `remember(api)`: WearApp tekil api örneği süresince aynı
+                // sanitize eder. `remember(api)`: bu `when` dalı komposed kaldığı sürece aynı
                 // ViewModel -- ekran yeniden komposed olsa da sohbet durumu (busy/son
-                // soru-cevap) hayatta kalır.
+                // soru-cevap) hayatta kalır. Dalın kendisi terk edilip yeniden girildiğinde
+                // (örn. needsPairing -> Pair -> yeniden eşleştir -> Chat) taze bir örnek
+                // yaratılır; bkz. fonksiyon KDoc'u.
                 val viewModel = remember(api) {
                     ChatViewModel(chat = api::chat, sessionId = "wear-" + LocalDate.now())
+                }
+                DisposableEffect(viewModel) {
+                    onDispose { viewModel.viewModelScope.cancel() }
                 }
                 val chatState by viewModel.state.collectAsState()
                 LaunchedEffect(chatState.needsPairing) {

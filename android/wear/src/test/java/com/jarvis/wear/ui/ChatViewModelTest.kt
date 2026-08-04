@@ -2,7 +2,9 @@ package com.jarvis.wear.ui
 
 import com.jarvis.wear.data.JarvisApiException
 import com.jarvis.wear.data.UnauthorizedException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -16,6 +18,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
     private val dispatcher = StandardTestDispatcher()
 
@@ -71,5 +74,18 @@ class ChatViewModelTest {
         v.send("bir"); v.send("iki")     // ilki daha bitmedi (dispatcher bekliyor)
         advanceUntilIdle()
         assertEquals(1, api.calls.size)
+    }
+
+    @Test fun `cancellation is rethrown, not reported as a generic error`() = runTest {
+        // JarvisApiTest'teki aynı sözleşmenin ChatViewModel karşılığı (Task 5 review fix):
+        // CancellationException genel `catch (e: Exception)`e düşüp "Beklenmeyen hata"ya
+        // dönüşmemeli. Yakalanıp state güncellenmeden yeniden fırlatıldığı için `busy` hiç
+        // `false`'a düşmez (ViewModel zaten kapanma sürecinde -- bkz. MainActivity'nin
+        // DisposableEffect'i) ve `error` asla set edilmez.
+        val api = FakeApi { throw CancellationException("iptal") }
+        val v = vm(api)
+        v.send("selam"); advanceUntilIdle()
+        assertNull(v.state.value.error)
+        assertTrue(v.state.value.busy)
     }
 }

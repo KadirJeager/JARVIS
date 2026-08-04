@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.jarvis.wear.data.JarvisApiException
 import com.jarvis.wear.data.UnauthorizedException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -43,6 +44,12 @@ class ChatViewModel(
                 _state.value = _state.value.copy(busy = false, needsPairing = true)
             } catch (e: JarvisApiException) {
                 _state.value = _state.value.copy(busy = false, error = e.userMessage)
+            } catch (e: CancellationException) {
+                // Yapısal eşzamanlılık (JarvisApi.chat ile aynı sözleşme, Task 5 review fix):
+                // ekran/ViewModel kapanıp bu coroutine iptal edildiğinde bu bir uygulama
+                // hatası DEĞİL -- olduğu gibi yukarı yükselmeli, yoksa "kullanıcı ekrandan
+                // ayrıldı" durumu sahte bir "Beklenmeyen hata" mesajına dönüşür.
+                throw e
             } catch (e: Exception) {
                 _state.value = _state.value.copy(busy = false, error = "Beklenmeyen hata; tekrar dene.")
             }
