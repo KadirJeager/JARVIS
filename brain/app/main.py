@@ -10,11 +10,11 @@ from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
-from . import approvals, auth, config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_manage, voice_trust
+from . import approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
-from .auth import require_scheduler, require_user
+from .auth import require_google_user, require_scheduler, require_user
 
 if TYPE_CHECKING:
     from .memory import Memory
@@ -633,6 +633,63 @@ async def fcm_register(req: FcmRegisterRequest, email: str = Depends(require_use
             status_code=502,
             detail="Bildirim kaydı şu an yapılamıyor (altyapı hatası). Az sonra tekrar dene.",
         )
+
+
+class DeviceTokenRequest(BaseModel):
+    device: str = Field(min_length=1)
+
+    @field_validator("device")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("device boş olamaz")
+        return v
+
+
+@app.post("/api/device-tokens")
+async def mint_device_token(req: DeviceTokenRequest,
+                            email: str = Depends(require_google_user)):
+    """Kalıcı cihaz token'ı basar (Wear W0, spec §4.2). Yalnız TAZE Google
+    oturumuyla: cihaz token'ı kendi soyunu yönetemez. Düz token YALNIZ bu
+    cevapta görünür."""
+    try:
+        _init()
+        return device_tokens.mint(_memory.db, email=email, device=req.device)
+    except Exception:
+        logging.exception("device-tokens: mint failed for user_id=%s", email)
+        raise HTTPException(
+            status_code=502,
+            detail="Cihaz token'ı şu an basılamıyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+
+
+@app.get("/api/device-tokens")
+async def list_device_tokens(email: str = Depends(require_google_user)):
+    try:
+        _init()
+        return {"tokens": device_tokens.list_tokens(_memory.db)}
+    except Exception:
+        logging.exception("device-tokens: list failed for user_id=%s", email)
+        raise HTTPException(
+            status_code=502,
+            detail="Cihaz token'ları şu an listelenemiyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+
+
+@app.delete("/api/device-tokens/{token_id}")
+async def revoke_device_token(token_id: str,
+                              email: str = Depends(require_google_user)):
+    try:
+        _init()
+        message = device_tokens.revoke(_memory.db, token_id)
+    except Exception:
+        logging.exception("device-tokens: revoke failed id=%s user_id=%s", token_id, email)
+        raise HTTPException(
+            status_code=502,
+            detail="Cihaz token'ı şu an iptal edilemiyor (altyapı hatası). Az sonra tekrar dene.",
+        )
+    return {"ok": True, "message": message}
 
 
 # --- Onay merkezi (Faz Y3, spec §9) ----------------------------------------
