@@ -10,8 +10,9 @@ import uuid
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import (approvals, consult, factory, reminders, repo_watch,
-               speaker_history, speaker_store, tool_registry, vitals, voice_trust)
+from . import (agent_registry, approvals, consult, factory, policy, reminders,
+               repo_watch, speaker_history, speaker_store, tool_registry, vitals,
+               voice_trust)
 from .memory import FirestoreAudit, Memory
 
 _memory: Memory | None = None
@@ -393,6 +394,128 @@ def _execute_tool_grant(tool_args: dict, user_id: str) -> str:
 approvals.register_executor(approvals.EXECUTOR_TOOL_GRANT, _execute_tool_grant)
 
 
+# -- Ajan fabrikası Kademe 2 (North Star §8.5, spec 2026-08-04) --------------
+#
+# Araç merdiveninin ajan-düzlemi izdüşümü: propose_agent yalnızca onay kurar,
+# _execute_agent_grant yalnızca onay sonrası çalışır. Ajan kayıt defterine
+# yazan TEK yer aşağıdaki yürütücüdür.
+
+AGENT_PROPOSAL_QUEUED = (
+    "ÖNERİ ONAYA GÖNDERİLDİ: kalıcı ajan '{name}' için Kadir'e onay kartı "
+    "oluşturuldu. Kadir'e öneriyi ve gerekçeni söyle, sonra BEKLE — aynı ajan "
+    "için ikinci bir kart oluşturma, kararı kart üzerinden verir."
+)
+
+
+def _agent_tool_names(tool_csv: str) -> list[str]:
+    """Virgüllü araç listesini ada çevirir (propose_tool.scopes ile aynı biçim:
+    onay tool_args'ı düz string taşır, yapıya kayıt anında çevrilir)."""
+    return [t.strip() for t in (tool_csv or "").split(",") if t.strip()]
+
+
+def propose_agent(name: str, purpose: str, instruction: str, tools: str, why: str,
+                  evidence: str, tool_context, max_steps: int = 24,
+                  ttl_seconds: int = 90) -> str:
+    """Tekrar eden bir iş için KALICI bir uzman ajan tanımını Kadir'in onayına
+    önerir. Kendi başına hiçbir şey kurmaz: yalnızca onay kartı oluşturur,
+    kararı Kadir verir. `name` yeni ajanın adı (sevkiyat şablonlarından farklı
+    olmalı); `purpose` menüde görünecek tek cümlelik Türkçe amaç; `instruction`
+    ajanın sistem talimatı (en fazla 500 karakter); `tools` virgülle ayrılmış
+    builtin araç adları (en fazla 8, kırmızı bölge araçları istenemez,
+    spawn_specialist istenemez); `why` Kadir'in kartta okuyacağı gerekçe;
+    `evidence` kanıt — hangi tekrar eden iş, kaç kez görüldü (zorunlu).
+    Onaydan sonra ajan spawn_specialist ile bu adla hemen çağrılabilir.
+    Bir ajanı önerdikten sonra BEKLE, kendin kurmaya çalışma."""
+    try:
+        tool_names = _agent_tool_names(tools)
+        problem = agent_registry.validate_definition(
+            name=name, purpose=purpose, instruction=instruction,
+            tool_names=tool_names, why=why, evidence=evidence,
+            max_steps=max_steps, ttl_seconds=ttl_seconds)
+        if problem:
+            return problem
+        name = name.strip()
+
+        db = _memory.db
+        existing = agent_registry.get(db, name)
+        if existing and existing.get("status") == agent_registry.STATUS_GRANTED:
+            return (f"'{name}' zaten ajan kayıt defterinde kayıtlı; "
+                    "yeni öneri gerekmiyor.")
+
+        session = tool_context.session
+        user_id, session_id = session.user_id, session.id
+        # find_pending_duplicate, list_pending DEĞİL -- propose_tool'daki gerekçe:
+        # MAX_PENDING kesmesi mükerrer kontrolünde kör nokta bırakır.
+        if approvals.find_pending_duplicate(db, user_id, name, {},
+                                            kind=approvals.KIND_AGENT_GRANT):
+            return (f"'{name}' için zaten Kadir'in kararını bekleyen bir öneri var; "
+                    "ikinci kart oluşturmadım.")
+
+        zone = agent_registry.display_zone(tool_names)
+        zone_lines = "\n".join(
+            f"  - {t} ({policy.check_zone(t)})" for t in tool_names)
+        approval_id = uuid.uuid4().hex
+        approvals.request(
+            db,
+            user_id=user_id,
+            kind=approvals.KIND_AGENT_GRANT,
+            title=f"Kalıcı ajan '{name}' kurulsun mu?",
+            detail=(f"Jarvis kalıcı bir uzman ajan öneriyor: {name} ({zone} bölge).\n"
+                    f"Amaç: {purpose}\n"
+                    f"Talimat (modele birebir gidecek metin):\n{instruction}\n"
+                    f"Araçlar:\n{zone_lines}\n"
+                    f"Tavanlar: {max_steps} adım / {ttl_seconds} sn\n"
+                    f"Gerekçe: {why}\n"
+                    f"Kanıt: {evidence}\n"
+                    "Onaylarsan ajan kayıt defterine yazılır ve spawn_specialist "
+                    "ile hemen çağrılabilir."),
+            tool_name=name,
+            tool_args={"name": name, "purpose": purpose, "instruction": instruction,
+                       "tools": ",".join(tool_names), "max_steps": str(max_steps),
+                       "ttl_seconds": str(ttl_seconds), "why": why,
+                       "evidence": evidence, "approval_id": approval_id},
+            zone=zone,
+            session_id=session_id,
+            doc_id=approval_id,
+        )
+        logging.info("propose_agent: öneri onaya düştü name=%s araclar=%s id=%s",
+                     name, ",".join(tool_names), approval_id)
+        return AGENT_PROPOSAL_QUEUED.format(name=name)
+    except Exception:
+        logging.exception("propose_agent: öneri oluşturulamadı name=%r", name)
+        return "Bu öneri şu an oluşturulamıyor; kalıcı ajan yolu geçici olarak kapalı."
+
+
+def _execute_agent_grant(tool_args: dict, user_id: str) -> str:
+    """`kind=agent_grant` onaylarının yürütücüsü (spec §5). AJAN KAYIT
+    DEFTERİNE YAZAN TEK YERDİR — `approvals.decide(..., "approved")` dışında
+    hiçbir yol buraya varmaz; grant içindeki validate_definition öneriyle
+    karar arasında dünyanın değişmiş olabileceğine karşı yeniden koşar
+    (_execute_tool_grant sözleşmesinin aynısı)."""
+    args = tool_args or {}
+    try:
+        max_steps = int(str(args.get("max_steps", "")))
+        ttl_seconds = int(str(args.get("ttl_seconds", "")))
+    except ValueError:
+        logging.warning("agent_grant: sayısal olmayan tavan tool_args=%r", args)
+        return "Ajan tavanları sayı değil; kayıt yazılmadı (öneri bozulmuş olabilir)."
+    return agent_registry.grant(
+        _memory.db,
+        name=str(args.get("name", "")),
+        purpose=str(args.get("purpose", "")),
+        instruction=str(args.get("instruction", "")),
+        tool_names=_agent_tool_names(str(args.get("tools", ""))),
+        max_steps=max_steps,
+        ttl_seconds=ttl_seconds,
+        why=str(args.get("why", "")),
+        evidence=str(args.get("evidence", "")),
+        approval_id=str(args.get("approval_id", "")),
+    )
+
+
+approvals.register_executor(approvals.EXECUTOR_AGENT_GRANT, _execute_agent_grant)
+
+
 # -- Ajan fabrikası Kademe 1 (North Star §8.5, Faz Y4.2) ---------------------
 
 
@@ -462,4 +585,5 @@ ALL_TOOLS = [_off_loop(f) for f in (
     # consult_claude BİLEREK YOK (4 Ağu): kurgu Kadir'in CLI'dan danışmasıydı,
     # ajanın araç seti değil — tests/test_consult.py'deki kaldırma testi pinler.
     consult.consult_gemini, check_my_vitals,
-    set_reminder, list_reminders, cancel_reminder, propose_tool, spawn_specialist)]
+    set_reminder, list_reminders, cancel_reminder, propose_tool, propose_agent,
+    spawn_specialist)]

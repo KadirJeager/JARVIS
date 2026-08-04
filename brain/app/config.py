@@ -145,6 +145,7 @@ TOOL_ZONES = {
     # YEŞİL, çünkü bir öneri kurmak zararsızdır — kayıt defterine yazmaz, hiçbir
     # yeteneği etkinleştirmez; asıl karar onay kartındadır ve onu Kadir verir.
     "propose_tool": ZONE_GREEN,
+    "propose_agent": ZONE_GREEN,
     # spawn_specialist (§8.5, Faz Y4.2): fabrika Kademe 1'in çağrı yüzeyi.
     # SARI ("yap + bildir"): koşar ve Kadir audit'te/raporda görür. Kırmızı
     # olsaydı her devir bir onay kartı isterdi (kalıphanenin amacı buharlaşır);
