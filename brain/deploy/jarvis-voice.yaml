@@ -28,7 +28,7 @@ spec:
       timeoutSeconds: 3600
       containers:
       - name: voice
-        image: gcr.io/your-gcp-project/jarvis-brain:gecefix4-21800b3
+        image: gcr.io/your-gcp-project/jarvis-brain:k2-67c1ab2
         ports:
         - containerPort: 8080
           name: http1
