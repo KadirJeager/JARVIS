@@ -53,6 +53,10 @@ KIND_TOOL_CALL = "tool_call"
 # onayın yürütülmesi = tool_registry.grant().
 KIND_TOOL_GRANT = "tool_grant"
 
+# Fabrika Kademe 2 (§8.5): "öneri onay merkezine düşer; Kadir onaylarsa kayıt
+# defterine kalıcı ajan olarak yazılır". Yürütülmesi = agent_registry.grant().
+KIND_AGENT_GRANT = "agent_grant"
+
 STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
@@ -79,12 +83,15 @@ Executor = Callable[[dict, str], str]
 # çağıramaz. _executor_key ayrıca bu ön eki taşıyan tool_name'leri açıkça
 # reddeder (kuşak + kemer).
 EXECUTOR_TOOL_GRANT = "kind:tool_grant"
+
+EXECUTOR_AGENT_GRANT = "kind:agent_grant"
+
 _EXECUTOR_KIND_PREFIX = "kind:"
 
-# Onaylandığında bir yürütücü koşan türler. Bu kümede OLMAYAN bir tür (§8.5'in
-# ileride gelecek `agent_spec`'i gibi) onaylanır ama yan etkisi yoktur — Y3'ün
-# "yürütülebilir tek tür tool_call" davranışının genelleştirilmiş hâli.
-EXECUTABLE_KINDS = (KIND_TOOL_CALL, KIND_TOOL_GRANT)
+# Onaylandığında bir yürütücü koşan türler. Bu kümede OLMAYAN bir tür onaylanır
+# ama yan etkisi yoktur — Y3'ün "yürütülebilir tek tür tool_call" davranışının
+# genelleştirilmiş hâli. (§8.5'in agent_spec öngörüsü Kademe 2 ile dolduruldu.)
+EXECUTABLE_KINDS = (KIND_TOOL_CALL, KIND_TOOL_GRANT, KIND_AGENT_GRANT)
 
 # Onaydan sonra çalıştırılabilecek araçların ALLOWLIST'i (spec §6). Bu modül
 # `tools`'u BİLEREK import etmez: kayıt ters yönde, `tools.py`'nin sonunda
@@ -167,6 +174,8 @@ def _executor_key(doc: dict) -> str | None:
     kind = doc.get("kind")
     if kind == KIND_TOOL_GRANT:
         return EXECUTOR_TOOL_GRANT
+    if kind == KIND_AGENT_GRANT:
+        return EXECUTOR_AGENT_GRANT
     tool_name = doc.get("tool_name")
     if isinstance(tool_name, str) and tool_name.startswith(_EXECUTOR_KIND_PREFIX):
         logging.warning("approvals: tool_call '%s' isim uzayını ihlal ediyor -- reddedildi",

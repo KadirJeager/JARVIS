@@ -562,3 +562,26 @@ def test_another_users_pending_card_is_never_a_duplicate():
     assert approvals.find_pending_duplicate(
         db, USER, "cancel_reminder", {"reminder_id": "r7"}
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# Kademe 2: kind=agent_grant (Fabrika K2 spec §5)
+# ---------------------------------------------------------------------------
+
+
+def test_agent_grant_is_an_executable_kind():
+    assert approvals.KIND_AGENT_GRANT in approvals.EXECUTABLE_KINDS
+
+
+def test_executor_key_resolves_agent_grant_to_its_namespaced_key():
+    key = approvals._executor_key({"kind": approvals.KIND_AGENT_GRANT,
+                                   "tool_name": "ozel_ajan"})
+    assert key == approvals.EXECUTOR_AGENT_GRANT == "kind:agent_grant"
+
+
+def test_a_tool_call_cannot_borrow_the_agent_grant_executor():
+    """kind: ön eki isim-uzayı sınırıdır — kendini 'kind:agent_grant' diye
+    adlandıran bir tool_call yürütücüyü ödünç alamaz (tool_grant pini ile aynı)."""
+    key = approvals._executor_key({"kind": approvals.KIND_TOOL_CALL,
+                                   "tool_name": "kind:agent_grant"})
+    assert key is None
