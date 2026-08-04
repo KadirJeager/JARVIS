@@ -4,7 +4,9 @@ Taşıyıcı pimler (test_tool_proposals ile aynı sınıf):
 - test_propose_agent_writes_nothing_to_the_registry: öneri yalnız kart kurar.
 - test_rejected_agent_grant_writes_nothing: onay olmadan kayıt olmaz.
 - decide(approved) yolu ÜRETİMİN GERÇEK DİZİSİDİR (tek olaylı kurulum değil).
+- test_signature_defaults_match_the_registry_constants: imza <-> sabit pini.
 """
+import inspect
 from types import SimpleNamespace
 
 from app import agent_registry, approvals, config, tools
@@ -163,6 +165,18 @@ def test_executor_survives_non_numeric_caps():
 def test_propose_agent_is_green_and_registered_as_a_tool():
     assert config.TOOL_ZONES["propose_agent"] == config.ZONE_GREEN
     assert wired_into_all_tools(tools.propose_agent)
+
+
+def test_signature_defaults_match_the_registry_constants():
+    """`tools.propose_agent` imzasındaki `max_steps=24`/`ttl_seconds=90`
+    literalleri ADK şeması yüzünden `agent_registry.DEFAULT_*` sabitlerine
+    REFERANS VEREMEZ (Python varsayılanları literal int olmalı) -- bu pin
+    testi ikisinin elle senkron tutulduğunu doğrular. `tools_mod.propose_agent`
+    modül-seviyesi SENKRON orijinaldir; `ALL_TOOLS` bunun `_off_loop` sarmalı
+    kopyasını taşır (bkz. tools.py ALL_TOOLS docstring'i)."""
+    sig = inspect.signature(tools.propose_agent)
+    assert sig.parameters["max_steps"].default == agent_registry.DEFAULT_MAX_STEPS
+    assert sig.parameters["ttl_seconds"].default == agent_registry.DEFAULT_TTL_SECONDS
 
 
 def test_backend_failure_is_an_observation():

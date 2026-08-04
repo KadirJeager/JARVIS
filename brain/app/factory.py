@@ -383,7 +383,9 @@ def _registry_menu() -> list[dict]:
     from . import tools as tools_mod
 
     try:
-        return agent_registry.list_granted(tools_mod._memory.db)
+        docs = agent_registry.list_granted(tools_mod._memory.db)
+        # Menü ile spawn AYNI süzgeci görsün — model döngüye girmesin.
+        return [d for d in docs if _template_from_doc(d) is not None]
     except Exception:
         logging.exception("factory: kayıt defteri menüsü okunamadı")
         return []

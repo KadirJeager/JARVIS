@@ -11,11 +11,12 @@ from app import agent_registry, config
 from tests.fakes import FakeDB
 
 CATALOG = {"search_memory", "get_user_profile", "list_reminders", "cancel_reminder",
-           "spawn_specialist"}
+           "spawn_specialist", "propose_tool", "propose_agent"}
 SHIPPED = {"arastirmaci", "arsivci", "nobetci"}
 ZONES = {"search_memory": config.ZONE_GREEN, "get_user_profile": config.ZONE_GREEN,
          "list_reminders": config.ZONE_GREEN, "cancel_reminder": config.ZONE_RED,
-         "spawn_specialist": config.ZONE_YELLOW}
+         "spawn_specialist": config.ZONE_YELLOW, "propose_tool": config.ZONE_GREEN,
+         "propose_agent": config.ZONE_GREEN}
 
 
 def _validate(**over):
@@ -42,9 +43,14 @@ def test_a_valid_definition_passes():
 @pytest.mark.parametrize("over,parca", [
     (dict(name=""), "boş"),
     (dict(name="   "), "boş"),
+    (dict(name="rapor derleyici"), "tanımlayıcı"),   # boşluk -- isidentifier() False
+    (dict(name="veri-analiz"), "tanımlayıcı"),       # tire -- isidentifier() False
+    (dict(name="x" * 65), "64"),                     # NAME_MAX aşımı
     (dict(name="arastirmaci"), "sevkiyat"),          # TEMPLATES gölgelenemez
     (dict(tool_names=[]), "araç"),
     (dict(tool_names=["spawn_specialist"]), "recursion"),
+    (dict(tool_names=["propose_tool"]), "öner"),
+    (dict(tool_names=["propose_agent"]), "öner"),
     (dict(tool_names=["uydurma_arac"]), "uydurma_arac"),
     (dict(tool_names=["cancel_reminder"]), "kırmızı"),
     (dict(tool_names=["search_memory"] * 9), "8"),   # MAX_TOOLS aşımı

@@ -82,13 +82,18 @@ sözleşmesinin aynısı). FIRLATMAZ; her ret Türkçe gözlem döner (İlke 4).
 Doğrulama — öneri anında VE grant anında AYNI kurallar (`agent_registry.validate`
 tek kaynak; çift savunma `tool_registry.validate` gerekçesiyle):
 
-1. `name` boş olamaz; `factory.TEMPLATES` içindeki bir adı GÖLGELEYEMEZ
-   (derleme-anı şablon her zaman kazanır; çakışan öneri reddedilir).
+1. `name` boş olamaz, boşluksuz bir tanımlayıcı olmalı (`str.isidentifier()`
+   — ADK'nın `Agent.name` kısıtı, factory bu adı `factory_{name}_{instance}`
+   içine gömer) ve en fazla `NAME_MAX=64` karakter olabilir; `factory.TEMPLATES`
+   içindeki bir adı GÖLGELEYEMEZ (derleme-anı şablon her zaman kazanır;
+   çakışan öneri reddedilir).
 2. `agent_registry`'de `granted` kayıt varsa reddedilir ("zaten kayıtlı");
    `revoked` kayıt yeniden önerilebilir (§7).
-3. `tools` boş olamaz. Her ad: (a) `factory.SPAWN_TOOL_NAME` OLAMAZ (recursion
-   yasağı öneri anında da reddedilir — K1'deki sessiz dışlamanın öneri düzlemi
-   sıkı hâli), (b) mevcut `tools.ALL_TOOLS` kataloğunda OLMALI (bilinmeyen ad =
+3. `tools` boş olamaz. Her ad: (a) `factory.SPAWN_TOOL_NAME` VE öneri araçları
+   (`propose_tool`, `propose_agent`) OLAMAZ (recursion yasağı öneri anında da
+   reddedilir — K1'deki sessiz dışlamanın öneri düzlemi sıkı hâli; misafir
+   Kadir adına öneri kuyruğuna kart kuramaz — §8.5 değişmez 1'in öneri düzlemi
+   izdüşümü), (b) mevcut `tools.ALL_TOOLS` kataloğunda OLMALI (bilinmeyen ad =
    yazım hatası; K1'in logla-ve-atla'sı spawn anına aittir, öneri anında ret),
    (c) `policy.check_zone(ad)` yeşil veya sarı çözmeli — kırmızı araç taşıyan
    öneri reddedilir (K1'in `test_no_shipped_template_may_carry_a_red_tool`

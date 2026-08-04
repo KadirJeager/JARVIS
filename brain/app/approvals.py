@@ -28,7 +28,8 @@ Model (Firestore):
    olmayan bir yürütücü ANAHTARI ÇALIŞMAZ; onay kaydı, keyfi bir isim yazarak
    rastgele kod çalıştırmanın yolu değildir. Anahtar `kind`'a göre seçilir
    (Faz Y4, `_executor_key`): `tool_call` -> `tool_name`, `tool_grant` ->
-   isim-uzaylı sabit `EXECUTOR_TOOL_GRANT`.
+   isim-uzaylı sabit `EXECUTOR_TOOL_GRANT`, `agent_grant` (Fabrika Kademe 2) ->
+   isim-uzaylı sabit `EXECUTOR_AGENT_GRANT`.
 
 Zaman karşılaştırmaları (süre doldu mu) bilinçli olarak Python tarafındadır,
 Firestore sorgusunda değil: `status == pending` eşitlik filtresi + `expires_at`
@@ -165,8 +166,9 @@ def _executor_key(doc: dict) -> str | None:
     """Yürütülebilir bir onayın yürütücü anahtarı; çözülemezse None (-> failed).
 
     Yalnızca EXECUTABLE_KINDS için çağrılır. `tool_call` Y3'teki davranışını
-    birebir korur: anahtar `tool_name`'in kendisidir. `tool_grant` sabit,
-    isim-uzaylı bir anahtar kullanır (EXECUTOR_TOOL_GRANT).
+    birebir korur: anahtar `tool_name`'in kendisidir. `tool_grant` ve
+    `agent_grant` sabit, isim-uzaylı birer anahtar kullanır (sırasıyla
+    EXECUTOR_TOOL_GRANT, EXECUTOR_AGENT_GRANT).
 
     `tool_call` dalındaki `kind:` reddi, isim uzayını sızdırmaz kılar: kendi
     adını `kind:tool_grant` diye bildiren bir araç, kayıt defterine yazan

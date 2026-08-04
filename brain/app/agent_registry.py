@@ -31,8 +31,15 @@ STATUS_REVOKED = "revoked"
 # üst sınır muhafazakâr tutuldu — ölçüm gelince tek sabit değişir.
 MAX_STEPS_CEILING = 32
 TTL_CEILING = 120
+# tools.propose_agent imzasındaki literal varsayılanlarla AYNI olmalı; ADK
+# şeması literal int ister, o yüzden imza sabit REFERANS ALAMAZ — senkronu
+# test_signature_defaults_match_the_registry_constants (pin testi) korur.
 DEFAULT_MAX_STEPS = 24
 DEFAULT_TTL_SECONDS = 90
+
+# Ajan adı + factory'nin eklediği "factory_"/"#instance" ekleri okunabilir
+# kalmalı (factory.build_specialist: f"factory_{name}_{instance}").
+NAME_MAX = 64
 
 # approvals._normalize_args her tool_args değerini 500 karakterde keser ve
 # yürütücü şablonu kartın tool_args'ından kurar (spec §4.7). İşlevsel alanlar
@@ -40,6 +47,11 @@ DEFAULT_TTL_SECONDS = 90
 INSTRUCTION_MAX = 500
 PURPOSE_MAX = 200
 MAX_TOOLS = 8
+
+# Misafir Kadir adına yetenek/ajan öneremez — §8.5 değişmez 1'in öneri
+# düzlemi izdüşümü; recursion yasağı olan spawn dışlamasıyla (değişmez 3)
+# aynı sınıf: kayıtlı ajan onay kuyruğuna kart kuramaz.
+PROPOSAL_TOOL_NAMES = ("propose_tool", "propose_agent")
 
 MENU_LIMIT = 20
 
@@ -79,6 +91,11 @@ def validate_definition(*, name, purpose, instruction, tool_names, why, evidence
     if not isinstance(name, str) or not name.strip():
         return "Ajan adı boş olamaz."
     name = name.strip()
+    if not name.isidentifier():
+        return (f"Ajan adı boşluksuz bir tanımlayıcı olmalı (harf/rakam/alt çizgi): "
+                f"'{name}' spawn edilemez.")
+    if len(name) > NAME_MAX:
+        return f"Ajan adı en fazla {NAME_MAX} karakter olabilir ({len(name)} verildi)."
     shipped = _shipped_names() if shipped_names is None else shipped_names
     if name in shipped:
         return (f"'{name}' sevkiyat şablonlarından birinin adı; derleme-anı "
@@ -107,6 +124,9 @@ def validate_definition(*, name, purpose, instruction, tool_names, why, evidence
         if tool_name == spawn_name:
             return ("Kayıtlı ajan ajan üretemez (recursion yasağı, §8.5 değişmez 3): "
                     f"'{tool_name}' araç listesine giremez.")
+        if tool_name in PROPOSAL_TOOL_NAMES:
+            return ("Kayıtlı ajan Kadir adına öneri kuyruğuna kart kuramaz "
+                    f"(§8.5 değişmez 1): '{tool_name}' araç listesine giremez.")
         if tool_name not in catalog:
             return (f"'{tool_name}' araç kataloğunda yok; kayıtlı ajan yalnız mevcut "
                     "builtin araçlardan seçebilir.")
