@@ -116,22 +116,24 @@ Kayar güncelleme "best-effort" DEĞİLDİR: yazım hatası doğrulamayı düş�
 
 ## 5. W1 — Saat çekirdeği (`android/wear` modülü)
 
-- **Modül:** `android/wear`, Compose for Wear OS (+ Horologist), minSdk 34
+- **Modül:** `android/wear`, Compose for Wear OS (Horologist YOK — W1 planı,
+  YAGNI: düz wear-compose yetiyor), minSdk 34
   (Watch Ultra = Wear OS 5/API 34; tek kullanıcı, geriye uyum yükü yok),
   compileSdk/targetSdk telefonla hizalı (36). Paket `com.jarvis.wear`.
   Kütüphane sürümleri plan yazımında güncel resmî dokümandan doğrulanır
   (hızlı-değişen alan — global kural).
 - **Kimlik:** telefon uygulamasına "Saati eşleştir" eylemi eklenir: telefon
   `POST /api/device-tokens` ile basar, Wearable `MessageClient` ile saate iter;
-  saat Keystore-destekli şifreli yerel depoya yazar (somut kütüphane seçimi
-  plan-anı doğrulaması — `androidx.security-crypto`'nun güncel durumu kontrol
-  edilecek). Köprü YALNIZ bu tek seferlik akışta kullanılır.
+  saat Keystore-destekli şifreli yerel depoya yazar (plan-anı kararı:
+  `androidx.security-crypto` DEĞİL — deprecated; doğrudan Android Keystore
+  AES/GCM). Köprü YALNIZ bu tek seferlik akışta kullanılır.
 - **Sesli komut:** mikrofon butonu → sistem `RecognizerIntent` STT → metin →
   `POST /api/chat` → cevap ekranda + saat TTS'iyle seslendirilir. Ses kaydı
   sunucuya GİTMEZ (v1 — §2/C).
 - **Hızlı komutlar:** ana ekranda 3-4 hazır komut ("durum raporu",
   "hatırlatmalarım", "bekleyen onaylar" vb. — metinleri planda sabitlenir),
-  aynı chat ucuna tek dokunuş; ek olarak bir Tile (saat yüzünden tek kaydırma).
+  aynı chat ucuna tek dokunuş. **Tile W2'ye ertelendi** (W1 planı, 4 Ağu): ayrı
+  bir API yüzeyi, çekirdek dört akış önce kanıtlansın.
 - **Oturum/UX sınırı dürüst:** token yoksa/iptal edilmişse saat "Telefondan
   eşleştir" ekranı gösterir; sessiz boş ekran YOK (25 Tem "silent spinner"
   dersi sınıfı).
