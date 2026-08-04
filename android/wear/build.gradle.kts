@@ -20,11 +20,14 @@ android {
         // Wear W1 pairing contract (Task 4 review fix): same single gradle.properties
         // literal :app's WatchPairing reads -- see that module's identical
         // buildConfigField and android/gradle.properties#jarvis.wearDeviceTokenMessagePath.
-        buildConfigField(
-            "String",
-            "WEAR_DEVICE_TOKEN_MESSAGE_PATH",
-            "\"${providers.gradleProperty("jarvis.wearDeviceTokenMessagePath").get()}\"",
-        )
+        // .get() throws at configuration time if the property is missing -- loud failure,
+        // not a silently-empty placeholder -- and BOTH consumers below read this ONE
+        // local val, so the Kotlin constant and the manifest's intent-filter pathPrefix
+        // cannot drift into a third hand-typed copy (residual gap from the prior review
+        // round: the manifest literal was still unshared).
+        val wearDeviceTokenMessagePath = providers.gradleProperty("jarvis.wearDeviceTokenMessagePath").get()
+        buildConfigField("String", "WEAR_DEVICE_TOKEN_MESSAGE_PATH", "\"$wearDeviceTokenMessagePath\"")
+        manifestPlaceholders["wearDeviceTokenMessagePath"] = wearDeviceTokenMessagePath
     }
 
     buildTypes {
