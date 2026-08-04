@@ -32,6 +32,14 @@ class ChatViewModel(
     private val _state = MutableStateFlow(ChatState())
     val state: StateFlow<ChatState> = _state
 
+    /** Ağdan geçmeyen, cihaz-yerel bir hatayı aynı hata yüzeyine yazar (Task 6: örn.
+     * konuşma tanıma etkinliği yok / `ActivityNotFoundException`). Kaynağına göre ayrı
+     * bir metin kutusu açmak yerine [ChatState.error] tek yüzey kalır -- ekranda hangi
+     * hatayı gösterdiği kullanıcı için önemli değil, GÖRDÜĞÜ önemli. */
+    fun reportInputError(message: String) {
+        _state.value = _state.value.copy(error = message)
+    }
+
     fun send(text: String) {
         val message = text.trim()
         if (message.isEmpty() || _state.value.busy) return

@@ -76,6 +76,16 @@ class ChatViewModelTest {
         assertEquals(1, api.calls.size)
     }
 
+    @Test fun `reportInputError writes straight into the same error surface`() = runTest {
+        // Task 6: cihaz-yerel hatalar (ör. ActivityNotFoundException, ChatScreen tarafında
+        // yakalanır) ağ hatalarıyla AYNI `error` alanını kullanır -- ikinci bir hata
+        // yüzeyi yok.
+        val v = vm(FakeApi())
+        v.reportInputError("Bu cihazda konuşma tanıma yok")
+        assertEquals("Bu cihazda konuşma tanıma yok", v.state.value.error)
+        assertFalse(v.state.value.busy)
+    }
+
     @Test fun `cancellation is rethrown, not reported as a generic error`() = runTest {
         // JarvisApiTest'teki aynı sözleşmenin ChatViewModel karşılığı (Task 5 review fix):
         // CancellationException genel `catch (e: Exception)`e düşüp "Beklenmeyen hata"ya

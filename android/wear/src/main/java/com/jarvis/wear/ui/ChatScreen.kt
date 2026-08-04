@@ -1,10 +1,12 @@
 package com.jarvis.wear.ui
 
+import android.content.ActivityNotFoundException
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -23,15 +25,24 @@ import androidx.wear.compose.material.Text
  * Sohbet ekranı (spec §5): üstte son soru, altında (varsa) cevap bir [Card] içinde, [busy]
  * iken küçük bir dönen gösterge, hata varsa kırmızı metin; altta [QUICK_COMMANDS] tek dokunuşluk
  * [Chip]leri -- hepsi aynı [ChatViewModel.send] ucundan geçer, düz metin girişiyle aynı yol.
- * En altta mikrofon [Button]u: Task 6 sesli girdiyi bağlayana kadar bilinçli olarak disabled --
- * yarım bir özelliği çalışıyormuş gibi göstermemek için buton görünür ama devre dışı.
+ * En altta mikrofon [Button]u; ayrıntı için aşağıdaki Task 6 notuna bakın.
  *
  * Yuvarlak kadranda okunabilirlik: sabit bir [androidx.compose.foundation.layout.Column] değil
  * [ScalingLazyColumn] -- uzun cevaplar kaydırılabilir, kenarlardaki öğeler otomatik küçülür.
+ *
+ * Task 6: mikrofon butonu artık gerçek [rememberSpeechLauncher] ile sistem konuşma
+ * tanımayı açar; sonucu düz metin girişiyle AYNI [ChatViewModel.send] ucuna yollar.
+ * Cihazda tanıyıcı etkinliği yoksa [ActivityNotFoundException] senkron fırlar --
+ * yakalanıp Türkçe bir hata olarak [ChatViewModel.reportInputError] ile aynı hata
+ * yüzeyine (kırmızı metin) yazılır; buton asla sessizce hiçbir şey yapmaz. Yeni
+ * cevap geldiğinde [speaker] onu bir kez okur ([ReplySpeaker.speakIfNew] tekrarı keser).
  */
 @Composable
-fun ChatScreen(viewModel: ChatViewModel) {
+fun ChatScreen(viewModel: ChatViewModel, speaker: ReplySpeaker) {
     val state by viewModel.state.collectAsState()
+    val speechLauncher = rememberSpeechLauncher { viewModel.send(it) }
+
+    LaunchedEffect(state.lastReply) { speaker.speakIfNew(state.lastReply) }
 
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -79,9 +90,20 @@ fun ChatScreen(viewModel: ChatViewModel) {
             }
         }
         item {
-            // Task 6 burayı gerçek sesli girdiyle dolduracak; şimdilik disabled --
-            // yarım bir özelliği çalışıyormuş gibi göstermemek için.
-            Button(onClick = {}, enabled = false, modifier = Modifier.size(40.dp)) {
+            Button(
+                onClick = {
+                    try {
+                        speechLauncher.launch(speechIntent())
+                    } catch (e: ActivityNotFoundException) {
+                        // Dürüst düşüş: emülatörde/bu cihazda sistem tanıyıcısı kurulu
+                        // olmayabilir -- buton bu durumda sessizce hiçbir şey yapmak
+                        // yerine aynı kırmızı hata satırına Türkçe bir açıklama yazar.
+                        viewModel.reportInputError("Bu cihazda konuşma tanıma yok")
+                    }
+                },
+                enabled = !state.busy,
+                modifier = Modifier.size(40.dp),
+            ) {
                 Text("🎤")
             }
         }

@@ -1,6 +1,9 @@
 package com.jarvis.wear
 
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
@@ -19,14 +22,60 @@ import com.jarvis.wear.data.TokenStore
 import com.jarvis.wear.ui.ChatScreen
 import com.jarvis.wear.ui.ChatViewModel
 import com.jarvis.wear.ui.PairScreen
+import com.jarvis.wear.ui.ReplySpeaker
 import java.time.LocalDate
+import java.util.Locale
 import kotlinx.coroutines.cancel
 
+/**
+ * TTS ömrü (Task 6): motor burada, Activity seviyesinde, TEK sefer kurulur ve
+ * [onDestroy]'da kapatılır -- [ChatScreen] her recomposition'da yeniden `TextToSpeech(...)`
+ * açıp kapatmaz (pahalı + [ReplySpeaker]'ın "aynı cevabı iki kez okuma" sözleşmesini
+ * anlamsızlaştırır: motor sıfırdan kurulursa `last` hafızası da sıfırlanır).
+ *
+ * Dürüst düşüş: cihazda/emülatör imajında `tr-TR` ses verisi yoksa bu bir uygulama HATASI
+ * değil -- [TextToSpeech.setLanguage] `LANG_MISSING_DATA`/`LANG_NOT_SUPPORTED` döner, bir
+ * log satırı yazılır VE (görev talimatının kritik kısıtı: sessizlik asla tek başına yeterli
+ * açıklama değildir) kullanıcı TEK seferlik bir Türkçe Toast görür -- cevap metni zaten
+ * [ChatScreen]'in kartında görünür durumda, o yüzden bu bir "ölü buton" değil, dürüst bir
+ * metin-moduna düşüş.
+ */
 class MainActivity : ComponentActivity() {
+    private lateinit var tts: TextToSpeech
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val app = application as WearApp
-        setContent { WearRoot(app.tokenStore, app.api) }
+
+        tts = TextToSpeech(this) { status ->
+            if (status != TextToSpeech.SUCCESS) {
+                Log.w(LOG_TAG, "TTS motoru kurulamadı: $status")
+                return@TextToSpeech
+            }
+            val langResult = tts.setLanguage(Locale("tr", "TR"))
+            if (langResult == TextToSpeech.LANG_MISSING_DATA ||
+                langResult == TextToSpeech.LANG_NOT_SUPPORTED
+            ) {
+                Log.w(LOG_TAG, "tr-TR TTS verisi yok ($langResult); sesli yanıt atlanacak")
+                Toast.makeText(
+                    this,
+                    "Bu cihazda Türkçe sesli okuma yok; yanıtlar yalnızca yazı olarak gösterilecek.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+        val speaker = ReplySpeaker { text -> tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis") }
+
+        setContent { WearRoot(app.tokenStore, app.api, speaker) }
+    }
+
+    override fun onDestroy() {
+        tts.shutdown()
+        super.onDestroy()
+    }
+
+    private companion object {
+        const val LOG_TAG = "MainActivity"
     }
 }
 
@@ -61,7 +110,7 @@ class MainActivity : ComponentActivity() {
  * aksi halde ekran Pair'e düşse bile devam eden bir `chat()` çağrısının coroutine'i sızar.
  */
 @Composable
-fun WearRoot(tokenStore: TokenStore, api: JarvisApi) {
+fun WearRoot(tokenStore: TokenStore, api: JarvisApi, speaker: ReplySpeaker) {
     val hasTokenState by tokenStore.hasToken.collectAsState(initial = null)
     MaterialTheme {
         when (rootRoute(hasTokenState)) {
@@ -84,7 +133,7 @@ fun WearRoot(tokenStore: TokenStore, api: JarvisApi) {
                 LaunchedEffect(chatState.needsPairing) {
                     if (chatState.needsPairing) tokenStore.clear()
                 }
-                ChatScreen(viewModel)
+                ChatScreen(viewModel, speaker)
             }
         }
     }
