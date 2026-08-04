@@ -103,6 +103,12 @@ tek kaynak; çift savunma `tool_registry.validate` gerekçesiyle):
 6. Bekleyen mükerrer kart kontrolü: `approvals.find_pending_duplicate(db,
    user_id, name, {}, kind=KIND_AGENT_GRANT)` — `propose_tool`'daki gerekçeyle
    `list_pending` DEĞİL (MAX_PENDING kesmesi mükerrer kontrolünde kör nokta).
+7. Uzunluk tavanları — `approvals._normalize_args` her `tool_args` değerini
+   500 karakterde keser ve yürütücü şablonu KARTIN `tool_args`ından kurar;
+   işlevsel alanlar bu yüzden sınırlıdır: `instruction ≤ 500` karakter,
+   `purpose ≤ 200`, araç sayısı ≤ 8 (virgüllü ad listesi 500'ü aşamaz).
+   `why`/`evidence` belgeleyicidir; kesilmeleri kaydın işlevini bozmaz.
+   Sınır aşımı öneri anında Türkçe retle döner.
 
 Kart içeriği: başlık `"Kalıcı ajan '<name>' kurulsun mu?"`; detayda amaç,
 **instruction'ın TAM METNİ** (kart onayı fiilen bir kod incelemesidir — Kadir
