@@ -1,5 +1,6 @@
 package com.jarvis.wear.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import retrofit2.HttpException
 import retrofit2.http.Body
@@ -28,8 +29,12 @@ class JarvisApi(private val service: JarvisService) {
     } catch (e: HttpException) {
         if (e.code() == 401) throw UnauthorizedException()
         throw JarvisApiException("Jarvis'e ulaşılamadı (${e.code()}). Az sonra tekrar dene.")
+    } catch (e: CancellationException) {
+        // Yapısal eşzamanlılık: ekran kapanıp coroutine iptal edildiğinde bu bir ağ hatası
+        // DEĞİL — olduğu gibi yukarı yükselmeli, yoksa "kullanıcı geri gitti" durumu
+        // sahte bir JarvisApiException'a dönüşür.
+        throw e
     } catch (e: Exception) {
-        if (e is UnauthorizedException || e is JarvisApiException) throw e
         throw JarvisApiException("Ağ hatası: Jarvis'e ulaşılamadı. Bağlantını kontrol et.")
     }
 }

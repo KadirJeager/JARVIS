@@ -1,5 +1,6 @@
 package com.jarvis.wear.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -62,4 +63,28 @@ class JarvisApiTest {
                 assertTrue(e.userMessage.isNotBlank())
             }
         }
+
+    /**
+     * Structured concurrency contract: when the coroutine driving `chat` is cancelled
+     * (screen backed out, goes ambient, viewModelScope torn down mid-turn), the
+     * cancellation must propagate unchanged — never get rewrapped as [JarvisApiException].
+     * A rewrap would make the chat screen show a spurious "network error" for what was
+     * really just the user leaving.
+     *
+     * Driven against a fake [JarvisService] rather than a delayed [MockWebServer]
+     * response: it pins the exact behaviour of [JarvisApi.chat]'s catch chain
+     * deterministically, without depending on dispatcher/timing races to actually land
+     * the cancellation while the network call is in flight.
+     */
+    @Test fun `cancellation propagates unchanged, not wrapped as a network error`() = runTest {
+        val service = object : JarvisService {
+            override suspend fun chat(body: ChatRequest): ChatResponse =
+                throw CancellationException("tur iptal edildi")
+        }
+        val api = JarvisApi(service)
+        try {
+            api.chat("wear-1", "selam")
+            fail("CancellationException bekleniyordu")
+        } catch (expected: CancellationException) { }
+    }
 }
