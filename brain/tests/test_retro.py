@@ -254,3 +254,21 @@ def test_spawn_calls_are_reported_even_when_no_specialist_touched_a_tool():
     data = retro.collect_week(db, now_fn=lambda: "2026-08-03T12:00:00+00:00")
     assert data["factory"]["spawn_calls_7d"] == 5
     assert "hiçbiri araç kullanmadı" in retro._build_prompt(data)
+
+
+def test_retro_counts_a_registry_sourced_factory_actor():
+    """Kademe 2 pini (§8.5 değişmez 6): kayıt-defteri kaynaklı ajan koşuları
+    sevkiyat şablonlarıyla AYNI factory: aktör biçimini kullandığı için haftalık
+    retro envanteri onları EK KOD OLMADAN sayar. Bu pin düşerse retro kayıtlı
+    ajanlara körleşmiş demektir."""
+    db = FakeDB()
+    now = "2026-08-03T12:00:00+00:00"
+    recent = "2026-08-01T12:00:00+00:00"
+    _factory_audit(db, "factory:arastirmaci#a1", recent)          # sevkiyat
+    _factory_audit(db, "factory:ozel_arastirmaci#r1", recent)     # kayıt defteri
+    _factory_audit(db, "factory:ozel_arastirmaci#r2", recent)
+
+    out = retro.collect_week(db, now_fn=lambda: now)["factory"]
+
+    assert out["by_template"] == {"arastirmaci": 1, "ozel_arastirmaci": 2}
+    assert out["instances_7d"] == 3

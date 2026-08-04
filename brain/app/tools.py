@@ -521,14 +521,16 @@ approvals.register_executor(approvals.EXECUTOR_AGENT_GRANT, _execute_agent_grant
 
 async def spawn_specialist(template: str, goal: str, tool_context) -> dict:
     """Dar kapsamlı, ÇOK ADIMLI bir işi geçici bir uzman ajana devreder ve
-    sonucunu getirir. `template` şu kalıplardan biridir: "arastirmaci" (bir
-    konuyu hafızadan ve izlenen repo'lardan toplayıp özetler), "arsivci" (bir
-    konuşmadan çıkan kalıcı bilgiyi profile/derslere işler), "nobetci" (sistem
-    sağlığını ve bekleyen işleri derleyip rapor eder). `goal` uzmana verilecek
-    tek cümlelik Türkçe görevdir — ne istediğini SOMUT yaz, çünkü uzman senin
-    sohbetini görmez. Uzman geçicidir: yalnızca kendi araç alt kümesini
-    kullanır, bütçesi (adım + süre) sınırlıdır ve iş bitince ölür. Bilinmeyen
-    bir şablon adı verirsen kullanılabilir şablonların listesi döner. Tek adımda
+    sonucunu getirir. `template` ya sevkiyat kalıplarından biridir —
+    "arastirmaci" (bir konuyu hafızadan ve izlenen repo'lardan toplayıp
+    özetler), "arsivci" (bir konuşmadan çıkan kalıcı bilgiyi profile/derslere
+    işler), "nobetci" (sistem sağlığını ve bekleyen işleri derleyip rapor
+    eder) — ya da Kadir'in onayıyla kayıt defterine yazılmış KALICI bir ajanın
+    adıdır (propose_agent ile önerilir). `goal` uzmana verilecek tek cümlelik
+    Türkçe görevdir — ne istediğini SOMUT yaz, çünkü uzman senin sohbetini
+    görmez. Uzman geçicidir: yalnızca kendi araç alt kümesini kullanır,
+    bütçesi (adım + süre) sınırlıdır ve iş bitince ölür. Bilinmeyen bir şablon
+    adı verirsen iki kaynaklı kullanılabilir şablon listesi döner. Tek adımda
     kendin yapabileceğin bir işi buraya devretme."""
     try:
         session = tool_context.session

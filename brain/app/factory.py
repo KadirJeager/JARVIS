@@ -321,19 +321,94 @@ async def run_specialist(template: AgentTemplate, goal: str, *, runner, user_id:
             "sonuc": sonuc, "durum": durum}
 
 
-def unknown_template_reply(template_name) -> dict:
+def _template_from_doc(doc: dict) -> "AgentTemplate | None":
+    """Kayıt defteri dokümanından şablon kurar; bozuksa None (fail-closed).
+
+    İki bilinçli adım (spec §6):
+    * Doküman ALANLARI yeniden doğrulanır — elle yazılmış/bozulmuş bir kayıt
+      (kırmızı araç sokulmuş, tavan şişirilmiş) şablona dönüşemez.
+    * `_GUEST_RULES` BURADA eklenir; depolanan metne güvenilmez — veri
+      kanalından misafir anayasası gevşetilemez."""
+    from . import agent_registry
+
+    try:
+        tool_names = list(doc.get("tools") or [])
+        problem = agent_registry.validate_definition(
+            name=str(doc.get("name") or ""), purpose=str(doc.get("purpose") or ""),
+            instruction=str(doc.get("instruction") or ""), tool_names=tool_names,
+            why=str(doc.get("why") or "-"), evidence=str(doc.get("evidence") or "-"),
+            max_steps=doc.get("max_steps"), ttl_seconds=doc.get("ttl_seconds"))
+        if problem:
+            logging.warning("factory: kayıt defteri dokümanı reddedildi name=%r -- %s",
+                            doc.get("name"), problem)
+            return None
+        return AgentTemplate(
+            name=str(doc["name"]).strip(),
+            purpose=str(doc["purpose"]),
+            instruction=str(doc["instruction"]) + _GUEST_RULES,
+            tools=tuple(tool_names),
+            max_steps=int(doc["max_steps"]),
+            ttl_seconds=int(doc["ttl_seconds"]),
+        )
+    except Exception:
+        logging.exception("factory: kayıt defteri dokümanı şablona çevrilemedi name=%r",
+                          doc.get("name"))
+        return None
+
+
+def _registry_template(template_name: str) -> "AgentTemplate | None":
+    """Üretim kayıt-defteri okuması: spawn anında CANLI tek doküman.
+
+    Araç tarafından bilinçli fark (spec §6): MCP toolset'leri açılışta
+    bağlanır, veri şablonuysa onaydan hemen sonra kullanılabilir — "üretim
+    onay anında gerçekleşir" (§8.5 Kademe 2). FIRLATMAZ: her hata None'dır
+    (çağıran menüye düşer), sebep loglanır."""
+    from . import agent_registry
+    from . import tools as tools_mod
+
+    try:
+        doc = agent_registry.get(tools_mod._memory.db, template_name)
+        if not doc or doc.get("status") != agent_registry.STATUS_GRANTED:
+            return None
+        return _template_from_doc(doc)
+    except Exception:
+        logging.exception("factory: kayıt defteri okunamadı sablon=%r", template_name)
+        return None
+
+
+def _registry_menu() -> list[dict]:
+    """Menü için granted kayıtlar; hata boş listedir (menü süs değil ama
+    yokluğu spawn'ı düşürmemeli)."""
+    from . import agent_registry
+    from . import tools as tools_mod
+
+    try:
+        return agent_registry.list_granted(tools_mod._memory.db)
+    except Exception:
+        logging.exception("factory: kayıt defteri menüsü okunamadı")
+        return []
+
+
+def unknown_template_reply(template_name, registered: list[dict] | None = None) -> dict:
     """Bilinmeyen şablon → Türkçe gözlem + menü (İlke 4: FIRLATMAZ).
 
-    Menü olmadan model kör kalır ve aynı yanlış adı tekrar dener; bu yüzden
-    kullanılabilir şablonlar amaçlarıyla birlikte döner."""
+    Menü iki kaynaklıdır (Kademe 2): sevkiyat şablonları + kayıt defterindeki
+    kalıcı ajanlar, her satır kaynağını söyler. Menü olmadan model kör kalır
+    ve aynı yanlış adı tekrar dener."""
+    menu = [
+        {"ad": t.name, "amac": t.purpose, "araclar": list(t.tools),
+         "kaynak": "sevkiyat"}
+        for t in sorted(TEMPLATES.values(), key=lambda t: t.name)
+    ] + [
+        {"ad": d.get("name"), "amac": d.get("purpose"),
+         "araclar": list(d.get("tools") or []), "kaynak": "kayit_defteri"}
+        for d in (registered or [])
+    ]
     return {
         "durum": STATUS_ERROR,
-        "hata": (f"'{template_name}' diye bir ajan şablonu yok. Kademe 1'de şablon "
-                 "sayısı sabittir; aşağıdakilerden birini seç."),
-        "kullanilabilir_sablonlar": [
-            {"ad": t.name, "amac": t.purpose, "araclar": list(t.tools)}
-            for t in sorted(TEMPLATES.values(), key=lambda t: t.name)
-        ],
+        "hata": (f"'{template_name}' diye bir ajan şablonu yok. "
+                 "Aşağıdakilerden birini seç."),
+        "kullanilabilir_sablonlar": menu,
     }
 
 
@@ -361,21 +436,26 @@ def _default_runner_factory(agent: Agent, session_service) -> Runner:
 async def spawn(template_name, goal: str, *, user_id: str, audit, model=None,
                 instance: str | None = None, runner_factory=None,
                 clock: Callable[[], float] = time.monotonic,
-                templates: dict | None = None) -> dict:
-    """Şablondan bir örnek üretir, koşturur ve raporunu döner (spec §4).
+                templates: dict | None = None,
+                registry_lookup=None, registry_menu=None) -> dict:
+    """Şablondan bir örnek üretir, koşturur ve raporunu döner (spec §4 + K2 §6).
 
-    Enjeksiyon noktaları (`model`, `instance`, `runner_factory`, `clock`,
-    `templates`) YALNIZCA testler içindir; üretimde hepsi None/varsayılan
-    geçilir ve yol tek dallıdır.
+    Şablon çözümü iki katmanlı: önce derleme-anı TEMPLATES (her zaman kazanır),
+    yoksa kayıt defteri (Kademe 2). Enjeksiyon noktaları (`model`, `instance`,
+    `runner_factory`, `clock`, `templates`, `registry_lookup`, `registry_menu`)
+    YALNIZCA testler içindir; üretimde hepsi None/varsayılan geçilir.
 
     FIRLATMAZ: bilinmeyen şablon menüye, kurulum hatası `durum="hata"`ya döner
     (İlke 4)."""
     known = TEMPLATES if templates is None else templates
     key = template_name.strip() if isinstance(template_name, str) else ""
     template = known.get(key)
+    if template is None and key:
+        template = (registry_lookup or _registry_template)(key)
     if template is None:
         logging.info("factory: bilinmeyen şablon istendi=%r", template_name)
-        return unknown_template_reply(template_name)
+        return unknown_template_reply(template_name,
+                                      registered=(registry_menu or _registry_menu)())
 
     instance = instance or new_instance_id()
     logging.info("factory: örnek kuruluyor actor=%s max_steps=%d ttl=%ss hedef=%r",
