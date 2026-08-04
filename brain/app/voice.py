@@ -506,7 +506,11 @@ async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
         return None
     try:
         parsed = vp.parse_hello(hello)
-        email = verify_bearer_email(parsed["token"])
+        # verify_bearer_email Google'ın JWKS uçlarına (Google token) veya
+        # Firestore'a (cihaz token) giden blocking I/O yapar -- guest_gate.py
+        # _GuestAuth ile aynı taşıma: event loop'u bloklamamak için thread'de
+        # çalışır (final review Important 2b).
+        email = await asyncio.to_thread(verify_bearer_email, parsed["token"])
     except (ValueError, PermissionError):
         await ws.send_text(json.dumps(vp.evt_error("Giriş doğrulanamadı")))
         await ws.close(code=4401)

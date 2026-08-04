@@ -9,7 +9,7 @@ import pytest
 
 import app.auth as auth_mod
 import app.voice as voice_mod
-from app import device_tokens
+from app import config, device_tokens
 from app.memory import Memory
 from tests.fakes import FakeDB
 
@@ -45,10 +45,30 @@ def test_a_google_token_still_goes_to_google(db, monkeypatch):
     assert seen["token"] == "google-jwt"
 
 
-def test_an_uninitialised_gate_fails_closed_for_device_tokens(monkeypatch):
-    auth_mod.init(None)
-    with pytest.raises(PermissionError, match="Geçersiz oturum"):
-        auth_mod.verify_bearer_email("jdt_herhangi")
+def test_a_gate_with_a_failing_db_provider_stays_closed_for_device_tokens():
+    """C1 fix sonrası main.py kapıyı import ANINDA kendiliğinden-başlatan bir
+    provider ile kayıtlar (main._device_token_db) -- None provider senaryosu
+    üretimde artık oluşmaz. Kalan gerçek risk: provider kayıtlı ama db'ye
+    erişim (soğuk başlangıçta _init dahil) patlıyor -- kapı yine fail-closed
+    kalmalı."""
+    auth_mod.init(lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    try:
+        with pytest.raises(PermissionError, match="Geçersiz oturum"):
+            auth_mod.verify_bearer_email("jdt_herhangi")
+    finally:
+        auth_mod.init(None)
+
+
+def test_device_token_path_rechecks_the_allowlist(db, monkeypatch):
+    """Important 3: Google yolu her istekte config.ALLOWED_EMAILS'i kontrol
+    eder (verify_token_email); cihaz yolu basımdan sonra bunu bir daha hiç
+    kontrol etmiyordu. Aynı ret metnini kullanır ki davranış sınıfı (403)
+    eşleşsin -- ("Geçersiz oturum" 401'e, "Bu hesap yetkili değil" 403'e
+    eşlenir, bkz. require_user)."""
+    out = _mint(db)
+    monkeypatch.setattr(config, "ALLOWED_EMAILS", {"baskasi@example.com"})
+    with pytest.raises(PermissionError, match="Bu hesap yetkili değil"):
+        auth_mod.verify_bearer_email(out["token"])
 
 
 def test_require_user_accepts_a_device_token(db):

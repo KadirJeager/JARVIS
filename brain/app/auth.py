@@ -78,8 +78,12 @@ def init(db_provider) -> None:
 def verify_bearer_email(token: str) -> str:
     """Ortak kimlik kapısı: cihaz token'ı veya Google ID token → email.
 
-    Her iki yol da aynı PermissionError mesajını kullanır ("Geçersiz oturum") —
-    hangi şemanın reddettiği dışarı sızmaz."""
+    Fail-closed ret ("Geçersiz oturum") her iki yolda da aynı — hangi
+    şemanın reddettiği dışarı sızmaz. Allowlist reddi ise BİLEREK Google
+    yoluyla aynı metni ("Bu hesap yetkili değil") kullanır: cihaz token'ı
+    basıldıktan sonra config.ALLOWED_EMAILS değişebilir (final review
+    Important 3) — Google yolu bunu HER istekte kontrol eder
+    (verify_token_email), cihaz yolu da aynı kontrolü tekrarlamalı."""
     from . import device_tokens
 
     if token.startswith(device_tokens.PREFIX):
@@ -89,7 +93,10 @@ def verify_bearer_email(token: str) -> str:
             db = _db_provider()
         except Exception:
             raise PermissionError("Geçersiz oturum")
-        return device_tokens.verify(db, token)
+        email = device_tokens.verify(db, token)
+        if email not in config.ALLOWED_EMAILS:
+            raise PermissionError("Bu hesap yetkili değil")
+        return email
     return verify_token_email(token)
 
 

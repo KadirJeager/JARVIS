@@ -242,9 +242,6 @@ def _init() -> None:
     _memory = Memory(
         db, embed_fn=embedders.embed_passage, embed_query_fn=embedders.embed_query
     )
-    # Wear W0: cihaz token doğrulaması aynı Firestore istemcisini kullanır
-    # (auth modülü main'i import edemez -- provider enjeksiyonu, spec §4.3).
-    auth.init(lambda: _memory.db)
     # Single audit instance shared by the orchestrator's policy callback AND
     # the guest gate (app/guest_gate.py) -- one trail, one Firestore client.
     _audit = FirestoreAudit(db)
@@ -264,6 +261,17 @@ def _init() -> None:
                           extra_toolsets=tool_registry.mcp_toolsets(db)),
         session_service=_session_service,
     )
+
+
+def _device_token_db():
+    """Soğuk başlangıçta kapıyı kendisi açar (final review C1): require_user
+    gövdeden ÖNCE koştuğu için tembel _init'e güvenemez. _init idempotenttir;
+    sync dependency threadpool'da koşar, ağır init orada güvenlidir."""
+    _init()
+    return _memory.db
+
+
+auth.init(_device_token_db)
 
 
 def _enroll_db():
@@ -655,7 +663,12 @@ async def mint_device_token(req: DeviceTokenRequest,
     cevapta görünür."""
     try:
         _init()
-        return device_tokens.mint(_memory.db, email=email, device=req.device)
+        # Firestore yazımı senkron/blocking -- approvals uçlarındaki desenin
+        # aynısı: event loop'u bloklamamak için thread'de koşar (final review
+        # Important 2a).
+        return await asyncio.to_thread(
+            lambda: device_tokens.mint(_memory.db, email=email, device=req.device)
+        )
     except Exception:
         logging.exception("device-tokens: mint failed for user_id=%s", email)
         raise HTTPException(
@@ -668,7 +681,8 @@ async def mint_device_token(req: DeviceTokenRequest,
 async def list_device_tokens(email: str = Depends(require_google_user)):
     try:
         _init()
-        return {"tokens": device_tokens.list_tokens(_memory.db)}
+        tokens = await asyncio.to_thread(lambda: device_tokens.list_tokens(_memory.db))
+        return {"tokens": tokens}
     except Exception:
         logging.exception("device-tokens: list failed for user_id=%s", email)
         raise HTTPException(
@@ -682,13 +696,18 @@ async def revoke_device_token(token_id: str,
                               email: str = Depends(require_google_user)):
     try:
         _init()
-        message = device_tokens.revoke(_memory.db, token_id)
+        message = await asyncio.to_thread(lambda: device_tokens.revoke(_memory.db, token_id))
     except Exception:
         logging.exception("device-tokens: revoke failed id=%s user_id=%s", token_id, email)
         raise HTTPException(
             status_code=502,
             detail="Cihaz token'ı şu an iptal edilemiyor (altyapı hatası). Az sonra tekrar dene.",
         )
+    # Bilinmeyen id: approvals uçlarındaki 404 deseninin aynısı -- try/except
+    # BLOĞUNUN DIŞINDA, yoksa geniş `except Exception` bunu 502'ye çevirirdi
+    # (final review Minor 4).
+    if message is None:
+        raise HTTPException(status_code=404, detail="Cihaz token'ı bulunamadı")
     return {"ok": True, "message": message}
 
 

@@ -113,12 +113,18 @@ def list_tokens(db) -> list[dict]:
     return rows
 
 
-def revoke(db, token_id: str, *, now_fn=_now) -> str:
-    """İptal: damga, silme yok (değişmez 4)."""
+def revoke(db, token_id: str, *, now_fn=_now) -> str | None:
+    """İptal: damga, silme yok (değişmez 4). Bilinmeyen id için None döner --
+    çağıran uç bunu 404'e çevirir (final review Minor 4: eskiden gözlem
+    metni döndürüp 200 verdiriyordu). Kayıt ZATEN iptal edilmişse ilk damga
+    (revoked_at) korunur -- ikinci revoke onu sessizce ezmez, yine de aynı
+    başarı-tarzı mesajı döner (final review Minor 5, audit değişmezi)."""
     ref = db.collection(COLLECTION).document(token_id)
     snap = ref.get()
     if not snap.exists:
-        return f"'{token_id[:12]}..' cihaz token defterinde yok."
-    ref.set({"revoked": True, "revoked_at": now_fn()}, merge=True)
+        return None
+    doc = snap.to_dict()
+    if not doc.get("revoked"):
+        ref.set({"revoked": True, "revoked_at": now_fn()}, merge=True)
     logging.info("device_tokens: revoke id=%s..", token_id[:12])
-    return f"Cihaz token'ı iptal edildi ({snap.to_dict().get('device', '?')})."
+    return f"Cihaz token'ı iptal edildi ({doc.get('device', '?')})."

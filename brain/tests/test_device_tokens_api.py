@@ -80,6 +80,30 @@ def test_mint_rejects_a_blank_device(client):
     assert client.post("/api/device-tokens", json={"device": "  "}).status_code == 422
 
 
+def test_cold_start_self_initializes_the_device_token_gate(monkeypatch, db):
+    """C1: require_user (FastAPI dependency) koşar İÇİNDE _init'ten ÖNCE --
+    soğuk başlangıçta tembel _init'e güvenemez. main_mod._memory=None + gerçek
+    _init'i taklit eden fake ile "hiç istek gelmemiş" bir process simüle
+    edilir. Dependency override YOK: gerçek require_user zinciri koşar, ve
+    kapı main._device_token_db'nin kendisiyle açık kalmalı -- import zamanında
+    kayıtlı olan provider, önceki testlerin auth_mod.init(None) teardown'ları
+    tarafından ezilmiş olabileceğinden burada yeniden kaydedilir."""
+    token = device_tokens.mint(db, email=USER, device="watch-ultra")["token"]
+
+    def fake_init():
+        main_mod._memory = Memory(db)
+
+    monkeypatch.setattr(main_mod, "_memory", None)
+    monkeypatch.setattr(main_mod, "_init", fake_init)
+    auth_mod.init(main_mod._device_token_db)
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.get("/api/approvals", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+    finally:
+        auth_mod.init(None)
+
+
 # -- 502 dalları: _init() başarılı, backing device_tokens çağrısı patlıyor --
 # (test_api.py'deki test_conversations_returns_502_on_failure /
 # test_delete_conversation_returns_502_on_failure deseninin aynısı.)
@@ -107,3 +131,10 @@ def test_revoke_returns_502_on_failure(client, monkeypatch):
     r = client.delete("/api/device-tokens/some-id")
     assert r.status_code == 502
     assert "altyapı" in r.json()["detail"]
+
+
+def test_revoke_unknown_id_returns_404(client):
+    """Minor 4: kayıt defterinde olmayan id 200 {ok:true} DEĞİL, 404 dönmeli."""
+    r = client.delete("/api/device-tokens/olmayan-id")
+    assert r.status_code == 404
+    assert "bulunamadı" in r.json()["detail"].lower()

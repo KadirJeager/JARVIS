@@ -151,4 +151,21 @@ def test_revoke_stamps_without_deleting_and_unknown_is_observation():
     doc = db.collection(device_tokens.COLLECTION).docs[out["id"]]
     assert doc["revoked"] is True and doc["revoked_at"] == T0.isoformat()
     assert "iptal" in msg.lower()
-    assert "yok" in device_tokens.revoke(db, "olmayan-id", now_fn=_now_at(T0)).lower()
+    # Minor 4: bilinmeyen id artık None döner -- uç bunu 404'e çevirir
+    # (200 {ok:true} yanılgısını önler).
+    assert device_tokens.revoke(db, "olmayan-id", now_fn=_now_at(T0)) is None
+
+
+def test_double_revoke_keeps_the_first_revoked_at_timestamp():
+    """Minor 5: audit değişmezi -- ilk damga hayatta kalır, ikinci revoke
+    revoked_at'i sessizce ezmez. Yine de başarı-tarzı mesaj döner (hata
+    değil, aynı işlem tekrar istenmiş)."""
+    db = FakeDB()
+    out = _mint(db)
+    device_tokens.revoke(db, out["id"], now_fn=_now_at(T0))
+    later = T0 + timedelta(days=1)
+    msg2 = device_tokens.revoke(db, out["id"], now_fn=_now_at(later))
+    doc = db.collection(device_tokens.COLLECTION).docs[out["id"]]
+    assert doc["revoked_at"] == T0.isoformat()   # İLK damga hayatta -- ezilmedi
+    assert doc["revoked"] is True
+    assert "iptal" in msg2.lower()
