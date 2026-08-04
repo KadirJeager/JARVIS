@@ -717,7 +717,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 # trafik latest'te ve imaj doğru mu
 gcloud run services describe jarvis-brain --region europe-west1 --project your-gcp-project \
   --format="value(status.traffic.list(),spec.template.spec.containers[0].image)"
-# yol envanteri 21 -> 24
+# yol envanteri 21 -> 23 (3 operasyon, 2 yeni path anahtarı)
 curl -s https://jarvis-brain-000000000000.europe-west1.run.app/openapi.json | \
   python -c "import json,sys; print(len(json.load(sys.stdin)['paths']))"
 # negatif kontrol: uydurma cihaz token'ı 401

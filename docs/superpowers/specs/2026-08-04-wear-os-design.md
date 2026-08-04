@@ -194,9 +194,12 @@ Kayar güncelleme "best-effort" DEĞİLDİR: yazım hatası doğrulamayı düş�
 
 ## 10. Canlı kanıt ölçütü ("bitti" tanımları)
 
-- **W0 bitti:** deploy + gerçek bir cihaz token'ı basılıp curl ile `/api/chat`
-  200 aldı; revoked edilince aynı istek 401; Google yolu regresyonsuz (telefon
-  uygulaması çalışmaya devam ediyor).
+- **W0 bitti:** deploy + `/openapi.json` 23 yol (21+2 — üç operasyon iki path
+  anahtarı paylaşır: `/api/device-tokens` POST+GET tek anahtardır) + uydurma `jdt_` token
+  401 alıyor + Google yolu regresyonsuz (telefon uygulaması çalışmaya devam
+  ediyor). Gerçek mint→chat 200→revoke→401 zinciri taze Google ID token
+  gerektirdiğinden W1'in eşleştirme akışıyla kanıtlanır (telefon basar) —
+  W0'da bu zincir uç testlerinde pinlidir, canlıda W1'de kapanır.
 - **W1 bitti (emülatörde):** Wear AVD'de eşleştirme → sesli komut → cevap
   ekranda+seste; hızlı komut tek dokunuşla cevap getiriyor; ekran görüntüleri.
 - **W2 bitti (emülatörde):** gerçek bir bekleyen onay saat ekranında; Onayla
