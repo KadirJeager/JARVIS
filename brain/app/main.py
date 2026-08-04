@@ -574,7 +574,7 @@ async def delete_conversation(session_id: str, email: str = Depends(require_user
 
 
 @app.post("/api/voice/enroll")
-async def enroll(req: EnrollRequest, email: str = Depends(require_user)):
+async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
     if not req.clips:
         raise HTTPException(status_code=400, detail="En az bir ses klibi gerekli")
     try:

@@ -1,6 +1,6 @@
 """Speaker identity management API (Katman 2b Dilim 3d, spec §6): visibility,
-correction, deletion. Every endpoint is require_user-gated and keyed by the
-authenticated user; every gallery/history touch goes through SpeakerService
+correction, deletion. Every endpoint is require_google_user-gated and keyed by
+the authenticated user; every gallery/history touch goes through SpeakerService
 (the ONE gallery lock) and runs OFF the event loop via asyncio.to_thread --
 this process serves /api/chat and /ws/voice from that same loop (spec §10).
 
@@ -16,7 +16,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from . import speaker
-from .auth import require_user
+# require_google_user, require_user DEĞİL (Wear W0 dal-review kuyruğu): cihaz
+# token'ı (`jdt_`) saatte 30 gün kayar süreyle yaşar ve saatte ses kimliği
+# yönetimi ekranı YOKTUR; bu uçlar ise galeriyi siler/zehirler. Çalınmış bir
+# saat Kadir'in ses kimliğini yok edememeli. Kural yüzeyin TAMAMINA uygulanır --
+# iki ucu seçip dördünü bırakmak ezberlenecek bir istisna listesi üretirdi.
+# Telefon etkilenmez: her isteği zaten taze Google ID token'ı taşır.
+# Pin: tests/test_voice_identity_scope.py
+from .auth import require_google_user
 
 router = APIRouter()
 
@@ -67,7 +74,7 @@ def quality_indicators(entries: list[dict], samples_by_id: dict) -> dict:
 
 
 @router.get("/api/voice/profile")
-async def get_profile(email: str = Depends(require_user)):
+async def get_profile(email: str = Depends(require_google_user)):
     try:
         profile, history = await asyncio.to_thread(lambda: _service().overview(email))
     except Exception:
@@ -94,7 +101,7 @@ class SamplePatch(BaseModel):
 
 @router.patch("/api/voice/sample/{sample_id}")
 async def patch_sample(sample_id: str, req: SamplePatch,
-                       email: str = Depends(require_user)):
+                       email: str = Depends(require_google_user)):
     # model_fields_set distinguishes "absent" from an explicit null: label=None
     # must CLEAR the label, an omitted label must not touch it.
     kwargs = {}
@@ -116,7 +123,7 @@ async def patch_sample(sample_id: str, req: SamplePatch,
 
 
 @router.delete("/api/voice/sample/{sample_id}")
-async def delete_sample(sample_id: str, email: str = Depends(require_user)):
+async def delete_sample(sample_id: str, email: str = Depends(require_google_user)):
     try:
         await asyncio.to_thread(lambda: _service().delete_sample(email, sample_id))
     except speaker.SampleNotFound:
@@ -130,7 +137,7 @@ async def delete_sample(sample_id: str, email: str = Depends(require_user)):
 
 
 @router.post("/api/voice/history/{entry_id}/confirm")
-async def confirm_history(entry_id: str, email: str = Depends(require_user)):
+async def confirm_history(entry_id: str, email: str = Depends(require_google_user)):
     try:
         return await asyncio.to_thread(
             lambda: _service().confirm_history(email, entry_id))
@@ -145,7 +152,7 @@ async def confirm_history(entry_id: str, email: str = Depends(require_user)):
 
 
 @router.post("/api/voice/history/{entry_id}/reject")
-async def reject_history(entry_id: str, email: str = Depends(require_user)):
+async def reject_history(entry_id: str, email: str = Depends(require_google_user)):
     try:
         return await asyncio.to_thread(
             lambda: _service().reject_history(email, entry_id))
@@ -160,7 +167,7 @@ async def reject_history(entry_id: str, email: str = Depends(require_user)):
 
 
 @router.delete("/api/voice/profile")
-async def delete_profile(email: str = Depends(require_user)):
+async def delete_profile(email: str = Depends(require_google_user)):
     try:
         await asyncio.to_thread(lambda: _service().delete_profile_and_history(email))
     except Exception:

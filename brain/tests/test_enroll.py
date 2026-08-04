@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_mod
 import app.speaker_store as speaker_store_mod
-from app.auth import require_user
+from app.auth import require_google_user, require_user
 from app.speaker_store import load_profile
 from tests.fakes import FakeDB
 
@@ -37,6 +37,7 @@ def _clip(raw: bytes = b"\x00\x01\x00\x01") -> str:
 def test_enroll_stores_anchors(enroll_client):
     c, db = enroll_client
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
     r = c.post("/api/voice/enroll", json={"clips": [_clip(), _clip()]})
     assert r.status_code == 200
     assert r.json() == {"anchors": 2}
@@ -49,6 +50,7 @@ def test_enroll_accumulates_across_calls(enroll_client):
     save_profile (overwrite) called directly."""
     c, db = enroll_client
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
     c.post("/api/voice/enroll", json={"clips": [_clip()]})
     r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
     assert r.status_code == 200
@@ -67,6 +69,7 @@ def test_enroll_requires_auth(enroll_client):
 def test_enroll_rejects_empty_clips(enroll_client):
     c, _db = enroll_client
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
     r = c.post("/api/voice/enroll", json={"clips": []})
     assert r.status_code == 400
 
@@ -77,6 +80,7 @@ def test_enroll_wraps_failure_as_502(enroll_client, monkeypatch):
     raw 500 -- and must not partially store anchors."""
     c, db = enroll_client
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
 
     def boom(pcm):
         raise RuntimeError("embed blew up")
@@ -100,6 +104,7 @@ def test_enroll_final_read_failure_is_502_not_500(enroll_client, monkeypatch):
     still succeed, isolating the exact line under test."""
     c, db = enroll_client
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
 
     real_load_profile = speaker_store_mod.load_profile
     calls = {"n": 0}
@@ -140,6 +145,8 @@ def test_enroll_runs_embedding_off_the_event_loop(enroll_client, monkeypatch):
         return "kadir@example.com"
 
     main_mod.app.dependency_overrides[require_user] = _user
+
+    main_mod.app.dependency_overrides[require_google_user] = _user
     monkeypatch.setattr(
         "app.speaker.embed",
         lambda pcm: (embed_threads.append(threading.get_ident()), [1.0, 0.0])[1],
@@ -175,6 +182,8 @@ def test_enroll_persists_off_the_event_loop_too(enroll_client, monkeypatch):
         return "kadir@example.com"
 
     main_mod.app.dependency_overrides[require_user] = _user
+
+    main_mod.app.dependency_overrides[require_google_user] = _user
     monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
 
     svc = main_mod.get_speaker_service()
@@ -206,6 +215,7 @@ def test_enroll_takes_the_same_gallery_lock_as_identify(enroll_client, monkeypat
     shares its gallery lock instead of touching speaker_store directly."""
     c, _db = enroll_client
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
 
     svc = main_mod.get_speaker_service()
     held = []

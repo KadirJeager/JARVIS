@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_mod
 from app import speaker_history
-from app.auth import require_user
+from app.auth import require_google_user, require_user
 from app.speaker import make_sample
 from app.speaker_store import enroll_anchors, load_profile, save_profile
 from tests.fakes import FakeDB
@@ -29,6 +29,7 @@ def manage_client(monkeypatch):
 
 def _auth():
     main_mod.app.dependency_overrides[require_user] = lambda: USER
+    main_mod.app.dependency_overrides[require_google_user] = lambda: USER
 
 
 def _entry(i, *, score=0.8, verified=True, device="phone", adapted=None):
