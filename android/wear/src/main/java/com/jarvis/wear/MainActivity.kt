@@ -28,12 +28,19 @@ class MainActivity : ComponentActivity() {
  * [TokenListenerService][com.jarvis.wear.data.TokenListenerService] telefondan token'ı
  * yazdığı AN bu ekran kendiliğinden Sohbet'e geçer; yeniden başlatma ya da manuel
  * yenileme beklemez (4 Ağu overlay dersi sınıfı: state'i olay değil, akışı sür).
+ *
+ * `initial = null` (Task 4 review fix): DataStore'un ilk okuması ASENKRON bir dosya
+ * G/Ç'sidir; o yanıt gelene kadar `false` ile başlamak "kontrol ettim, token yok"
+ * yalanını söyler ve zaten eşleştirilmiş bir saatte bile HER açılışta görülebilir bir
+ * yanlış-ekran ("Saat eşleştirilmemiş") flaşına yol açar. `null` → [Route.Unknown]:
+ * nötr/boş bir yüzey — ne Pair, ne de işin sürdüğünü ima eden yanıltıcı bir spinner.
  */
 @Composable
-fun WearRoot(hasToken: Flow<Boolean>) {
-    val hasTokenState by hasToken.collectAsState(initial = false)
+fun WearRoot(hasToken: Flow<Boolean?>) {
+    val hasTokenState by hasToken.collectAsState(initial = null)
     MaterialTheme {
         when (rootRoute(hasTokenState)) {
+            Route.Unknown -> Box(modifier = Modifier.fillMaxSize())
             Route.Pair -> PairScreen()
             Route.Chat -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Sohbet hazır") // Task 5 gerçek Chat ekranıyla değişecek

@@ -18,6 +18,16 @@ android {
         versionCode = 1
         versionName = "0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Wear W1 pairing contract (Task 4 review fix): the ONE literal in
+        // gradle.properties, read here AND by :wear's own buildConfigField below — so
+        // WatchPairing.TOKEN_PATH and TokenListenerService.MESSAGE_PATH can never
+        // silently diverge into two hand-typed copies of the same string.
+        buildConfigField(
+            "String",
+            "WEAR_DEVICE_TOKEN_MESSAGE_PATH",
+            "\"${providers.gradleProperty("jarvis.wearDeviceTokenMessagePath").get()}\"",
+        )
     }
 
     buildTypes {
@@ -39,6 +49,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

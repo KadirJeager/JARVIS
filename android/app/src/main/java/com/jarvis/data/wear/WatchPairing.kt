@@ -1,5 +1,7 @@
 package com.jarvis.data.wear
 
+import com.jarvis.BuildConfig
+
 /**
  * Saat eşleştirme (Wear W1, spec §5): telefon kalıcı bir cihaz token'ı basar ve Wearable
  * MessageClient ile bağlı saate iter. Köprü YALNIZ bu tek akışta kullanılır — kalıcı token
@@ -30,7 +32,11 @@ class WatchPairing(
     private val sendTo: suspend (nodeId: String, path: String, payload: ByteArray) -> Unit,
 ) {
     companion object {
-        const val TOKEN_PATH = "/jarvis/device-token"
+        /** Task 4 review fix: `:app`/`:wear` ortak `BuildConfig` alanından okunur (tek
+         * kaynak `android/gradle.properties#jarvis.wearDeviceTokenMessagePath`) — artık
+         * bu modülde hand-typed bir literal DEĞİL; watch tarafındaki eşi
+         * [com.jarvis.wear.data.TokenListenerService.MESSAGE_PATH]. */
+        val TOKEN_PATH: String = BuildConfig.WEAR_DEVICE_TOKEN_MESSAGE_PATH
         const val DEVICE_LABEL = "watch-ultra"
     }
 

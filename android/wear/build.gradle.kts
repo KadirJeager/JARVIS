@@ -16,6 +16,15 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1"
+
+        // Wear W1 pairing contract (Task 4 review fix): same single gradle.properties
+        // literal :app's WatchPairing reads -- see that module's identical
+        // buildConfigField and android/gradle.properties#jarvis.wearDeviceTokenMessagePath.
+        buildConfigField(
+            "String",
+            "WEAR_DEVICE_TOKEN_MESSAGE_PATH",
+            "\"${providers.gradleProperty("jarvis.wearDeviceTokenMessagePath").get()}\"",
+        )
     }
 
     buildTypes {
@@ -37,6 +46,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

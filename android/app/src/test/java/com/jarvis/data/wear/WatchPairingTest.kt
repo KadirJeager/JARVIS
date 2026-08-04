@@ -1,5 +1,6 @@
 package com.jarvis.data.wear
 
+import com.jarvis.BuildConfig
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -47,4 +48,11 @@ class WatchPairingTest {
         assertTrue(result is PairResult.Failed)
         assertTrue((result as PairResult.Failed).userMessage.isNotBlank())
     }
+
+    /** Task 4 review fix: [WatchPairing.TOKEN_PATH] must read the SAME shared
+     * BuildConfig source `:wear`'s `TokenListenerService.MESSAGE_PATH` reads (both
+     * generated from `android/gradle.properties#jarvis.wearDeviceTokenMessagePath`) —
+     * not a locally hand-typed literal that could silently drift from the watch side. */
+    @Test fun `token path is sourced from the shared BuildConfig contract`() =
+        assertEquals(BuildConfig.WEAR_DEVICE_TOKEN_MESSAGE_PATH, WatchPairing.TOKEN_PATH)
 }
