@@ -27,6 +27,9 @@ biometric = "1.1.0"
 # the messaging artifact carries NO version of its own: one place decides, always.
 googleServices = "4.5.0"
 firebaseBom = "34.17.0"
+# Stable line only (1.7.0-alpha07 is the current alpha, excluded on purpose).
+wearCompose = "1.6.2"
+playServicesWearable = "20.0.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -60,6 +63,10 @@ androidx-biometric = { group = "androidx.biometric", name = "biometric", version
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 # No version on purpose — the BOM above supplies it.
 firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+wear-compose-material = { group = "androidx.wear.compose", name = "compose-material", version.ref = "wearCompose" }
+wear-compose-foundation = { group = "androidx.wear.compose", name = "compose-foundation", version.ref = "wearCompose" }
+wear-compose-navigation = { group = "androidx.wear.compose", name = "compose-navigation", version.ref = "wearCompose" }
+play-services-wearable = { group = "com.google.android.gms", name = "play-services-wearable", version.ref = "playServicesWearable" }
 
 [plugins]
 # AGP 9.x has built-in Kotlin support — the org.jetbrains.kotlin.android plugin is
