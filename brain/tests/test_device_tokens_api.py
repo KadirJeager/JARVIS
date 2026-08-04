@@ -78,3 +78,32 @@ def test_minted_token_authenticates_chat_and_dies_on_revoke(client, db, monkeypa
 
 def test_mint_rejects_a_blank_device(client):
     assert client.post("/api/device-tokens", json={"device": "  "}).status_code == 422
+
+
+# -- 502 dalları: _init() başarılı, backing device_tokens çağrısı patlıyor --
+# (test_api.py'deki test_conversations_returns_502_on_failure /
+# test_delete_conversation_returns_502_on_failure deseninin aynısı.)
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("firestore down")
+
+
+def test_mint_returns_502_on_failure(client, monkeypatch):
+    monkeypatch.setattr(device_tokens, "mint", _boom)
+    r = client.post("/api/device-tokens", json={"device": "watch-ultra"})
+    assert r.status_code == 502
+    assert "altyapı" in r.json()["detail"]
+
+
+def test_list_returns_502_on_failure(client, monkeypatch):
+    monkeypatch.setattr(device_tokens, "list_tokens", _boom)
+    r = client.get("/api/device-tokens")
+    assert r.status_code == 502
+    assert "altyapı" in r.json()["detail"]
+
+
+def test_revoke_returns_502_on_failure(client, monkeypatch):
+    monkeypatch.setattr(device_tokens, "revoke", _boom)
+    r = client.delete("/api/device-tokens/some-id")
+    assert r.status_code == 502
+    assert "altyapı" in r.json()["detail"]
