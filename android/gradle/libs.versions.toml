@@ -67,6 +67,9 @@ wear-compose-material = { group = "androidx.wear.compose", name = "compose-mater
 wear-compose-foundation = { group = "androidx.wear.compose", name = "compose-foundation", version.ref = "wearCompose" }
 wear-compose-navigation = { group = "androidx.wear.compose", name = "compose-navigation", version.ref = "wearCompose" }
 play-services-wearable = { group = "com.google.android.gms", name = "play-services-wearable", version.ref = "playServicesWearable" }
+# Same release train as "coroutines" (1.11.0 confirmed the latest stable on maven-metadata.xml
+# for this artifact at the time of writing) — Tasks.await() interop for NodeClient/MessageClient.
+kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "coroutines" }
 
 [plugins]
 # AGP 9.x has built-in Kotlin support — the org.jetbrains.kotlin.android plugin is

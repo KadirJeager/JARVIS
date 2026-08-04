@@ -22,6 +22,9 @@ import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
+import com.jarvis.data.net.DeviceTokenApi
+import com.jarvis.data.net.DeviceTokenRequest
+import com.jarvis.data.net.DeviceTokenResponse
 import com.jarvis.data.net.FcmApi
 import com.jarvis.data.net.FcmRegisterResponse
 import com.jarvis.data.net.FcmTokenRequest
@@ -97,6 +100,16 @@ class VoiceCallWiringTest {
      */
     private class FakeFcmApi : FcmApi {
         override suspend fun register(req: FcmTokenRequest) = FcmRegisterResponse(true)
+    }
+
+    /**
+     * Watch pairing is wired into [AppContainer] like every other API, so this test has to
+     * supply one. It answers locally rather than reaching the deployed backend: a test
+     * suite must not talk to production at all.
+     */
+    private class FakeDeviceTokenApi : DeviceTokenApi {
+        override suspend fun mint(req: DeviceTokenRequest) =
+            DeviceTokenResponse("jdt_fake", "id", req.device, "2099-01-01T00:00:00Z")
     }
 
     /**
@@ -206,7 +219,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi(), FakeDeviceTokenApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -256,7 +269,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi(), FakeDeviceTokenApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(
@@ -301,7 +314,7 @@ class VoiceCallWiringTest {
         app.container = AppContainer(
             app,
             authManager = FakeAuthClient(),
-            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi()),
+            apis = ApiSet(FakeChatApi(), FakeVoiceApi(), FakeConversationsApi(), FakeApprovalApi(), FakeFcmApi(), FakeDeviceTokenApi()),
             authStateStore = FakeAuthStateStore(),
             voiceSessionFactory = { scope ->
                 VoiceSession(

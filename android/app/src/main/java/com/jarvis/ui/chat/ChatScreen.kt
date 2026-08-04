@@ -71,6 +71,7 @@ fun ChatScreen(
     onDeleteConversation: (String) -> Unit = {},
     onApproveApproval: (String) -> Unit = {},
     onRejectApproval: (String) -> Unit = {},
+    onPairWatch: () -> Unit = {},
 ) {
     val listState = rememberLazyListState()
 
@@ -96,7 +97,7 @@ fun ChatScreen(
             .systemBarsPadding()
             .imePadding(),
     ) {
-        TopBar(onOpenVoiceProfile, onToggleConversations)
+        TopBar(onOpenVoiceProfile, onToggleConversations, onPairWatch)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (state.messages.isEmpty() && state.pinnedApprovals.isEmpty() && !state.loading) {
                 EmptyHint()
@@ -176,7 +177,11 @@ fun ChatScreen(
 }
 
 @Composable
-private fun TopBar(onOpenVoiceProfile: () -> Unit, onToggleConversations: () -> Unit) {
+private fun TopBar(
+    onOpenVoiceProfile: () -> Unit,
+    onToggleConversations: () -> Unit,
+    onPairWatch: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -196,6 +201,16 @@ private fun TopBar(onOpenVoiceProfile: () -> Unit, onToggleConversations: () -> 
         Spacer(Modifier.size(10.dp))
         Text("Jarvis", style = MaterialTheme.typography.titleLarge, color = JarvisTextPrimary)
         Spacer(Modifier.weight(1f))
+        // Wear W1 Task 3: the one-time "mint + push to the watch" action. A TextButton
+        // in the top bar, same shape as "Ses kimliğim" right beside it — this app has no
+        // overflow/settings menu to slot a one-off device action into, so the existing
+        // top-bar action row IS that menu.
+        TextButton(
+            onClick = onPairWatch,
+            modifier = Modifier.testTag("pair_watch"),
+        ) {
+            Text("Saati eşleştir", color = JarvisCyan, style = MaterialTheme.typography.bodyMedium)
+        }
         TextButton(
             onClick = onOpenVoiceProfile,
             // No extra .semantics{contentDescription=...}: the child Text already

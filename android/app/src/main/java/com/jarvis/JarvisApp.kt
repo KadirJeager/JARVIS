@@ -15,6 +15,7 @@ import com.jarvis.data.chat.ChatRepository
 import com.jarvis.data.chat.ConversationsRepository
 import com.jarvis.data.chat.DataStoreSessionStore
 import com.jarvis.data.net.ApiSet
+import com.jarvis.data.net.DeviceTokenRequest
 import com.jarvis.data.net.NetworkModule
 import com.jarvis.data.net.VOICE_WS_URL
 import com.jarvis.data.push.FcmTokenRegistrar
@@ -26,8 +27,11 @@ import com.jarvis.data.voice.session.AndroidSpeechToText
 import com.jarvis.data.voice.session.AndroidTextToSpeech
 import com.jarvis.data.voice.session.OkHttpVoiceTransport
 import com.jarvis.data.voice.session.VoiceSession
+import com.jarvis.data.wear.WatchPairing
+import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.tasks.await
 
 /**
  * Hand-rolled DI container (no Hilt — YAGNI for this slice). Wires the deployed backend
@@ -111,6 +115,23 @@ class AppContainer(
         val outcome = fcmTokenRegistrar.registerCurrentToken()
         Log.i(PUSH_LOG_TAG, "fcm: uygulama açılışı kayıt sonucu=$outcome")
     }
+
+    /**
+     * Watch pairing (Wear W1 Task 3): mints a durable device token over the SAME
+     * authenticated Retrofit chain as every other call — [apis.deviceTokens] rides
+     * [NetworkModule.createApis]'s `tokenProvider`/`tokenRefresher`, so this always
+     * carries the phone's own fresh Google Bearer, never a device token (which the
+     * endpoint would 403 anyway, and which the phone never holds). The minted token is
+     * pushed to every connected watch node over the Wearable Data Layer and is never
+     * logged or persisted here — see [WatchPairing].
+     */
+    val watchPairing = WatchPairing(
+        mint = { device -> apis.deviceTokens.mint(DeviceTokenRequest(device)).token },
+        listNodes = { Wearable.getNodeClient(appContext).connectedNodes.await().map { it.id } },
+        sendTo = { nodeId, path, payload ->
+            Wearable.getMessageClient(appContext).sendMessage(nodeId, path, payload).await()
+        },
+    )
 }
 
 class JarvisApp : Application() {

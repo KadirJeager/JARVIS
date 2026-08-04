@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -28,6 +29,7 @@ import com.jarvis.ui.VoiceActions
 import com.jarvis.ui.chat.ChatViewModel
 import com.jarvis.data.voice.session.VoicePhase
 import com.jarvis.ui.theme.JarvisTheme
+import com.jarvis.data.wear.PairResult
 import com.jarvis.ui.voice.VoiceProfileViewModel
 import com.jarvis.ui.voicecall.VoiceCallOverlay
 import com.jarvis.ui.voicecall.VoiceCallViewModel
@@ -212,6 +214,20 @@ class MainActivity : FragmentActivity() {
                     else voicePermissionLauncher.launch(wanted.toTypedArray())
                 }
 
+                // Wear W1 Task 3: mint + push, one shot. No new screen and no new
+                // persisted state -- the result is reported once via a plain Toast,
+                // matching this app's lightest existing feedback surface.
+                fun pairWatch() {
+                    scope.launch {
+                        val message = when (val result = container.watchPairing.pair()) {
+                            is PairResult.Sent -> "Saat eşleştirildi"
+                            PairResult.NoWatch -> "Bağlı saat bulunamadı"
+                            is PairResult.Failed -> result.userMessage
+                        }
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+                    }
+                }
+
                 // A push notification carries `data.approval_id` (fcm.send_approval,
                 // spec §10); tapping it must land on THAT card. Keyed on the flow, not
                 // on Unit, so a tap that arrives while the app is already running
@@ -344,6 +360,7 @@ class MainActivity : FragmentActivity() {
                     onDeleteConversation = vm::deleteConversation,
                     onApproveApproval = vm::approveApproval,
                     onRejectApproval = vm::rejectApproval,
+                    onPairWatch = { pairWatch() },
                 )
 
                 // The overlay is plain composition: closing it fires no lifecycle event

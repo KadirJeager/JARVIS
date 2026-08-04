@@ -67,6 +67,11 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
 
+    // Watch pairing (Wear W1 Task 3): NodeClient/MessageClient to push the device token
+    // to the connected watch, plus the coroutine .await() bridge for their Tasks.
+    implementation(libs.play.services.wearable)
+    implementation(libs.kotlinx.coroutines.play.services)
+
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 
