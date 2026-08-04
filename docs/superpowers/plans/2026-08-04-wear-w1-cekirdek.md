@@ -11,7 +11,8 @@
 ## Global Constraints
 
 - **Emülatör-önce (Kadir'in şartı):** hiçbir adım gerçek saate KURULUM yapmaz. Doğrulama `bd_watch` AVD'de (mevcut, android-36/android-wear-signed). Telefon tarafı APK yalnız S23'e (`PHONE_SERIAL`, USB'de takılı) — Kadir'in günlük akışı.
-- **Android build'leri `gbuild.sh` bellek muhafızıyla koşar ve ÇIKTISI PIPE'LANMAZ** — exit kodu kontrol edilir, "kurdum" demeden önce APK zaman damgasına bakılır (LESSONS 4 Ağu, bu oturumda bir kez daha yaşandı).
+- **Build çıktısı PIPE'LANMAZ** — `./gradlew <task> ; echo "exit=$?"` biçiminde koşulur ve exit kodu okunur; "kurdum" demeden önce APK zaman damgasına bakılır (`ls -la <apk>`) — LESSONS 4 Ağu, bu oturumda bir kez daha yaşandı. (`gbuild.sh` bu repoda YOK; başka projenin sarmalayıcısıydı.)
+- **BELLEK MUHAFIZI (bu makine 30 GB, oturum sırasında ~6 GB boş):** her Gradle çağrısından ÖNCE `free -g` ile boş belleğe bak; **available < 4 GB ise DERLEME BAŞLATMA** — `./gradlew --stop` ile eski daemon'ları kapat, tekrar bak, hâlâ yetersizse DUR ve raporla (BLOCKED). Derleme bitince ağır işler için `./gradlew --stop`. `org.gradle.jvmargs=-Xmx2048m` zaten pinli, artırma.
 - Düz `jdt_` token saatte YALNIZ şifreli saklanır (Keystore AES/GCM + DataStore); loglanmaz, ekranda gösterilmez.
 - Token yokken saat DÜRÜST ekran gösterir ("Telefondan eşleştir"); sessiz boş ekran/sonsuz spinner YOK (25 Tem dersi).
 - Sohbet oturum kimliği `wear-` önekli (telefonun `web-`/oturum düzenine paralel; sunucu `sanitize_session_id`'den geçirir).
@@ -184,12 +185,12 @@ fun WearRoot() {
 - [ ] **Step 7: Derle ve DOĞRULA** (pipe YOK; exit kodu + APK damgası):
 
 ```bash
+free -g                      # available < 4 GB ise DERLEME YOK (Global Constraints)
 cd /home/user/Projeler/JARVIS/android
-./gbuild.sh :wear:assembleDebug ; echo "exit=$?"
+./gradlew :wear:assembleDebug ; echo "exit=$?"
 ls -la wear/build/outputs/apk/debug/wear-debug.apk
+./gradlew :app:assembleDebug ; echo "exit=$?"   # catalog değişikliği telefonu kırmamalı
 ```
-
-(`gbuild.sh` repo'da yoksa `./gradlew :wear:assembleDebug` kullan — yine pipe'sız, `echo exit=$?` ile. `:app:assembleDebug`'ın da hâlâ derlendiğini bir kez doğrula: catalog değişikliği telefonu kırmamalı.)
 
 - [ ] **Step 8: Commit**
 
