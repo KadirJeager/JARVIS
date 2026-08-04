@@ -20,7 +20,7 @@ spec:
         # is actually warm.
         run.googleapis.com/cpu-throttling: 'false'
       labels:
-        client.knative.dev/nonce: 'y2b1785511387'
+        client.knative.dev/nonce: 'w0ba11cbc1'
         run.googleapis.com/startupProbeType: Default
     spec:
       containerConcurrency: 80
