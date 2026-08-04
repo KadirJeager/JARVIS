@@ -19,7 +19,7 @@ spec:
       timeoutSeconds: 300
       containers:
       - name: brain
-        image: gcr.io/your-gcp-project/jarvis-brain:gecefix4-591d857
+        image: gcr.io/your-gcp-project/jarvis-brain:gecefix4-21800b3
         ports:
         - containerPort: 8080
           name: http1
