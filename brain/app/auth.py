@@ -26,11 +26,12 @@ def verify_token_email(token: str) -> str:
 
 
 def require_user(authorization: str = Header(default="")) -> str:
+    """Ortak kapı: Google ID token VEYA `jdt_` cihaz token'ı — spec §4.3."""
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Giriş gerekli")
     token = authorization.removeprefix("Bearer ")
     try:
-        return verify_token_email(token)
+        return verify_bearer_email(token)
     except PermissionError as exc:
         status_code = 401 if str(exc) == "Geçersiz oturum" else 403
         raise HTTPException(status_code=status_code, detail=str(exc))
@@ -55,3 +56,58 @@ def require_scheduler(authorization: str = Header(default="")) -> str:
     if email != config.SCHEDULER_SA:
         raise HTTPException(status_code=403, detail="Bu hesap yetkili değil")
     return email
+
+
+# -- Wear W0: cihaz token'ları (spec §4.3) -----------------------------------
+#
+# verify_bearer_email iki şemanın ORTAK kapısıdır: `jdt_` önekli token cihaz
+# kayıt defterine, gerisi Google'a gider. HTTP (require_user) ve ses WS
+# handshake'i (voice.py) aynı kapıyı kullanır. db, modül import zinciri
+# döngüsüz kalsın diye provider ile enjekte edilir: main._init başlangıçta
+# auth.init(lambda: _memory.db) çağırır; None/başarısız provider cihaz
+# token'ını FAIL-CLOSED reddeder, Google yolu etkilenmez.
+
+_db_provider = None
+
+
+def init(db_provider) -> None:
+    global _db_provider
+    _db_provider = db_provider
+
+
+def verify_bearer_email(token: str) -> str:
+    """Ortak kimlik kapısı: cihaz token'ı veya Google ID token → email.
+
+    Her iki yol da aynı PermissionError mesajını kullanır ("Geçersiz oturum") —
+    hangi şemanın reddettiği dışarı sızmaz."""
+    from . import device_tokens
+
+    if token.startswith(device_tokens.PREFIX):
+        if _db_provider is None:
+            raise PermissionError("Geçersiz oturum")
+        try:
+            db = _db_provider()
+        except Exception:
+            raise PermissionError("Geçersiz oturum")
+        return device_tokens.verify(db, token)
+    return verify_token_email(token)
+
+
+def require_google_user(authorization: str = Header(default="")) -> str:
+    """Yalnız TAZE Google ID token kabul eden dependency (spec §4.2).
+
+    Cihaz token uçları (bas/listele/iptal) bunu kullanır: cihaz token'ı kendi
+    soyunu yönetemez — kimlik düzleminde recursion yasağı."""
+    from . import device_tokens
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Giriş gerekli")
+    token = authorization.removeprefix("Bearer ")
+    if token.startswith(device_tokens.PREFIX):
+        raise HTTPException(status_code=403,
+                            detail="Bu işlem için Google oturumu gerekli")
+    try:
+        return verify_token_email(token)
+    except PermissionError as exc:
+        status_code = 401 if str(exc) == "Geçersiz oturum" else 403
+        raise HTTPException(status_code=status_code, detail=str(exc))

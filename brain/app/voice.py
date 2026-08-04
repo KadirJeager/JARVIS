@@ -39,7 +39,7 @@ from google.genai import types
 
 from . import config, trust, vitals, voice_trust
 from . import voice_protocol as vp
-from .auth import verify_token_email
+from .auth import verify_bearer_email
 
 router = APIRouter()
 
@@ -506,7 +506,7 @@ async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
         return None
     try:
         parsed = vp.parse_hello(hello)
-        email = verify_token_email(parsed["token"])
+        email = verify_bearer_email(parsed["token"])
     except (ValueError, PermissionError):
         await ws.send_text(json.dumps(vp.evt_error("Giriş doğrulanamadı")))
         await ws.close(code=4401)

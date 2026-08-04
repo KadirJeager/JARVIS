@@ -105,7 +105,7 @@ def wired(monkeypatch):
     svc = SpeakerService(db, embed_fn=lambda pcm: [1.0, 0.0, 0.0], now_fn=lambda: "t",
                           accept=0.35, adapt=0.6, cap=20, top_k=3)
     monkeypatch.setattr(main, "get_speaker_service", lambda: svc)
-    monkeypatch.setattr("app.voice.verify_token_email", lambda t: "kadir@example.com")
+    monkeypatch.setattr("app.voice.verify_bearer_email", lambda t: "kadir@example.com")
     return main, sessions
 
 

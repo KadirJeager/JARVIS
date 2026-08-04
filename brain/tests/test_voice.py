@@ -1003,7 +1003,7 @@ _CAPS_HELLO = json.dumps({
 
 @pytest.mark.asyncio
 async def test_handshake_valid_hello_returns_email(monkeypatch):
-    monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
+    monkeypatch.setattr(voice_mod, "verify_bearer_email", lambda token: "user@example.com")
     ws = FakeHandshakeWS(text=_CAPS_HELLO)
     email, *_ = await _handshake(ws)
     assert email == "user@example.com"
@@ -1017,7 +1017,7 @@ async def test_handshake_returns_device_hint_and_presence_from_hello(monkeypatch
     trust-fusion wiring in ws_voice has real values to pass into VoiceBridge --
     this pins the tuple order and that the values actually come from the
     parsed hello, not swapped or hardcoded."""
-    monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
+    monkeypatch.setattr(voice_mod, "verify_bearer_email", lambda token: "user@example.com")
     ws = FakeHandshakeWS(text=json.dumps({
         "token": "good-token", "device_hint": "headset", "presence": "locked",
         "client_caps": {"stt": "device", "tts": "device", "proto": 2},
@@ -1050,7 +1050,7 @@ async def test_handshake_without_client_caps_is_a_v1_client_and_gets_4409(monkey
     """A caps-less hello authenticated FINE -- it is just asking for the
     retired Gemini Live bridge. Reject with a DISTINCT code (4409, not 4401)
     so the client can tell "upgrade required" apart from "auth failed"."""
-    monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
+    monkeypatch.setattr(voice_mod, "verify_bearer_email", lambda token: "user@example.com")
     ws = FakeHandshakeWS(text=json.dumps({"token": "good-token"}))
     email = await _handshake(ws)
     assert email is None
@@ -1063,7 +1063,7 @@ async def test_handshake_without_client_caps_is_a_v1_client_and_gets_4409(monkey
 async def test_handshake_non_dict_caps_is_not_a_v2_client(monkeypatch):
     """client_caps present but malformed (not an object) must not masquerade
     as a v2 client."""
-    monkeypatch.setattr(voice_mod, "verify_token_email", lambda token: "user@example.com")
+    monkeypatch.setattr(voice_mod, "verify_bearer_email", lambda token: "user@example.com")
     ws = FakeHandshakeWS(text=json.dumps({"token": "good-token", "client_caps": "device"}))
     email = await _handshake(ws)
     assert email is None

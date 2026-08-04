@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
-from . import approvals, config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_manage, voice_trust
+from . import approvals, auth, config, conversations, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_scheduler, require_user
 
@@ -242,6 +242,9 @@ def _init() -> None:
     _memory = Memory(
         db, embed_fn=embedders.embed_passage, embed_query_fn=embedders.embed_query
     )
+    # Wear W0: cihaz token doğrulaması aynı Firestore istemcisini kullanır
+    # (auth modülü main'i import edemez -- provider enjeksiyonu, spec §4.3).
+    auth.init(lambda: _memory.db)
     # Single audit instance shared by the orchestrator's policy callback AND
     # the guest gate (app/guest_gate.py) -- one trail, one Firestore client.
     _audit = FirestoreAudit(db)
