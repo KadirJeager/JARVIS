@@ -25,6 +25,7 @@ def enroll_client(monkeypatch):
     # previous test built so this one really gets a service bound to `db` above.
     monkeypatch.setattr(main_mod, "_speaker_service", None)
     monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
+    monkeypatch.setattr("app.voice_challenge.has_valid_grant", lambda db, user_id, now_fn=None: True)
     with TestClient(main_mod.app) as c:
         yield c, db
     main_mod.app.dependency_overrides.clear()
@@ -262,7 +263,7 @@ def test_concurrent_enroll_and_identify_do_not_lose_a_write():
     def do_identify():
         try:
             start.wait(timeout=5)
-            svc.identify("kadir@example.com", b"\x00\x01", "phone", auth_is_kadir=True)
+            svc.identify("kadir@example.com", b"\x00\x01", "phone", auth_is_kadir=True, cm_ok=True)
         except Exception as exc:            # pragma: no cover - reported below
             errors.append(exc)
 
@@ -276,3 +277,50 @@ def test_concurrent_enroll_and_identify_do_not_lose_a_write():
     profile = load_profile(db, "kadir@example.com")
     assert len(profile.anchors) == 2, "the enrolled anchor was lost to the adapt write"
     assert len(profile.adaptive) == 1, "the adaptive sample was lost to the enroll write"
+
+
+def test_enroll_without_grant_returns_409(monkeypatch):
+    """Enrollment without an active liveness grant must return 409 Conflict."""
+    import app.voice_challenge as vc
+    db = FakeDB()
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    monkeypatch.setattr(main_mod, "_enroll_db", lambda: db, raising=False)
+    monkeypatch.setattr(main_mod, "_speaker_service", None)
+    monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
+
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+
+    try:
+        with TestClient(main_mod.app) as c:
+            r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+            assert r.status_code == 409
+            assert "doğrulama kodu" in r.json()["detail"].lower()
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+
+def test_enroll_with_real_grant_flow(monkeypatch):
+    """Enrollment succeeds when a challenge is created and verified via voice_challenge."""
+    import app.voice_challenge as vc
+    db = FakeDB()
+    monkeypatch.setattr(main_mod, "_init", lambda: None)
+    monkeypatch.setattr(main_mod, "_enroll_db", lambda: db, raising=False)
+    monkeypatch.setattr(main_mod, "_speaker_service", None)
+    monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
+
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+
+    try:
+        # Create challenge + verify and grant
+        code, _ = vc.create_challenge(db, "kadir@example.com")
+        granted = vc.verify_and_grant(db, "kadir@example.com", code)
+        assert granted is True
+
+        with TestClient(main_mod.app) as c:
+            r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+            assert r.status_code == 200
+            assert r.json() == {"anchors": 1}
+    finally:
+        main_mod.app.dependency_overrides.clear()

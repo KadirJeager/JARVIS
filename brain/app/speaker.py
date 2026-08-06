@@ -253,8 +253,15 @@ class SpeakerService:
             return len(speaker_store.load_profile(self.db, user_id).anchors)
 
     def identify(self, user_id: str, pcm: bytes, device_hint: str,
-                 auth_is_kadir: bool, allow_adapt: bool = True) -> IdentifyOutcome:
+                 auth_is_kadir: bool, allow_adapt: bool = True,
+                 cm_ok: bool | None = None) -> IdentifyOutcome:
         """`allow_adapt=False` means "score this, but never learn from it".
+
+        `cm_ok`: Anti-spoofing verdict. True = bonafide real human voice,
+        False = spoof attack rejected, None = no CM evidence available.
+        Self-feeding (ADAPT) requires `cm_ok is True` (fail-closed: None or False
+        locks gallery writing so synthetic/unverified audio cannot contaminate
+        the voiceprint gallery).
 
         Distinct from `auth_is_kadir`, which answers "whose voice may this be";
         this answers "is this channel trustworthy as a teaching example right
@@ -276,16 +283,16 @@ class SpeakerService:
             score = profile.score(vec, self.top_k)
             anchor_score = profile.anchor_score(vec, self.top_k)
             verified = score >= self.accept
-            if anchor_score >= self.adapt and auth_is_kadir and allow_adapt:
+            if anchor_score >= self.adapt and auth_is_kadir and allow_adapt and cm_ok is True:
                 adapted_sample_id = profile.adapt(
                     vec, device_hint, self.cap, self.now_fn, self.id_fn)
                 speaker_store.save_profile(self.db, user_id, profile)
         import logging
         logging.info(
             "speaker.identify: user=%s score=%.4f anchor_score=%.4f verified=%s "
-            "adapted=%s device=%s anchors=%d adaptive=%d accept=%.2f adapt=%.2f",
+            "adapted=%s cm_ok=%s device=%s anchors=%d adaptive=%d accept=%.2f adapt=%.2f",
             user_id, score, anchor_score, verified, adapted_sample_id is not None,
-            device_hint, len(profile.anchors), len(profile.adaptive),
+            cm_ok, device_hint, len(profile.anchors), len(profile.adaptive),
             self.accept, self.adapt,
         )
         return IdentifyOutcome(verified=verified, score=score, vec=vec,
@@ -342,7 +349,8 @@ class SpeakerService:
 
     def record_history(self, user_id: str, *, score: float, verified: bool,
                        vec: list[float], device_hint: str, presence: str,
-                       trust_level: str, adapted_sample_id: str | None) -> str:
+                       trust_level: str, adapted_sample_id: str | None,
+                       cm_fake_prob: float | None = None) -> str:
         """Append one utterance's verification outcome to the history ring
         buffer (spec §4.2). Under the gallery lock: corrections (Task 6) read
         and write history and gallery TOGETHER, so every mutation of either
@@ -352,6 +360,7 @@ class SpeakerService:
             "verified": verified, "device_hint": device_hint,
             "presence": presence, "trust_level": trust_level,
             "adapted_sample_id": adapted_sample_id, "correction": None,
+            "cm_fake_prob": cm_fake_prob,
             "vec": vec,
         }
         with self._gallery_lock:

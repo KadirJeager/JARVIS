@@ -396,7 +396,7 @@ def test_concurrent_confirm_and_identify_do_not_lose_a_write():
     def do_identify():
         try:
             start.wait(timeout=5)
-            svc.identify(USER, b"\x00\x01", "phone", auth_is_kadir=True)
+            svc.identify(USER, b"\x00\x01", "phone", auth_is_kadir=True, cm_ok=True)
         except Exception as exc:            # pragma: no cover - reported below
             errors.append(exc)
 

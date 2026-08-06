@@ -45,8 +45,15 @@ def evt_error(message: str) -> dict:
     return {"type": "error", "message": message}
 
 
-def evt_speaker(role: str, verified: bool, score: float) -> dict:
-    return {"type": "speaker", "role": role, "verified": verified, "score": score}
+def evt_speaker(role: str, verified: bool, score: float, cm_ok: bool | None = None) -> dict:
+    """Speaker verification result event.
+    If `cm_ok` is None, the `cm_ok` key is omitted for backward compatibility.
+    If `cm_ok` is bool (True/False), `"cm_ok": true/false` is included in the JSON object.
+    """
+    res = {"type": "speaker", "role": role, "verified": verified, "score": score}
+    if cm_ok is not None:
+        res["cm_ok"] = cm_ok
+    return res
 
 
 def parse_hello(raw: str) -> dict:

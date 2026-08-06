@@ -34,12 +34,12 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from google.genai import types
 
-from . import config, trust, vitals, voice_trust
+from . import antispoof, config, trust, vitals, voice_challenge, voice_trust
 from . import voice_protocol as vp
-from .auth import verify_bearer_email
+from .auth import require_google_user, verify_bearer_email
 
 router = APIRouter()
 
@@ -50,6 +50,8 @@ APP_NAME = "jarvis"   # must match main.APP_NAME: it is part of the ADK session 
 SPEECH_CHARS_PER_SECOND = 14.0
 SPEECH_START_MARGIN_SECONDS = 1.0
 SPEECH_MAX_SECONDS = 60.0
+
+active_bridges: dict[str, "VoiceBridge"] = {}
 
 
 class VoiceBridge:
@@ -66,58 +68,41 @@ class VoiceBridge:
         self._user_id = ""
         self._session_id = ""
         self._trust_key: voice_trust.SessionKey | None = None
-        # The speech_start ONSET latch. A speech_start frame means "the device
-        # heard speech begin"; the first one of an utterance trims the buffer
-        # to the onset window (see _handle_text_frame). Reset when the
-        # utterance reaches its boundary (its user_text final), so the NEXT
-        # utterance's first speech_start trims again. Repeats within the same
-        # utterance must NOT trim: the audio in front of the window is by then
-        # the user's own speech, already accumulating.
+        self._ws: WebSocket | None = None
+        self._pending_challenge_code: str | None = None
+        # The speech_start ONSET latch.
         self._speech_open = False
-        # SERIALIZES text turns: run one run_async turn at a time, queue the
-        # rest FIFO. Why queue (via the lock) instead of dropping: with STT on
-        # the device a user_text final can legitimately arrive while the
-        # previous turn is still generating -- a barge-in utterance, or a quick
-        # follow-up -- and dropping it would silently lose user speech, while
-        # an error frame would punish ordinary usage. asyncio.Lock wakes
-        # waiters in acquisition order, so replies keep utterance order, and
-        # no new queue machinery is needed.
+        # SERIALIZES text turns: run one run_async turn at a time, queue the rest FIFO.
         self._turn_lock = asyncio.Lock()
-        # Strong refs to in-flight turn tasks so teardown can cancel them and
-        # the loop cannot garbage-collect them mid-run.
+        # Strong refs to in-flight turn tasks so teardown can cancel them.
         self._turn_tasks: set[asyncio.Task] = set()
-        # Set when the peer is gone (receive reported disconnect, or a send
-        # hit a closed socket). Every send goes through _safe_send, which
-        # flips this and swallows the RuntimeError uvicorn raises on
-        # 'websocket.send' after 'websocket.close' -- seen live as ERROR
-        # tracebacks (2026-07-31) when the client hung up mid-turn: the turn
-        # task's jarvis_text/turn_complete then crashed the whole connection
-        # handler. A dead peer is not a server error.
+        # Set when the peer is gone.
         self._closed = False
-        # Identifies THIS connection in the shared trust registry. The registry
-        # key is per-user, so two concurrent sockets collide on it; this token
-        # is what lets voice_trust.clear() compare-and-delete instead of wiping
-        # a still-live sibling connection's signals (see voice_trust.clear).
+        # Identifies THIS connection in the shared trust registry.
         self._owner = uuid.uuid4().hex
-        # Monotonic deadline: until when the DEVICE is probably still speaking
-        # Jarvis's last reply out loud. Anything its microphone captures before
-        # then is echo, not Kadir.
-        #
-        # Why an ESTIMATE and not a flag between jarvis_text and turn_complete:
-        # those two frames go out back to back, microseconds apart -- the device
-        # starts speaking only after it receives them, and keeps speaking for
-        # seconds. A flag spanning them would be a placebo. The server has no
-        # direct signal for "the TTS is still playing" and this deliberately
-        # does not invent a protocol frame to ask the client for one: the
-        # client is exactly the component this guards against regressing.
-        #
-        # So it is estimated from the reply's length, and it is only ever
-        # allowed to SUPPRESS ADAPTATION -- never to change a verification, a
-        # trust level or a turn. Erring long costs a few adaptive samples the
-        # gallery did not strictly need; erring short would let the assistant's
-        # own TTS teach the gallery, which is the one failure this system
-        # cannot recover from without a human deleting samples.
+        # Monotonic deadline for TTS playback estimate.
         self._speaking_until = 0.0
+
+    def _get_db(self):
+        if self.memory is not None and getattr(self.memory, "db", None) is not None:
+            return self.memory.db
+        try:
+            from . import main
+            return main._enroll_db()
+        except Exception:
+            return None
+
+    async def prompt_challenge(self, code: str) -> bool:
+        """Prompt user via TTS over WebSocket with 4-digit challenge code."""
+        self._pending_challenge_code = code
+        words = voice_challenge.digit_to_words(code)
+        msg = f"Doğrulama kodunuz: {words}"
+        if self._ws is None or self._closed:
+            return False
+        sent = await self._safe_send(self._ws, vp.evt_jarvis_text(msg))
+        if sent:
+            await self._safe_send(self._ws, vp.evt_transcript("jarvis", msg))
+        return sent
 
     # Seam so tests can move time without sleeping. Monotonic, not wall clock:
     # this is a duration guard and must not jump with an NTP correction.
@@ -138,7 +123,7 @@ class VoiceBridge:
             len(reply) / SPEECH_CHARS_PER_SECOND + SPEECH_START_MARGIN_SECONDS,
         )
 
-    def _publish_trust(self, level: str, voice_score: float | None) -> None:
+    def _publish_trust(self, level: str, voice_score: float | None, cm_ok: bool | None = None) -> None:
         """Make this connection's identity signals visible to the policy layer.
         No-op before run() has established the session key. See voice_trust.py
         for why this cannot just be a session.state write."""
@@ -147,7 +132,7 @@ class VoiceBridge:
         voice_trust.publish(self._trust_key, voice_trust.VoiceSignals(
             trust_level=level, voice_score=voice_score,
             presence=self.presence, device_hint=self.device_hint,
-            owner=self._owner,
+            cm_ok=cm_ok, owner=self._owner,
         ))
 
     async def _safe_send(self, ws, payload: dict) -> bool:
@@ -256,17 +241,41 @@ class VoiceBridge:
         belong to the NEXT utterance anyway, and the same pause existed in v1
         (verification was awaited inline in the event pump)."""
         self._speech_open = False    # this utterance ended; next speech_start trims anew
-        # NO transcript("user") echo: the v2 client renders its own STT final
-        # locally the instant it produces it, so a server echo would only
-        # duplicate the row. The snapshot copy of the user's words goes into
-        # self.transcript inside the turn task, UNDER the lock: appending here
-        # would interleave a fast follow-up's user row ahead of the previous
-        # turn's jarvis row and misorder the snapshot.
         if self.speaker_service is not None:
             # min_bytes=0: the STT final is itself the positive signal that a
             # whole utterance preceded it, so short commands ("evet") must
             # still be verified. An empty buffer is a no-op inside.
             await self._verify_utterance(ws, min_bytes=0)
+
+        # Check for active voice challenge response
+        db = self._get_db()
+        pending_code = self._pending_challenge_code
+        if not pending_code and db is not None:
+            pending_doc = voice_challenge.get_pending_challenge(db, self._user_id)
+            if pending_doc:
+                pending_code = pending_doc.get("code")
+
+        if pending_code:
+            extracted_digits = voice_challenge.extract_digits_from_text(text)
+            matched = (pending_code in extracted_digits)
+            granted = False
+            if matched and db is not None:
+                granted = voice_challenge.verify_and_grant(db, self._user_id, pending_code)
+
+            self._pending_challenge_code = None
+            if granted:
+                reply = "Doğrulama kodu kabul edildi."
+                await self._safe_send(ws, vp.evt_jarvis_text(reply))
+                await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
+                await self._safe_send(ws, vp.evt_turn_complete())
+                return
+            else:
+                reply = "Doğrulama kodu hatalı veya süresi dolmuş."
+                await self._safe_send(ws, vp.evt_jarvis_text(reply))
+                await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
+                await self._safe_send(ws, vp.evt_turn_complete())
+                return
+
         task = asyncio.create_task(self._run_turn(ws, text))
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
@@ -335,10 +344,10 @@ class VoiceBridge:
                 )
 
     async def _verify_utterance(self, ws, min_bytes: int = 0) -> None:
-        """Called at the user utterance boundary: run speaker identity on the
-        buffered PCM, fuse into a trust level, publish it for the policy layer,
-        and tell the client. Any failure is logged and treated as unverified --
-        it must never break the audio stream.
+        """Called at the user utterance boundary: run anti-spoofing (CM) check,
+        run speaker identity on the buffered PCM, fuse into a trust level,
+        publish it for the policy layer, and tell the client. Any failure is
+        logged and treated as unverified/fail-safe -- it must never break the audio stream.
 
         `min_bytes` is the caller's floor. The v2 boundary (a user_text final)
         always passes 0: the device's STT already told us the buffer holds a
@@ -360,6 +369,27 @@ class VoiceBridge:
         self._utterance.clear()
         if not pcm:
             return
+
+        cm_ok: bool | None = None
+        cm_fake_prob: float | None = None
+
+        if config.CM_ENABLED:
+            try:
+                cm_is_bonafide, cm_fake_prob = await asyncio.wait_for(
+                    asyncio.to_thread(antispoof.is_bonafide, pcm),
+                    config.CM_TIMEOUT_S,
+                )
+                cm_ok = cm_is_bonafide
+                if not cm_ok:
+                    logging.warning(
+                        "voice CM: SPOOF REDDI user=%s fake_prob=%.4f threshold=%.2f bytes=%d",
+                        self._user_id, cm_fake_prob, config.CM_REJECT_THRESHOLD, len(pcm),
+                    )
+            except Exception:
+                logging.exception("voice bridge: CM evaluation failed for %s", self._user_id)
+                cm_ok = None
+                cm_fake_prob = None
+
         try:
             # OFF THE EVENT LOOP: real ECAPA inference (plus the ~89 MB lazy
             # model load on the very first call) is seconds of blocking CPU. On
@@ -371,6 +401,7 @@ class VoiceBridge:
                 self.speaker_service.identify,
                 self._user_id, pcm, self.device_hint, auth_is_kadir=True,
                 allow_adapt=self._now() >= self._speaking_until,
+                cm_ok=cm_ok,
             )
             verified, score = outcome.verified, outcome.score
         except Exception:
@@ -389,8 +420,8 @@ class VoiceBridge:
         # voice_score in the audit is the MEASURED voiceprint match (spec §6's
         # definition), not the floored fusion input -- "how close was it" is
         # what makes a past decision reconstructable.
-        self._publish_trust(level, score)
-        await self._safe_send(ws, vp.evt_speaker("user", verified, score))
+        self._publish_trust(level, score, cm_ok=cm_ok)
+        await self._safe_send(ws, vp.evt_speaker("user", verified, score, cm_ok=cm_ok))
         # History AFTER the trust publish and the client event: those two are
         # the turn's safety-relevant outputs, the history row is observability
         # (spec §4.2) -- it must neither delay nor break them. No row on the
@@ -404,16 +435,20 @@ class VoiceBridge:
                     vec=outcome.vec, device_hint=self.device_hint,
                     presence=self.presence, trust_level=level,
                     adapted_sample_id=outcome.adapted_sample_id,
+                    cm_fake_prob=cm_fake_prob,
                 )
             except Exception:
                 logging.exception(
                     "voice bridge: history record failed for %s", self._user_id)
         logging.info(
-            "voice trust: user=%s verified=%s score=%.4f presence=%s device=%s level=%s",
-            self._user_id, verified, score, self.presence, self.device_hint, level,
+            "voice trust: user=%s verified=%s score=%.4f presence=%s device=%s level=%s cm_ok=%s cm_fake_prob=%s",
+            self._user_id, verified, score, self.presence, self.device_hint, level, cm_ok, cm_fake_prob,
         )
 
     async def run(self, ws: WebSocket, user_id: str) -> None:
+        self._ws = ws
+        self._user_id = user_id
+        active_bridges[user_id] = self
         session_id = f"voice-{user_id}"
         # The session must EXIST before the first turn: Runner.run_async's
         # auto_create_session defaults to False (runners.py), so the runner's
@@ -455,6 +490,7 @@ class VoiceBridge:
             while await self._receive_once(ws):
                 pass
         finally:
+            active_bridges.pop(self._user_id, None)
             # The peer is gone (or the loop broke): anything still queued has
             # nowhere to send, so flag it BEFORE awaiting the turn tasks --
             # a task mid-run_async finishes into _safe_send no-ops instead of
@@ -557,3 +593,25 @@ async def ws_voice(ws: WebSocket) -> None:
             await ws.send_text(json.dumps(vp.evt_error("Sesli oturum düştü, tekrar bağlan")))
         with contextlib.suppress(RuntimeError, WebSocketDisconnect):
             await ws.close(code=1011)
+
+
+@router.post("/api/voice/challenge")
+async def create_challenge_endpoint(email: str = Depends(require_google_user)):
+    """Request a voice challenge for liveness verification during enrollment.
+
+    Generates a 4-digit challenge code in Firestore.
+    If an active WebSocket voice bridge exists for email, speaks the code via TTS.
+    """
+    from . import main
+    db = main._enroll_db()
+    code, _doc = voice_challenge.create_challenge(db, email)
+
+    bridge = active_bridges.get(email)
+    code_spoken = False
+    if bridge is not None and not bridge._closed:
+        code_spoken = await bridge.prompt_challenge(code)
+
+    return {
+        "status": "challenge_created",
+        "code_spoken": code_spoken,
+    }

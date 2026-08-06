@@ -51,6 +51,11 @@ def check_zone(tool_name: str, zone_resolver: "ZoneResolver | None" = None) -> s
     return config.DEFAULT_ZONE
 
 
+def check_tier(tool_name: str) -> str:
+    """Resolve a tool's tier (North Star Phase C). Unknown tool defaults to DEFAULT_TIER (t2)."""
+    return config.TOOL_TIERS.get(tool_name, config.DEFAULT_TIER)
+
+
 def write_audit(
     audit: AuditWriter,
     *,
@@ -63,6 +68,8 @@ def write_audit(
     voice_score: float | None = None,
     presence: str | None = None,
     device_hint: str | None = None,
+    tier: str | None = None,
+    cm_ok: bool | None = None,
 ) -> None:
     """Append one decision entry to the audit trail (spec §7: the trail must
     reconstruct WHY a decision was made, not just what it was).
@@ -80,14 +87,12 @@ def write_audit(
         "tool": tool_name,
         "args": {k: str(v)[:500] for k, v in (args or {}).items()},
         "zone": zone,
-        # "trust_level", NOT "trust": one concept, one name end to end --
-        # spec §7, config.TRUST_STATE_KEY and VoiceSignals.trust_level all
-        # use this spelling, and the audit is what a past decision is
-        # reconstructed from.
+        "tier": tier,
         "trust_level": trust_level,
         "voice_score": voice_score,
         "presence": presence,
         "device_hint": device_hint,
+        "cm_ok": cm_ok,
         "decision": decision,
     })
 
@@ -122,6 +127,34 @@ def _decide(zone: str, trust_level: str) -> str:
     if zone == config.ZONE_YELLOW:      # MEDIUM or LOW
         return "confirm"
     return "dry_run" if config.DRY_RUN else "allow"
+
+
+def _decide_voice(zone: str, trust_level: str, tier: str, signals: VoiceSignals) -> str:
+    """Voice channel decision matrix considering tier and countermeasure (CM) signals (Phase C).
+
+    Matrix rules:
+    - zone RED -> "block" (card flow takes over).
+    - signals.cm_ok is False (active spoof evidence): T0 allows (same-device screen), T1/T2/T3 require confirm.
+    - signals.cm_ok is None or signals.voice_score is None (absence of evidence):
+      - Tier T2+ (t2, t3) and trust != HIGH -> "confirm" (tightens GREEN T2+ under medium/low trust).
+      - T0/T1 or HIGH trust -> uses existing _decide matrix.
+    - signals.cm_ok is True (bonafide audio): uses existing _decide matrix.
+    """
+    if zone == config.ZONE_RED:
+        return "block"
+
+    if signals.cm_ok is False:
+        if tier == config.TIER_T0:
+            return _decide(zone, trust_level)
+        return "confirm"
+
+    if signals.cm_ok is None or signals.voice_score is None:
+        if tier in (config.TIER_T2, config.TIER_T3) and trust_level != trust.HIGH:
+            return "confirm"
+        return _decide(zone, trust_level)
+
+    # cm_ok is True
+    return _decide(zone, trust_level)
 
 
 TrustProvider = Callable[[Any], VoiceSignals | None]
@@ -224,9 +257,13 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
 
     def policy_callback(tool, args: dict[str, Any], tool_context) -> dict[str, Any] | None:
         zone = check_zone(tool.name, zone_resolver)
+        tier = check_tier(tool.name)
         signals = _voice_signals(trust_provider, tool_context)
         trust_level = signals.trust_level if signals else _read_trust(tool_context)
-        decision = _decide(zone, trust_level)
+        if signals is not None:
+            decision = _decide_voice(zone, trust_level, tier, signals)
+        else:
+            decision = _decide(zone, trust_level)
         write_audit(
             audit,
             actor=actor,
@@ -239,6 +276,8 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
             voice_score=signals.voice_score if signals else None,
             presence=signals.presence if signals else None,
             device_hint=signals.device_hint if signals else None,
+            tier=tier,
+            cm_ok=signals.cm_ok if signals else None,
             decision=decision,
         )
         if decision == "allow":
@@ -251,10 +290,17 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
         if decision == "block":
             return {"result": _red_block_text(tool.name, args, tool_context, approval_sink)}
         if decision == "confirm":
-            return {"result": (
-                f"GÜVEN DÜŞÜK: '{tool.name}' şu an düşük-güven bağlamında (kimlik doğrulanmadı). "
-                "Çalıştırmadan önce Kadir'den açık onay iste."
-            )}
+            if signals and signals.cm_ok is False:
+                confirm_msg = (
+                    f"SES KİMLİĞİ ŞÜPHELİ: bu oturumdaki ses sentetik olabilir — "
+                    f"Kadir'den açık onay almadan '{tool.name}' çalıştırılamaz."
+                )
+            else:
+                confirm_msg = (
+                    f"GÜVEN DÜŞÜK: '{tool.name}' şu an düşük-güven bağlamında (kimlik doğrulanmadı). "
+                    "Çalıştırmadan önce Kadir'den açık onay iste."
+                )
+            return {"result": confirm_msg}
         if decision == "dry_run":
             return {"result": f"DRY-RUN: '{tool.name}' şu argümanlarla çalışacaktı: {args}"}
         return None

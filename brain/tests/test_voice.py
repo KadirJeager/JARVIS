@@ -14,10 +14,15 @@ from fastapi import WebSocketDisconnect
 from google.genai import types
 
 import app.voice as voice_mod
-from app import config, speaker as speaker_mod, trust, voice_protocol as vp, voice_trust
+from app import antispoof, config, speaker as speaker_mod, trust, voice_protocol as vp, voice_trust
 from app.voice import APP_NAME, VoiceBridge, _handshake
 
 USER = "kadir@example.com"
+
+
+@pytest.fixture(autouse=True)
+def _default_fake_antispoof(monkeypatch):
+    monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: (True, 0.0))
 
 
 def _trust_key(user_id=USER):
@@ -508,7 +513,7 @@ class FakeSpeaker:
         self.allow_adapt_calls = []
         self.history = []
 
-    def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True):
+    def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True, cm_ok=None):
         self.calls.append((user_id, pcm, device_hint, auth_is_kadir))
         self.allow_adapt_calls.append(allow_adapt)
         return self.result
@@ -541,7 +546,7 @@ async def test_final_verifies_the_buffered_pcm_and_clears_the_buffer():
     assert signals is not None
     assert (signals.trust_level, signals.voice_score, signals.presence, signals.device_hint) == (
         trust.MEDIUM, 0.9, "locked", "headset")
-    assert {"type": "speaker", "role": "user", "verified": True, "score": 0.9} in _sent_json(ws)
+    assert {"type": "speaker", "role": "user", "verified": True, "score": 0.9, "cm_ok": True} in _sent_json(ws)
 
 
 @pytest.mark.asyncio
@@ -642,7 +647,7 @@ class ExplodingSpeaker:
     model/embed failure can never break the stream (the SAFETY guarantee for
     _verify_utterance)."""
 
-    def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True):
+    def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True, cm_ok=None):
         raise RuntimeError("embed blew up")
 
 
@@ -662,7 +667,7 @@ async def test_identify_exception_fails_closed_and_the_turn_still_runs(caplog):
         await bridge._handle_text_frame(ws, _user_text("merhaba"))
         await _drive_turns(bridge)
 
-    assert {"type": "speaker", "role": "user", "verified": False, "score": 0.0} in _sent_json(ws)
+    assert {"type": "speaker", "role": "user", "verified": False, "score": 0.0, "cm_ok": True} in _sent_json(ws)
     assert voice_trust.peek(_trust_key()).trust_level == trust.LOW
     assert "speaker.identify failed" in caplog.text
     assert len(runner.calls) == 1, "a speaker failure killed the text turn"
@@ -677,7 +682,7 @@ async def test_identify_runs_off_the_event_loop_thread():
     seen = {}
 
     class ThreadRecordingSpeaker:
-        def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True):
+        def identify(self, user_id, pcm, device_hint, auth_is_kadir, allow_adapt=True, cm_ok=None):
             seen["thread"] = threading.get_ident()
             return speaker_mod.IdentifyOutcome(
                 verified=True, score=0.9, vec=[0.5], adapted_sample_id=None)
@@ -708,7 +713,8 @@ async def test_bridge_records_verification_history_after_the_speaker_event():
     user_id, entry = speaker.history[0]
     assert entry == {"score": 0.9, "verified": True, "vec": [0.5, 0.5],
                      "device_hint": "headset", "presence": "locked",
-                     "trust_level": trust.MEDIUM, "adapted_sample_id": None}
+                     "trust_level": trust.MEDIUM, "adapted_sample_id": None,
+                     "cm_fake_prob": 0.0}
 
 
 class HistoryExplodingSpeaker(FakeSpeaker):
@@ -743,7 +749,7 @@ async def test_history_write_failure_is_logged_and_does_not_break_the_stream(cap
         await bridge._handle_text_frame(ws, _user_text("merhaba"))
         await _drive_turns(bridge)
 
-    assert {"type": "speaker", "role": "user", "verified": True, "score": 0.9} in _sent_json(ws)
+    assert {"type": "speaker", "role": "user", "verified": True, "score": 0.9, "cm_ok": True} in _sent_json(ws)
     assert voice_trust.peek(_trust_key()).trust_level == trust.MEDIUM
     assert "history record failed" in caplog.text
     assert speaker.event_already_sent_when_called is True

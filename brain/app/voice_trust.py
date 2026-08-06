@@ -57,6 +57,11 @@ class VoiceSignals:
     the policy matrix consumes; the next three are the "why" the audit trail
     needs to reconstruct a decision (spec §7).
 
+    `cm_ok` is the anti-spoofing (countermeasure) verdict for the utterance:
+    True = bonafide real human voice (cm_fake_prob < threshold),
+    False = spoof attack detected / rejected,
+    None = no CM evidence available (e.g. text channel, CM disabled, or CM error/timeout).
+
     `owner` is bookkeeping, not evidence: an opaque per-CONNECTION token used by
     clear() to compare-and-delete (see below). It is deliberately not part of
     the audit fields."""
@@ -65,6 +70,7 @@ class VoiceSignals:
     voice_score: float | None = None
     presence: str = "foreground"
     device_hint: str = "unknown"
+    cm_ok: bool | None = None
     owner: str = ""
 
 

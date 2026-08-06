@@ -109,6 +109,12 @@ ZONE_GREEN = "green"
 ZONE_YELLOW = "yellow"
 ZONE_RED = "red"
 
+# Tool sensitivity tiers (North Star Phase C) — tool name -> tier
+TIER_T0 = "t0"
+TIER_T1 = "t1"
+TIER_T2 = "t2"
+TIER_T3 = "t3"
+
 TOOL_ZONES = {
     "get_user_profile": ZONE_GREEN,
     "search_memory": ZONE_GREEN,
@@ -156,6 +162,33 @@ TOOL_ZONES = {
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 
+TOOL_TIERS = {
+    # T0 (kanıt gerekmez: salt okuma / durum bilgisi)
+    "list_watched_repos": TIER_T0,
+    "get_repo_updates": TIER_T0,
+    "list_reminders": TIER_T0,
+    "check_my_vitals": TIER_T0,
+    "get_speaker_status": TIER_T0,
+    # T1 (düşük riskli yazma / yerel yapılandırma)
+    "set_reminder": TIER_T1,
+    "watch_repo": TIER_T1,
+    "unwatch_repo": TIER_T1,
+    # T2 (kişisel veri / dışa çıkış / beyin yazımı)
+    "get_user_profile": TIER_T2,
+    "search_memory": TIER_T2,
+    "remember_fact": TIER_T2,
+    "add_lesson": TIER_T2,
+    "update_user_profile": TIER_T2,
+    "consult_gemini": TIER_T2,
+    "propose_tool": TIER_T2,
+    "propose_agent": TIER_T2,
+    "spawn_specialist": TIER_T2,
+    # T3 (şimdilik hiçbir araç yok — enrollment endpoint'i bu seviyededir; REST)
+    # cancel_reminder zaten RED; tier olarak da T3 (belge değeri)
+    "cancel_reminder": TIER_T3,
+}
+DEFAULT_TIER = TIER_T2  # unknown tool = t2 (fail-closed)
+
 # Onay merkezi (North Star §4.8, Faz Y3, app/approvals.py): bir onay kartının
 # ömrü. Süre dolunca karar REDDEDİLİR — ve bu, süpürücü iş koşmasa bile karar
 # anında uygulanır (spec §4.1). Kısa tutmak güvenli yöndür: süresi dolan onay
@@ -168,6 +201,12 @@ SPEAKER_ACCEPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ACCEPT", "0.35")
 SPEAKER_ADAPT_THRESHOLD = float(os.environ.get("JARVIS_SPEAKER_ADAPT", "0.60"))
 SPEAKER_TOPK = int(os.environ.get("JARVIS_SPEAKER_TOPK", "3"))
 SPEAKER_ADAPTIVE_CAP = int(os.environ.get("JARVIS_SPEAKER_ADAPTIVE_CAP", "20"))
+
+# Anti-Spoofing / Deepfake Voice Detection (CM - Countermeasure, Phase B)
+CM_ENABLED = os.environ.get("JARVIS_CM_ENABLED", "1") == "1"
+CM_REJECT_THRESHOLD = float(os.environ.get("JARVIS_CM_REJECT_THRESHOLD", "0.85"))
+CM_TIMEOUT_S = float(os.environ.get("JARVIS_CM_TIMEOUT_S", "8.0"))
+CM_MODEL_DIR = os.environ.get("CM_MODEL_DIR", "/opt/antispoof")
 # Rolling mic-buffer window kept for the next speaker verification. The buffer
 # is drained at a turn boundary, but a turn boundary is NOT guaranteed to
 # arrive, so the window is what bounds memory (and inference time). 10 s is far

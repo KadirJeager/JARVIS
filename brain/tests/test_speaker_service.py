@@ -30,7 +30,7 @@ def test_different_voice_not_verified():
 
 def test_high_confidence_adapts_and_persists():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    _svc(db).identify("k", b"A", "headset", auth_is_kadir=True)     # score 1.0 >= adapt
+    _svc(db).identify("k", b"A", "headset", auth_is_kadir=True, cm_ok=True)     # score 1.0 >= adapt
     assert len(load_profile(db, "k").adaptive) == 1
     assert load_profile(db, "k").adaptive[0]["device_hint"] == "headset"
 
@@ -68,7 +68,7 @@ def test_score_exactly_at_adapt_feeds_profile():
     db = FakeDB(); enroll_anchors(db, "k", [A])
     svc = SpeakerService(db, embed_fn=lambda pcm: {b"A": A}[pcm], now_fn=lambda: "t",
                           accept=1.0, adapt=1.0, cap=5, top_k=1)
-    svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)
     assert len(load_profile(db, "k").adaptive) == 1
 
 
@@ -115,7 +115,7 @@ def test_empty_anchor_gallery_never_self_feeds():
 
 def test_identify_returns_adapted_sample_id_when_it_feeds():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    out = _svc(db).identify("k", b"A", "headset", auth_is_kadir=True)
+    out = _svc(db).identify("k", b"A", "headset", auth_is_kadir=True, cm_ok=True)
     assert out.adapted_sample_id is not None
     assert load_profile(db, "k").adaptive[0]["id"] == out.adapted_sample_id
     assert out.vec == A
@@ -140,7 +140,7 @@ def test_record_history_appends_a_spec_shaped_entry_and_honors_the_cap():
     assert entry == {"id": "h1", "ts": "t0", "score": 0.8, "verified": True,
                      "device_hint": "phone", "presence": "locked",
                      "trust_level": "MEDIUM", "adapted_sample_id": None,
-                     "correction": None, "vec": A}
+                     "correction": None, "cm_fake_prob": None, "vec": A}
     for _ in range(3):
         svc.record_history("k", score=0.1, verified=False, vec=A,
                            device_hint="phone", presence="locked",
@@ -195,7 +195,7 @@ def test_gallery_read_modify_write_is_serialized_but_embedding_is_not(monkeypatc
         return real_save(db_, user_id, profile)
 
     monkeypatch.setattr(speaker_mod.speaker_store, "save_profile", watching_save)
-    svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)
 
     assert observed["locked_during_embed"] is False
     assert observed["locked_during_save"] is True
@@ -286,7 +286,7 @@ def test_the_sixth_manual_sample_is_refused_with_the_count():
 def test_reject_removes_the_adapted_sample_and_marks_the_entry():
     db = FakeDB(); enroll_anchors(db, "k", [A])
     svc = _mgmt_svc(db)
-    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)   # adapts (score 1.0)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)   # adapts (score 1.0)
     assert out.adapted_sample_id is not None
     # identify() recorded nothing (that is voice.py's job) -- seed the entry:
     speaker_history.record(db, "k", _hist_entry(1, A, adapted=out.adapted_sample_id), cap=50)
@@ -373,7 +373,7 @@ def test_confirm_on_auto_adapted_entry_promotes_in_place():
     already in the gallery."""
     db = FakeDB(); enroll_anchors(db, "k", [A])
     svc = _mgmt_svc(db)
-    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)  # adapts (score 1.0)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)  # adapts (score 1.0)
     auto_id = out.adapted_sample_id
     assert auto_id is not None
     speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
@@ -404,7 +404,7 @@ def test_confirm_then_reject_of_an_auto_adapted_entry_leaves_no_trace_of_the_vec
     This test is RED against the pre-fix code."""
     db = FakeDB(); enroll_anchors(db, "k", [A])
     svc = _mgmt_svc(db)
-    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)
     auto_id = out.adapted_sample_id
     assert auto_id is not None
     speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
@@ -425,7 +425,7 @@ def test_confirm_falls_back_to_append_when_the_linked_sample_is_gone():
     path -- there is nothing left to promote in place."""
     db = FakeDB(); enroll_anchors(db, "k", [A])
     svc = _mgmt_svc(db)
-    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)
     auto_id = out.adapted_sample_id
     assert auto_id is not None
     speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
@@ -458,7 +458,7 @@ def test_cap_refused_promote_leaves_the_entry_unmarked_and_sample_auto():
     save_profile(db, "k", profile)
 
     svc = _mgmt_svc(db)
-    out = svc.identify("k", b"A", "phone", auth_is_kadir=True)  # adapts despite full manual cap
+    out = svc.identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)  # adapts despite full manual cap
     auto_id = out.adapted_sample_id
     assert auto_id is not None
     speaker_history.record(db, "k", _hist_entry(1, A, adapted=auto_id), cap=50)
@@ -490,5 +490,5 @@ def test_allow_adapt_false_blocks_self_feeding_even_at_a_perfect_score():
 
 def test_allow_adapt_defaults_to_true_so_existing_callers_are_unchanged():
     db = FakeDB(); enroll_anchors(db, "k", [A])
-    _svc(db).identify("k", b"A", "phone", auth_is_kadir=True)
+    _svc(db).identify("k", b"A", "phone", auth_is_kadir=True, cm_ok=True)
     assert len(load_profile(db, "k").adaptive) == 1

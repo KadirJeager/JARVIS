@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel, Field, field_validator
 
-from . import approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_manage, voice_trust
+from . import approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_challenge, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_google_user, require_scheduler, require_user
 
@@ -577,6 +577,13 @@ async def delete_conversation(session_id: str, email: str = Depends(require_user
 async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
     if not req.clips:
         raise HTTPException(status_code=400, detail="En az bir ses klibi gerekli")
+    db = _enroll_db()
+    valid_grant = await asyncio.to_thread(voice_challenge.has_valid_grant, db, email)
+    if not valid_grant:
+        raise HTTPException(
+            status_code=409,
+            detail="Ses kaydı için önce sesli doğrulama kodu gereklidir (/api/voice/challenge)",
+        )
     try:
         # OFF THE EVENT LOOP, for the same reason the live verify path is
         # (app/voice.py): speaker.embed is real ECAPA inference plus, on the
