@@ -60,6 +60,21 @@ RUN python -c "from speechbrain.inference.speaker import EncoderClassifier; Enco
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-base')" \
     && chown -R appuser:appuser /opt/hf-cache
 
+# Bake the anti-spoofing (CM) model into the image at BUILD time, for the
+# same reasons the ECAPA and e5 layers above exist: a runtime download would
+# charge weights against tmpfs RAM on every cold start, add unbounded latency
+# to the first voice utterance verification, and fail on an HF rate-limit.
+#
+# Unlike e5 (which sentence-transformers reads directly from the hub cache),
+# app/antispoof.py expects model.safetensors and config.json directly in
+# CM_MODEL_DIR. We download into a temporary cache_dir (/tmp/cm-cache), copy ONLY
+# model.safetensors and config.json to /opt/antispoof, and delete /tmp/cm-cache
+# so the image does not carry the snapshot twice.
+ENV CM_MODEL_DIR=/opt/antispoof
+RUN python -c "import huggingface_hub, shutil, os; path = huggingface_hub.snapshot_download('nii-yamagishilab/mms-300m-anti-deepfake', cache_dir='/tmp/cm-cache'); os.makedirs('/opt/antispoof', exist_ok=True); shutil.copy(os.path.join(path, 'model.safetensors'), '/opt/antispoof/model.safetensors'); shutil.copy(os.path.join(path, 'config.json'), '/opt/antispoof/config.json')" \
+    && rm -rf /tmp/cm-cache \
+    && chown -R appuser:appuser /opt/antispoof
+
 # Re-point HF_HOME for RUNTIME -- at the e5 cache baked above, NOT the
 # build-time-deleted /tmp fallback the ECAPA-only image used. speechbrain
 # never touches HF at runtime (SPEAKER_MODEL_DIR is self-contained), and
