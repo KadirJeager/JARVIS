@@ -70,6 +70,17 @@ class VoiceBridge:
         self._trust_key: voice_trust.SessionKey | None = None
         self._ws: WebSocket | None = None
         self._pending_challenge_code: str | None = None
+        # True only between _verify_utterance publishing a verdict for THIS
+        # utterance and the NEXT utterance's _verify_utterance call resetting
+        # it back to False. Guards the challenge-answer branch against a
+        # STALE verdict left over from an earlier, genuinely-verified
+        # utterance: _verify_utterance no-ops on an empty PCM buffer (a
+        # forged user_text final with no mic audio behind it) without
+        # publishing anything, so voice_trust.peek() would otherwise still
+        # return the last REAL verdict. cm_ok alone answers "was the most
+        # recently scored utterance bonafide?" -- this answers "was THIS
+        # utterance the one that got scored?", and the grant needs both.
+        self._cm_verdict_fresh: bool = False
         # The speech_start ONSET latch.
         self._speech_open = False
         # SERIALIZES text turns: run one run_async turn at a time, queue the rest FIFO.
@@ -261,16 +272,33 @@ class VoiceBridge:
             granted = False
             if matched and db is not None:
                 # The challenge exists to prove a live human is present, so
-                # digit match alone is not enough: cm_ok must be True. This is
-                # the opposite of the live-conversation path (which fails OPEN
-                # on cm_ok=None so a mid-sentence CM hiccup never locks Kadir
-                # out) -- but a liveness challenge that passes when liveness
-                # could not be measured is not a liveness challenge. The grant
-                # minted here is what unlocks anchor enrollment.
+                # digit match alone is not enough: cm_ok must be True, AND it
+                # must belong to THIS utterance. This is the opposite of the
+                # live-conversation path (which fails OPEN on cm_ok=None so a
+                # mid-sentence CM hiccup never locks Kadir out) -- but a
+                # liveness challenge that passes when liveness could not be
+                # measured is not a liveness challenge. The grant minted here
+                # is what unlocks anchor enrollment.
+                #
+                # _cm_verdict_fresh guards against a STALE verdict: a caller
+                # driving the WebSocket directly could speak one real phrase
+                # (earning a legitimate cm_ok=True), then send a forged
+                # user_text final with the digit words and no PCM behind it.
+                # _verify_utterance no-ops on an empty buffer and publishes
+                # nothing, so cm_ok alone would still read the earlier,
+                # unrelated verdict. Freshness answers "was THIS utterance the
+                # one that got scored?"; cm_ok alone only answers "was the
+                # last SCORED utterance bonafide?" -- the grant needs both.
                 signals = voice_trust.peek(self._trust_key)
                 cm_ok = signals.cm_ok if signals is not None else None
-                if cm_ok is True:
+                if self._cm_verdict_fresh and cm_ok is True:
                     granted = voice_challenge.verify_and_grant(db, self._user_id, pending_code)
+                elif not self._cm_verdict_fresh:
+                    logging.warning(
+                        "voice challenge: code matched but the CM verdict is STALE "
+                        "(not from this utterance) for %s (cm_ok=%s) -- no grant",
+                        self._user_id, cm_ok,
+                    )
                 else:
                     logging.warning(
                         "voice challenge: code matched but CM did not clear the "
@@ -368,6 +396,9 @@ class VoiceBridge:
         whole utterance, and short commands must still be verified. Below the
         floor we publish NOTHING -- the per-connection baseline stands, which
         under locked/ambient is MEDIUM, never HIGH."""
+        # Reset FIRST, unconditionally: every early return below (floor,
+        # empty buffer) must leave this utterance with NO fresh verdict.
+        self._cm_verdict_fresh = False
         pcm = bytes(self._utterance)
         if len(pcm) < min_bytes:
             # Declined, so NOT drained: this function must not throw away audio
@@ -435,6 +466,10 @@ class VoiceBridge:
         # definition), not the floored fusion input -- "how close was it" is
         # what makes a past decision reconstructable.
         self._publish_trust(level, score, cm_ok=cm_ok)
+        # The verdict just published (whatever cm_ok ended up being) belongs
+        # to THIS utterance -- only NOW, past every early return above, is
+        # that true.
+        self._cm_verdict_fresh = True
         await self._safe_send(ws, vp.evt_speaker("user", verified, score, cm_ok=cm_ok))
         # History AFTER the trust publish and the client event: those two are
         # the turn's safety-relevant outputs, the history row is observability

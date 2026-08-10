@@ -141,6 +141,14 @@ async def test_voice_bridge_challenge_interception():
     voice_trust.publish(bridge._trust_key, voice_trust.VoiceSignals(
         trust_level=trust.HIGH, voice_score=0.9, cm_ok=True,
     ))
+    # It must also be FRESH (see test_antispoof.py's
+    # test_challenge_grant_refuses_stale_cm_verdict, which pins the real
+    # _verify_utterance wiring). This bridge has no speaker_service, so
+    # _verify_utterance never runs -- this test's own subject is the WS
+    # interception/reply mechanics, not the freshness logic, so the
+    # precondition is seeded directly rather than routing fake PCM through a
+    # full verification just to satisfy it.
+    bridge._cm_verdict_fresh = True
 
     ws = FakeWS()
     bridge._ws = ws

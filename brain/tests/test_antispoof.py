@@ -193,15 +193,52 @@ async def test_challenge_grant_blocked_when_cm_silent():
 
 @pytest.mark.asyncio
 async def test_challenge_grant_succeeds_on_bonafide_audio():
+    """Regression pin: the happy path must still work once the grant also
+    requires freshness -- and it must earn that freshness the REAL way,
+    through _verify_utterance scoring THIS utterance's own buffered PCM, not
+    by hand-setting the flag or publishing signals out of band. A test that
+    fakes freshness would prove nothing about the wiring this guards."""
+    antispoof._score_fn = lambda pcm: (True, 0.01)  # bonafide
+    bridge, ws, db = _bridge_with_pending_challenge(code="4831")
+    bridge.speaker_service = _RecordingSpeaker()
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")  # this utterance's mic PCM
+
+    await bridge._on_utterance_final(ws, "dört sekiz üç bir")
+
+    assert bridge._cm_verdict_fresh is True
+    assert voice_challenge.has_valid_grant(db, bridge._user_id) is True
+
+
+@pytest.mark.asyncio
+async def test_challenge_grant_refuses_stale_cm_verdict():
+    """A cm_ok=True published for an EARLIER utterance must not satisfy a
+    challenge answered by a frame this connection never actually verified.
+
+    Attack: a caller driving the raw WebSocket directly speaks one innocuous
+    real phrase (earning a legitimate cm_ok=True), then sends a FORGED
+    user_text final (matching digit words, utterance_final=true) with no
+    accompanying PCM. _verify_utterance's own docstring says an empty buffer
+    is "a no-op inside" -- it returns without publishing anything, so a bare
+    `cm_ok is True` read off voice_trust would see the stale verdict from the
+    real utterance and mint the grant that unlocks anchor enrollment. The
+    freshness flag exists to close exactly this gap: _cm_verdict_fresh is
+    reset to False at the top of every _verify_utterance call and only set
+    True once IT publishes a verdict for THIS utterance."""
     bridge, ws, db = _bridge_with_pending_challenge(code="4831")
     voice_trust.publish(bridge._trust_key, voice_trust.VoiceSignals(
         trust_level=trust.HIGH, voice_score=0.8, presence="foreground",
         device_hint="android-Pixel 10 Pro", cm_ok=True,
     ))
+    # No speaker_service on this bridge (mirrors the forged frame: no PCM was
+    # ever scored for this utterance), so _verify_utterance never even runs.
+    assert bridge._cm_verdict_fresh is False
 
     await bridge._on_utterance_final(ws, "dört sekiz üç bir")
 
-    assert voice_challenge.has_valid_grant(db, bridge._user_id) is True
+    assert voice_challenge.has_valid_grant(db, bridge._user_id) is False
+    import json
+    reply_text = json.loads(ws.sent[-3])["text"]
+    assert "doğrulanamadı" in reply_text.lower() or "canlılık" in reply_text.lower()
 
 
 @pytest.mark.asyncio
