@@ -29,6 +29,7 @@ import android.util.Log
 class VoiceCallService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var previousAudioMode: Int = AudioManager.MODE_NORMAL
 
     override fun onCreate() {
         super.onCreate()
@@ -67,6 +68,14 @@ class VoiceCallService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jarvis:voice-call")
                 .apply { acquire(MAX_CALL_MS) }
         }
+        // The switch that actually wakes the platform AEC chain. VOICE_COMMUNICATION
+        // on AudioRecord and USAGE_VOICE_COMMUNICATION on the TTS output describe
+        // intent; this is what puts the device into a communication routing state.
+        // Order matters: set the mode first, then route -- routing decisions made in
+        // MODE_NORMAL do not survive the transition.
+        val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        previousAudioMode = audio.mode
+        audio.mode = AudioManager.MODE_IN_COMMUNICATION
         routeVoiceToSpeaker()
         return START_NOT_STICKY // a killed process has no call to resume — do not resurrect
     }
@@ -136,6 +145,7 @@ class VoiceCallService : Service() {
     }
 
     override fun onDestroy() {
+        (getSystemService(Context.AUDIO_SERVICE) as AudioManager).mode = previousAudioMode
         clearVoiceRoute()
         wakeLock?.takeIf { it.isHeld }?.release()
         wakeLock = null

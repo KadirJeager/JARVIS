@@ -8,6 +8,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- setMode(MODE_IN_COMMUNICATION) and the pre-31 setSpeakerphoneOn fallback
+         both require this. Without it both calls are silent no-ops. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <application
         android:name=".JarvisApp"
         android:allowBackup="true"
