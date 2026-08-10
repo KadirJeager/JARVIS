@@ -79,7 +79,7 @@ class BootFlowTest {
         override fun currentToken(): String? = null
         override suspend fun signIn(activityContext: Context): Result<String> =
             Result.success(never.await())
-        override suspend fun silentSignIn(): Result<String> = Result.success(never.await())
+        override suspend fun silentSignIn(force: Boolean): Result<String> = Result.success(never.await())
     }
 
     private class AlreadySignedIn : AuthStateStore {

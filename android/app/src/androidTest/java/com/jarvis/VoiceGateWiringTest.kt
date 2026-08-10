@@ -85,7 +85,7 @@ class VoiceGateWiringTest {
         override fun currentToken(): String? = token
         override suspend fun signIn(activityContext: Context): Result<String> =
             Result.success(token)
-        override suspend fun silentSignIn(): Result<String> = Result.success(token)
+        override suspend fun silentSignIn(force: Boolean): Result<String> = Result.success(token)
     }
 
     /** Empty but well-formed answers: this test is about the gate, not about content. */
