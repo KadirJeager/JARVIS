@@ -2,6 +2,7 @@ package com.jarvis
 
 import android.app.Application
 import android.content.Context
+import android.media.AudioManager
 import android.os.Build
 import android.util.Log
 import com.jarvis.data.auth.AndroidBiometricGate
@@ -72,7 +73,7 @@ class AppContainer(
             // Mic PCM keeps flowing for server-side speaker-ID; the conversation itself
             // is text: on-device SpeechRecognizer up (user_text), on-device TTS down
             // (jarvis_text). No server audio is played back anymore (protocol v2).
-            mic = AndroidMicSource(),
+            mic = AndroidMicSource(context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager),
             stt = AndroidSpeechToText(context.applicationContext),
             tts = AndroidTextToSpeech(context.applicationContext),
             tokenProvider = { authManager.currentToken() },

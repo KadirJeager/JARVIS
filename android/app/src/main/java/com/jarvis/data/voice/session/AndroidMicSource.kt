@@ -2,10 +2,31 @@ package com.jarvis.data.voice.session
 
 import android.annotation.SuppressLint
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
+import android.os.Build
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+
+private const val TAG = "AndroidMicSource"
+
+/**
+ * DATA line for the capture path: what the platform actually attached, not what we
+ * asked for. `isClientSilenced` is the direct test of "is our own TTS reaching the
+ * mic" -- the system mutes a capture client when another one wins the route.
+ * Both APIs are 29+; below that the honest answer is "unknown".
+ */
+internal fun formatEffectReport(effects: List<String>, silenced: Boolean, sdkInt: Int): String =
+    if (sdkInt < 29) {
+        "mic effects=unknown silenced=unknown (API $sdkInt < 29)"
+    } else {
+        val names = if (effects.isEmpty()) "none" else effects.joinToString(",")
+        "mic effects=$names aec=${effects.any { it.contains("AEC", ignoreCase = true) }} " +
+            "silenced=$silenced"
+    }
 
 /**
  * Real microphone capture: PCM16 mono at whatever rate [start] is called with (16kHz on
@@ -16,14 +37,22 @@ import kotlinx.coroutines.withContext
  * The RECORD_AUDIO runtime permission is assumed already granted -- the caller (the
  * Activity/ViewModel layer) gates [VoiceSession.start] on that, so a permission failure
  * never reaches here as a crash.
+ *
+ * [audioManager] is a narrow dependency (one system service, not a whole `Context`) used
+ * solely for the AEC self-test telemetry below: this class has never needed a `Context`
+ * and the callback needs exactly `registerAudioRecordingCallback`/`unregister...`.
  */
-class AndroidMicSource : MicSource {
+class AndroidMicSource(private val audioManager: AudioManager) : MicSource {
 
     private var audioRecord: AudioRecord? = null
 
     // Sized in start(): the read chunk size must match the buffer that was actually
     // allocated for the rate/format this call was opened with.
     private var readChunkBytes = 0
+
+    // Registered in start() on API 29+ only; null otherwise or before start() runs.
+    // Kept so stop() can unregister the exact instance it registered.
+    private var recordingCallback: AudioManager.AudioRecordingCallback? = null
 
     @SuppressLint("MissingPermission") // caller gates on RECORD_AUDIO before calling start()
     override fun start(sampleRateHz: Int) {
@@ -55,6 +84,28 @@ class AndroidMicSource : MicSource {
         }
         record.startRecording()
         audioRecord = record
+        // AEC self-test: report what the platform actually attached to THIS capture
+        // client, not what VOICE_COMMUNICATION above merely asked for -- the direct
+        // test of the 2026-08-10 utterance-4 hypothesis (our own TTS reaching the mic).
+        // Honest limit: this covers only our capture client. The system speech
+        // recognizer (SODA) runs in a separate process with its own AudioRecord, so its
+        // capture never appears in this list -- do not read "no effects reported here"
+        // as "the whole audio chain is unmeasured/unprotected".
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val callback = object : AudioManager.AudioRecordingCallback() {
+                override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
+                    val mine = configs.firstOrNull { it.clientAudioSessionId == record.audioSessionId }
+                        ?: return
+                    Log.i(TAG, formatEffectReport(
+                        mine.effects.map { it.name },
+                        mine.isClientSilenced,
+                        Build.VERSION.SDK_INT,
+                    ))
+                }
+            }
+            recordingCallback = callback
+            audioManager.registerAudioRecordingCallback(callback, null)
+        }
     }
 
     override suspend fun readFrame(): ByteArray? = withContext(Dispatchers.IO) {
@@ -69,6 +120,10 @@ class AndroidMicSource : MicSource {
     override fun stop() {
         val record = audioRecord ?: return
         audioRecord = null
+        // Unregister before release(): safe even if start() never registered one
+        // (API < 29, or start() was never called) since recordingCallback is null then.
+        recordingCallback?.let { audioManager.unregisterAudioRecordingCallback(it) }
+        recordingCallback = null
         record.stop()
         record.release()
     }
