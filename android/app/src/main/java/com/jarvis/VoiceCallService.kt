@@ -63,18 +63,25 @@ class VoiceCallService : Service() {
 
         // Audio callbacks mostly keep the CPU up on their own; the partial wake lock
         // closes the doze gap between mic frames on aggressive OEM power management.
+        val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (wakeLock == null) {
             wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jarvis:voice-call")
                 .apply { acquire(MAX_CALL_MS) }
+            // Capture BEFORE this instance's first mode change ONLY. onStartCommand can
+            // re-run on the same instance (rotation mid-call re-fires MainActivity's
+            // LaunchedEffect(callLive) against the still-running service -- pinned by
+            // VoiceCallWiringTest's rotation test); capturing again on that second call
+            // would overwrite the true pre-call mode with our OWN MODE_IN_COMMUNICATION,
+            // and onDestroy would then "restore" the device to MODE_IN_COMMUNICATION
+            // forever instead of what it was before the call.
+            previousAudioMode = audio.mode
         }
         // The switch that actually wakes the platform AEC chain. VOICE_COMMUNICATION
         // on AudioRecord and USAGE_VOICE_COMMUNICATION on the TTS output describe
         // intent; this is what puts the device into a communication routing state.
         // Order matters: set the mode first, then route -- routing decisions made in
         // MODE_NORMAL do not survive the transition.
-        val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        previousAudioMode = audio.mode
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         routeVoiceToSpeaker()
         return START_NOT_STICKY // a killed process has no call to resume — do not resurrect

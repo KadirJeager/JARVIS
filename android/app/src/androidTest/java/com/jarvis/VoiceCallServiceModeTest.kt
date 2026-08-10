@@ -69,4 +69,41 @@ class VoiceCallServiceModeTest {
             waitUntil { audio.mode == AudioManager.MODE_NORMAL },
         )
     }
+
+    /**
+     * Regression pin (fix round 1, Critical finding): rotating mid-call re-fires
+     * MainActivity's LaunchedEffect(callLive) against the already-running service --
+     * VoiceCallWiringTest's rotationMidCall test pins that the service instance survives
+     * rotation, so onStartCommand runs a SECOND time on the SAME instance without an
+     * intervening stop. If the previousAudioMode capture is unguarded, that second capture
+     * overwrites it with MODE_IN_COMMUNICATION (the value the FIRST start just set), so
+     * onDestroy "restores" the device to MODE_IN_COMMUNICATION forever instead of the mode
+     * that was live before the call ever started.
+     */
+    @Test
+    fun doubleStart_stillRestoresOriginalModeOnStop() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val originalMode = audio.mode
+
+        val intent = Intent(context, VoiceCallService::class.java)
+        context.startService(intent)
+        assertTrue(
+            "audio mode never switched to MODE_IN_COMMUNICATION",
+            waitUntil { audio.mode == AudioManager.MODE_IN_COMMUNICATION },
+        )
+
+        // Second start on the same (already-running) service instance -- no stop in between.
+        context.startService(intent)
+        assertTrue(
+            "audio mode dropped out of MODE_IN_COMMUNICATION on the second start",
+            waitUntil { audio.mode == AudioManager.MODE_IN_COMMUNICATION },
+        )
+
+        context.stopService(intent)
+        assertTrue(
+            "audio mode was not restored to the ORIGINAL (pre-call) mode after a double-start",
+            waitUntil { audio.mode == originalMode },
+        )
+    }
 }
