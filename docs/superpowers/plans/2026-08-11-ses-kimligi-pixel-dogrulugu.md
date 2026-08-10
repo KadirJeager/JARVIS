@@ -37,11 +37,11 @@ Four conclusions drive the tasks below:
 1. `anchor_score` never reaches the 0.60 adapt gate, so the gallery **cannot** learn this device by itself. Enrollment is the only path, and it has no client.
 2. `enroll` writes *anchors* — the immutable reference every later decision is refereed against — with no CM check at all. Opening the client path without the gate would open the worst poisoning surface in the system.
 3. Genuine speech produced `p_fake` up to 0.4231 where the 6 Aug benchmark's human fixtures produced 0.0004. The 0.85 threshold is not calibrated for this channel. **Deliberately out of scope here:** calibration needs a spoof distribution too, which needs the strong-clone (Chatterbox-class) test. That is a separate slice; this plan must not move the threshold.
-4. Utterance 4 scored `anchor_score=0.0058` — near-orthogonal to the gallery — while `cm_ok=True` says it was live human audio. The leading hypothesis is that the assistant's own TTS reached the microphone and was scored. Task B2 measures this instead of assuming it.
+4. Utterance 4 scored `anchor_score=0.0058` — near-orthogonal to the gallery — while `cm_ok=True` says it was live human audio. The leading hypothesis is that the assistant's own TTS reached the microphone and was scored. Task 5 measures this instead of assuming it.
 
 ---
 
-## Task A1: CM gate on enrollment anchors
+## Task 1: CM gate on enrollment anchors
 
 **Files:**
 - Modify: `brain/app/main.py:576-640` (the `enroll` endpoint)
@@ -50,7 +50,7 @@ Four conclusions drive the tasks below:
 
 **Interfaces:**
 - Consumes: `antispoof.is_bonafide(pcm: bytes) -> tuple[bool, float]`; `config.CM_ENABLED`, `config.CM_REJECT_THRESHOLD`.
-- Produces: enrollment rejects with HTTP 422 and a Turkish detail when any clip fails the CM, and with HTTP 503 when the CM cannot produce a verdict. Later tasks (C1, C2) surface these to the user.
+- Produces: enrollment rejects with HTTP 422 and a Turkish detail when any clip fails the CM, and with HTTP 503 when the CM cannot produce a verdict. Later tasks (8, 9) surface these to the user.
 
 **Why fail-closed here specifically:** an anchor cannot be evicted by the diversity rule and is what `anchor_score` refereeing depends on (`brain/app/speaker.py:99-106`). A poisoned anchor is permanent and silently widens every later accept decision. The live-verify path fails *open* on purpose (Kadir must never be locked out mid-conversation); enrollment is the opposite case — it is a deliberate, repeatable, T3 action, so a missing verdict must block.
 
@@ -209,7 +209,7 @@ no inference."
 
 ---
 
-## Task A2: CM gate on the manual "Bu bendim" confirmation
+## Task 2: CM gate on the manual "Bu bendim" confirmation
 
 **Files:**
 - Modify: `brain/app/speaker.py:425-442` (`SpeakerService.confirm_history`)
@@ -312,7 +312,7 @@ blocks too -- absence of evidence is not evidence of absence."
 
 ---
 
-## Task A3: CM gate on the liveness challenge answer
+## Task 3: CM gate on the liveness challenge answer
 
 **Files:**
 - Modify: `brain/app/voice.py:250-277` (challenge-answer branch of the text-turn handler)
@@ -432,7 +432,7 @@ proven' so a blocked user knows which."
 
 ---
 
-## Task B1: `setMode(MODE_IN_COMMUNICATION)` and the permission it needs
+## Task 4: `setMode(MODE_IN_COMMUNICATION)` and the permission it needs
 
 **Files:**
 - Modify: `android/app/src/main/AndroidManifest.xml:4-9`
@@ -441,7 +441,7 @@ proven' so a blocked user knows which."
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: the audio mode is `MODE_IN_COMMUNICATION` for the whole call and restored to `MODE_NORMAL` on teardown. Task B2 measures whether this changed the effect chain.
+- Produces: the audio mode is `MODE_IN_COMMUNICATION` for the whole call and restored to `MODE_NORMAL` on teardown. Task 5 measures whether this changed the effect chain.
 
 **The trap that makes this more than a one-liner:** `AudioManager.setMode` and `setSpeakerphoneOn` both require `MODIFY_AUDIO_SETTINGS`, and the manifest does not declare it (`AndroidManifest.xml:4-9` lists INTERNET, RECORD_AUDIO, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MICROPHONE, POST_NOTIFICATIONS, WAKE_LOCK). Added without the permission, the call silently does nothing and the next round of debugging chases the wrong thing. This also fixes a latent bug: `VoiceCallService.routeVoiceToSpeaker()` already calls `audio.isSpeakerphoneOn = true` on the API < 31 branch, which needs the same permission.
 
@@ -552,7 +552,7 @@ restored rather than MODE_NORMAL hardcoded, so an overlapping real call survives
 
 ---
 
-## Task B2: AEC self-test telemetry
+## Task 5: AEC self-test telemetry
 
 **Files:**
 - Modify: `android/app/src/main/java/com/jarvis/data/voice/session/AndroidMicSource.kt` (after `record.startRecording()`, ~line 56)
@@ -641,7 +641,7 @@ And after `record.startRecording()`:
 
 Unregister it in the existing teardown path alongside `record.release()`.
 
-⚠️ **Honest limit, write it in the comment:** this reports only *our* capture client. The system recognizer (SODA) runs in another process, so its capture never appears here. Task B3 explains why that matters.
+⚠️ **Honest limit, write it in the comment:** this reports only *our* capture client. The system recognizer (SODA) runs in another process, so its capture never appears here. Task 6 explains why that matters.
 
 - [ ] **Step 4: Run tests and commit**
 
@@ -661,7 +661,7 @@ process and never appears here."
 
 ---
 
-## Task B3: Remove the dead `EXTRA_AUDIO_SOURCE` int and the false assurance around it
+## Task 6: Remove the dead `EXTRA_AUDIO_SOURCE` int and the false assurance around it
 
 **Files:**
 - Modify: `android/app/src/main/java/com/jarvis/data/voice/session/AndroidSpeechToText.kt:131-142`
@@ -674,7 +674,7 @@ process and never appears here."
 
 The comment above it currently claims this line *is* the AEC fix and cites a production report. That comment is the harmful part: it is a written assurance that a control exists when it does not, and it is why the STT path was recorded as "done" in the 5 Aug review.
 
-**Deliberately NOT in this task:** building the real single-`AudioRecord` → `ParcelFileDescriptor.createPipe()` → recognizer path. It is 1–2 days and it rests on an unverified assumption (that Google's tr-TR recognizer accepts a PFD feed at all). Task B4 measures that first.
+**Deliberately NOT in this task:** building the real single-`AudioRecord` → `ParcelFileDescriptor.createPipe()` → recognizer path. It is 1–2 days and it rests on an unverified assumption (that Google's tr-TR recognizer accepts a PFD feed at all). Task 7 measures that first.
 
 - [ ] **Step 1: Delete the dead call and correct the comment**
 
@@ -694,7 +694,7 @@ Replace the block at `AndroidSpeechToText.kt:131-142` with:
             // review recorded this as done. Feeding the recognizer from our single
             // AudioRecord via ParcelFileDescriptor.createPipe() is the real fix; it
             // is gated on confirming Google's tr-TR recognizer accepts a PFD feed
-            // (docs/superpowers/plans/2026-08-11-ses-kimligi-pixel-dogrulugu.md, B4).
+            // (docs/superpowers/plans/2026-08-11-ses-kimligi-pixel-dogrulugu.md, Task 7).
 ```
 
 - [ ] **Step 2: Build and run the JVM suite**
@@ -720,7 +720,7 @@ the STT path as done. Removing a false assurance is worth more than the dead lin
 
 ---
 
-## Task B4: Measure whether the recognizer accepts a piped audio source
+## Task 7: Measure whether the recognizer accepts a piped audio source
 
 **Files:**
 - Create: `android/app/src/androidTest/java/com/jarvis/data/voice/session/RecognizerPipeProbeTest.kt`
@@ -823,7 +823,7 @@ AEC-processed signal, or whether the two-capture-client design has to stay."
 
 ---
 
-## Task C1: Client API for challenge and enrollment
+## Task 8: Client API for challenge and enrollment
 
 **Files:**
 - Modify: `android/app/src/main/java/com/jarvis/data/net/VoiceApi.kt`
@@ -831,11 +831,11 @@ AEC-processed signal, or whether the two-capture-client design has to stay."
 - Test: `android/app/src/test/java/com/jarvis/data/net/VoiceEnrollApiTest.kt` (create)
 
 **Interfaces:**
-- Consumes: server routes `POST /api/voice/challenge` (`brain/app/voice.py:598`) and `POST /api/voice/enroll` (`brain/app/main.py:576`), plus the status codes Task A1 introduced.
+- Consumes: server routes `POST /api/voice/challenge` (`brain/app/voice.py:598`) and `POST /api/voice/enroll` (`brain/app/main.py:576`), plus the status codes Task 1 introduced.
 - Produces:
   - `suspend fun VoiceApi.challenge(): ChallengeResponse` where `ChallengeResponse(status: String, code_spoken: Boolean)`
   - `suspend fun VoiceApi.enroll(req: EnrollRequest): EnrollResponse` where `EnrollRequest(clips: List<String>, device_hint: String)` and `EnrollResponse(anchors: Int)`
-  - Task C2 consumes both.
+  - Task 9 consumes both.
 
 Field names are `snake_case` to match the server wire format exactly, following the existing `VoiceModels.kt` convention (`device_hint`, `cm_ok`).
 
@@ -861,7 +861,7 @@ class VoiceEnrollApiTest {
     }
 
     @Test fun enrollSurfacesSpoofRejectionDistinctly() = runBlocking {
-        // 422 is Task A1's "a clip was flagged as fake" -- the user must be told
+        // 422 is Task 1's "a clip was flagged as fake" -- the user must be told
         // this, not a generic failure, because retrying identically will not help.
         server.enqueue(MockResponse.Builder().code(422)
             .body("""{"detail":"1. ses klibi sahte olarak işaretlendi, kayıt yapılmadı"}""").build())
@@ -938,7 +938,7 @@ different user actions."
 
 ---
 
-## Task C2: "Bu cihazı tanıt" flow on the voice screen
+## Task 9: "Bu cihazı tanıt" flow on the voice screen
 
 **Files:**
 - Modify: `android/app/src/main/java/com/jarvis/ui/voice/VoiceProfileScreen.kt` (the "Ses örneklerini yönet" section, ~line 615)
@@ -946,10 +946,10 @@ different user actions."
 - Test: `android/app/src/test/java/com/jarvis/ui/voice/EnrollDeviceViewModelTest.kt` (create)
 
 **Interfaces:**
-- Consumes: `VoiceApi.challenge()`, `VoiceApi.enroll()` (Task C1); `AndroidMicSource` for clip capture; `Build.MODEL` for `device_hint`, matching `JarvisApp.kt:81`'s `"android-" + Build.MODEL` exactly.
+- Consumes: `VoiceApi.challenge()`, `VoiceApi.enroll()` (Task 8); `AndroidMicSource` for clip capture; `Build.MODEL` for `device_hint`, matching `JarvisApp.kt:81`'s `"android-" + Build.MODEL` exactly.
 - Produces: a user-visible flow; no later task consumes it.
 
-**Flow, and why it is shaped this way:** the server speaks the liveness code over an *open voice bridge* (`brain/app/voice.py:610` looks up `active_bridges[email]`). So the enrollment flow must run while a voice call is live. Sequence: user opens the voice screen → taps "Bu cihazı tanıt" → app ensures a voice call is connected → calls `challenge()` → Jarvis speaks four digits → user repeats them → server mints the grant (Task A3 requires the CM to clear that utterance) → app records 3 clips of ~2 s each from this device's microphone → `enroll()` → success shows the new anchor count.
+**Flow, and why it is shaped this way:** the server speaks the liveness code over an *open voice bridge* (`brain/app/voice.py:610` looks up `active_bridges[email]`). So the enrollment flow must run while a voice call is live. Sequence: user opens the voice screen → taps "Bu cihazı tanıt" → app ensures a voice call is connected → calls `challenge()` → Jarvis speaks four digits → user repeats them → server mints the grant (Task 3 requires the CM to clear that utterance) → app records 3 clips of ~2 s each from this device's microphone → `enroll()` → success shows the new anchor count.
 
 **State machine** (`EnrollDeviceViewModel`), each state carrying its Turkish label:
 
@@ -1062,7 +1062,7 @@ channel label no utterance will ever carry."
 
 ---
 
-## Task C3: End-to-end proof on the real device (HITL)
+## Task 10: End-to-end proof on the real device (HITL)
 
 **Files:** none — this is a verification task run with Kadir.
 
@@ -1113,6 +1113,6 @@ The trade-off is real in both directions: our design keeps the watch working whe
 ## Out of scope, and why
 
 - **CM threshold calibration.** Genuine speech measured `p_fake` from 0.0074 to 0.4231 against a benchmark that showed 0.0004 for human fixtures, so 0.85 is not calibrated for this channel. Calibration needs a spoof distribution as well, which needs the strong-clone (Chatterbox-class) test. Moving the threshold on bonafide data alone would be guessing with extra steps.
-- **The single-`AudioRecord` → PFD rework.** Gated on Task B4's answer.
+- **The single-`AudioRecord` → PFD rework.** Gated on Task 7's answer.
 - **The 10-second utterance ceiling.** Three of four utterances reported `dur_in` of exactly 10.00 s, which is a buffer boundary rather than a coincidence. Worth finding, not worth blocking this slice.
 - **`npx` missing from the image**, so `github_mcp` fails and retries on every turn. Real, unrelated, cheap: either add Node to the image or drop the toolset from the registry.
