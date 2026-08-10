@@ -6,26 +6,40 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
+import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.util.Log
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private const val TAG = "AndroidMicSource"
+/** One attached capture effect as reported by [AudioRecordingConfiguration.getEffects]. */
+internal data class MicEffect(val name: String, val type: UUID)
 
 /**
  * DATA line for the capture path: what the platform actually attached, not what we
  * asked for. `isClientSilenced` is the direct test of "is our own TTS reaching the
  * mic" -- the system mutes a capture client when another one wins the route.
  * Both APIs are 29+; below that the honest answer is "unknown".
+ *
+ * AEC presence is decided by comparing [MicEffect.type] -- the standardized
+ * `AudioEffect.Descriptor` UUID -- against [aecType], NEVER by matching
+ * [MicEffect.name]: that field is a vendor-supplied human-readable label with no
+ * guaranteed spelling (a device could name it "Acoustic Echo Canceler", which
+ * contains no "aec" substring in any casing). Names are still what gets printed in
+ * `effects=`, because that's what a human reads the log for.
  */
-internal fun formatEffectReport(effects: List<String>, silenced: Boolean, sdkInt: Int): String =
+internal fun formatEffectReport(
+    effects: List<MicEffect>,
+    silenced: Boolean,
+    sdkInt: Int,
+    aecType: UUID,
+): String =
     if (sdkInt < 29) {
         "mic effects=unknown silenced=unknown (API $sdkInt < 29)"
     } else {
-        val names = if (effects.isEmpty()) "none" else effects.joinToString(",")
-        "mic effects=$names aec=${effects.any { it.contains("AEC", ignoreCase = true) }} " +
-            "silenced=$silenced"
+        val names = if (effects.isEmpty()) "none" else effects.joinToString(",") { it.name }
+        "mic effects=$names aec=${effects.any { it.type == aecType }} silenced=$silenced"
     }
 
 /**
@@ -97,9 +111,10 @@ class AndroidMicSource(private val audioManager: AudioManager) : MicSource {
                     val mine = configs.firstOrNull { it.clientAudioSessionId == record.audioSessionId }
                         ?: return
                     Log.i(TAG, formatEffectReport(
-                        mine.effects.map { it.name },
+                        mine.effects.map { MicEffect(it.name, it.type) },
                         mine.isClientSilenced,
                         Build.VERSION.SDK_INT,
+                        AudioEffect.EFFECT_TYPE_AEC,
                     ))
                 }
             }
@@ -126,5 +141,9 @@ class AndroidMicSource(private val audioManager: AudioManager) : MicSource {
         recordingCallback = null
         record.stop()
         record.release()
+    }
+
+    private companion object {
+        const val TAG = "AndroidMicSource"
     }
 }
