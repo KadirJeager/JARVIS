@@ -260,21 +260,35 @@ class VoiceBridge:
             matched = (pending_code in extracted_digits)
             granted = False
             if matched and db is not None:
-                granted = voice_challenge.verify_and_grant(db, self._user_id, pending_code)
+                # The challenge exists to prove a live human is present, so
+                # digit match alone is not enough: cm_ok must be True. This is
+                # the opposite of the live-conversation path (which fails OPEN
+                # on cm_ok=None so a mid-sentence CM hiccup never locks Kadir
+                # out) -- but a liveness challenge that passes when liveness
+                # could not be measured is not a liveness challenge. The grant
+                # minted here is what unlocks anchor enrollment.
+                signals = voice_trust.peek(self._trust_key)
+                cm_ok = signals.cm_ok if signals is not None else None
+                if cm_ok is True:
+                    granted = voice_challenge.verify_and_grant(db, self._user_id, pending_code)
+                else:
+                    logging.warning(
+                        "voice challenge: code matched but CM did not clear the "
+                        "utterance for %s (cm_ok=%s) -- no grant",
+                        self._user_id, cm_ok,
+                    )
 
             self._pending_challenge_code = None
             if granted:
                 reply = "Doğrulama kodu kabul edildi."
-                await self._safe_send(ws, vp.evt_jarvis_text(reply))
-                await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
-                await self._safe_send(ws, vp.evt_turn_complete())
-                return
+            elif matched:
+                reply = "Kod doğru ama sesin canlılığı doğrulanamadı, tekrar dener misin?"
             else:
                 reply = "Doğrulama kodu hatalı veya süresi dolmuş."
-                await self._safe_send(ws, vp.evt_jarvis_text(reply))
-                await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
-                await self._safe_send(ws, vp.evt_turn_complete())
-                return
+            await self._safe_send(ws, vp.evt_jarvis_text(reply))
+            await self._safe_send(ws, vp.evt_transcript("jarvis", reply))
+            await self._safe_send(ws, vp.evt_turn_complete())
+            return
 
         task = asyncio.create_task(self._run_turn(ws, text))
         self._turn_tasks.add(task)

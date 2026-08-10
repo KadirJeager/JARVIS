@@ -10,7 +10,7 @@ Validates:
 import asyncio
 import pytest
 
-from app import antispoof, config, trust, voice_protocol as vp, voice_trust
+from app import antispoof, config, trust, voice_challenge, voice_protocol as vp, voice_trust
 from app.speaker import IdentifyOutcome, SpeakerService
 from app.voice import APP_NAME, VoiceBridge, _handshake
 from tests.fakes import FakeDB
@@ -131,6 +131,77 @@ class _FakeWS:
 
     async def send_text(self, text):
         self.sent.append(text)
+
+
+def _bridge_with_pending_challenge(code: str):
+    """A VoiceBridge with a pending challenge already recorded -- both on the
+    bridge itself (the fast path _on_utterance_final checks first) and in the
+    fake db (verify_and_grant's own read), mirroring what prompt_challenge()
+    plus a real Firestore round-trip would have produced."""
+    db = FakeDB()
+    user_id = "kadir@example.com"
+    _, doc = voice_challenge.create_challenge(db, user_id)
+    doc["code"] = code  # create_challenge picks a random code; pin it to the caller's
+    db.collection(voice_challenge.COLLECTION_NAME).document(user_id).set(doc)
+
+    bridge = VoiceBridge(runner=None, session_service=None,
+                          presence="foreground", device_hint="android-Pixel 10 Pro")
+    bridge._user_id = user_id
+    bridge._trust_key = voice_trust.key_for(APP_NAME, user_id, f"voice-{user_id}")
+    bridge.memory = type("FakeMemory", (), {"db": db})()
+    bridge._pending_challenge_code = code
+    ws = _FakeWS()
+    return bridge, ws, db
+
+
+@pytest.mark.asyncio
+async def test_challenge_grant_requires_a_bonafide_utterance():
+    """The code was spoken by something the CM flagged -- reading the digits
+    correctly must not be enough. The grant this mints is what unlocks anchor
+    enrollment, so it is the highest-value target in the system."""
+    bridge, ws, db = _bridge_with_pending_challenge(code="4831")
+    voice_trust.publish(bridge._trust_key, voice_trust.VoiceSignals(
+        trust_level=trust.HIGH, voice_score=0.8, presence="foreground",
+        device_hint="android-Pixel 10 Pro", cm_ok=False,
+    ))
+
+    await bridge._on_utterance_final(ws, "dört sekiz üç bir")
+
+    assert voice_challenge.has_valid_grant(db, bridge._user_id) is False
+    # json.dumps escapes non-ASCII by default (see _safe_send), so decode
+    # before substring-checking the Turkish reply -- the raw wire string is
+    # "ı"-style escapes, never the literal characters.
+    import json
+    reply_text = json.loads(ws.sent[-3])["text"]
+    assert "canlılık" in reply_text.lower() or "doğrulanamadı" in reply_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_challenge_grant_blocked_when_cm_silent():
+    """cm_ok=None (timeout/disabled) is not a pass on the one path whose entire
+    purpose is proving liveness."""
+    bridge, ws, db = _bridge_with_pending_challenge(code="4831")
+    voice_trust.publish(bridge._trust_key, voice_trust.VoiceSignals(
+        trust_level=trust.HIGH, voice_score=0.8, presence="foreground",
+        device_hint="android-Pixel 10 Pro", cm_ok=None,
+    ))
+
+    await bridge._on_utterance_final(ws, "dört sekiz üç bir")
+
+    assert voice_challenge.has_valid_grant(db, bridge._user_id) is False
+
+
+@pytest.mark.asyncio
+async def test_challenge_grant_succeeds_on_bonafide_audio():
+    bridge, ws, db = _bridge_with_pending_challenge(code="4831")
+    voice_trust.publish(bridge._trust_key, voice_trust.VoiceSignals(
+        trust_level=trust.HIGH, voice_score=0.8, presence="foreground",
+        device_hint="android-Pixel 10 Pro", cm_ok=True,
+    ))
+
+    await bridge._on_utterance_final(ws, "dört sekiz üç bir")
+
+    assert voice_challenge.has_valid_grant(db, bridge._user_id) is True
 
 
 @pytest.mark.asyncio

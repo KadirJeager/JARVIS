@@ -3,10 +3,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from app import voice_challenge as vc
+from app import trust, voice_challenge as vc, voice_trust
 from app.auth import require_google_user
 import app.main as main_mod
-from app.voice import VoiceBridge, active_bridges
+from app.voice import APP_NAME, VoiceBridge, active_bridges
 from tests.fakes import FakeDB
 
 
@@ -134,6 +134,13 @@ async def test_voice_bridge_challenge_interception():
     bridge = VoiceBridge(runner=None, session_service=None)
     bridge._user_id = "kadir@example.com"
     bridge.memory = type("FakeMemory", (), {"db": db})()
+    # The challenge grant now requires the CM to have cleared this utterance
+    # (see test_antispoof.py's test_challenge_grant_* trio) -- without this,
+    # cm_ok resolves to None (no signals published) and the grant is refused.
+    bridge._trust_key = voice_trust.key_for(APP_NAME, "kadir@example.com", "voice-kadir@example.com")
+    voice_trust.publish(bridge._trust_key, voice_trust.VoiceSignals(
+        trust_level=trust.HIGH, voice_score=0.9, cm_ok=True,
+    ))
 
     ws = FakeWS()
     bridge._ws = ws
