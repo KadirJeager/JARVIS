@@ -206,6 +206,20 @@ SPEAKER_ADAPTIVE_CAP = int(os.environ.get("JARVIS_SPEAKER_ADAPTIVE_CAP", "20"))
 CM_ENABLED = os.environ.get("JARVIS_CM_ENABLED", "1") == "1"
 CM_REJECT_THRESHOLD = float(os.environ.get("JARVIS_CM_REJECT_THRESHOLD", "0.85"))
 CM_TIMEOUT_S = float(os.environ.get("JARVIS_CM_TIMEOUT_S", "8.0"))
+# Inference cost control (prod evidence 2026-08-10: 3/3 utterances blew the 8 s
+# budget on a 1 vCPU instance). Threads: empty = derive from the cgroup CPU quota
+# (see antispoof._resolve_thread_count); set JARVIS_CM_TORCH_THREADS to override
+# in prod without a rebuild. Seconds: caps the quadratic self-attention cost of a
+# long utterance; the 6 Aug benchmark validated 3 s, this leaves margin.
+CM_MAX_SECONDS = float(os.environ.get("JARVIS_CM_MAX_SECONDS", "4.0"))
+CM_AUDIO_RATE = 16000
+# Pre-load the CM model at startup instead of on the first utterance. OFF by
+# default and switched on per service: the same image runs as jarvis-brain (which
+# never scores audio) and jarvis-voice (which does), and the model's ~1.2 GiB
+# does not fit the brain container. Prod evidence 2026-08-10: cold model load
+# alone exceeded the 8 s CM budget, so the first utterance of every cold start
+# lost its spoof verdict.
+CM_WARMUP = os.environ.get("JARVIS_CM_WARMUP", "0") == "1"
 CM_MODEL_DIR = os.environ.get("CM_MODEL_DIR", "/opt/antispoof")
 # Rolling mic-buffer window kept for the next speaker verification. The buffer
 # is drained at a turn boundary, but a turn boundary is NOT guaranteed to

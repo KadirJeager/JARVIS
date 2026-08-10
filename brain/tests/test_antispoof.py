@@ -199,3 +199,114 @@ async def test_voice_verify_utterance_cm_exception_fail_safe(caplog):
     sent_events = [json.loads(s) for s in ws.sent]
     assert sent_events[0] == {"type": "speaker", "role": "user", "verified": True, "score": 0.9}
     assert "cm_ok" not in sent_events[0]
+
+
+# --- Inference cost control (prod evidence 2026-08-10: CM timed out 3/3 on a
+# 1 vCPU Cloud Run instance while the 6 Aug benchmark measured 0.46 s for 3 s of
+# audio AT 2 THREADS. Two unbounded inputs feed that gap: torch's thread count
+# (it sizes to host cores, not the cgroup CPU quota) and the utterance length
+# (wav2vec2 self-attention grows superlinearly). Both are pure functions here so
+# they stay testable without torch.) ---
+
+_RATE = 16000  # Hz, PCM16 mono -> 2 bytes per sample
+
+
+def test_bounded_window_returns_short_audio_untouched():
+    """Audio at or below the cap is passed through byte-identical."""
+    pcm = b"\x01\x02" * (_RATE * 2)  # 2.0 s
+    assert antispoof._bounded_window(pcm, 4.0, _RATE) is pcm
+
+
+def test_bounded_window_trims_long_audio_to_cap():
+    """Audio above the cap is trimmed to exactly cap seconds of samples."""
+    pcm = b"\x01\x02" * (_RATE * 10)  # 10.0 s
+    out = antispoof._bounded_window(pcm, 4.0, _RATE)
+    assert len(out) == int(4.0 * _RATE) * 2
+
+
+def test_bounded_window_is_centered():
+    """The kept window is centered: leading silence and a clipped tail both fall
+    outside it. Marker bytes at the midpoint must survive."""
+    samples = _RATE * 10
+    buf = bytearray(b"\x00\x00" * samples)
+    mid = (samples // 2) * 2
+    buf[mid:mid + 2] = b"\x7f\x7f"
+    out = antispoof._bounded_window(bytes(buf), 4.0, _RATE)
+    assert b"\x7f\x7f" in out
+
+
+def test_bounded_window_keeps_sample_alignment():
+    """A window must never start on an odd byte: PCM16 samples are 2 bytes, and a
+    1-byte shift reinterprets the whole stream as noise."""
+    pcm = b"\x01\x02" * (_RATE * 10) + b"\x03"  # odd total length
+    out = antispoof._bounded_window(pcm, 3.0, _RATE)
+    assert len(out) % 2 == 0
+    start = pcm.find(out[:64])
+    assert start % 2 == 0
+
+
+def test_resolve_thread_count_env_override_wins():
+    """An explicit env value is honoured verbatim -- the knob must be turnable in
+    prod without a rebuild."""
+    assert antispoof._resolve_thread_count(env="3", quota_reader=lambda: 1.0) == 3
+
+
+def test_resolve_thread_count_follows_cgroup_quota():
+    """Absent an override, the thread count follows the container's CPU quota --
+    NOT the host core count, which is what torch would pick on its own."""
+    assert antispoof._resolve_thread_count(env=None, quota_reader=lambda: 1.0) == 1
+    assert antispoof._resolve_thread_count(env=None, quota_reader=lambda: 2.0) == 2
+
+
+def test_resolve_thread_count_clamps_high_quota():
+    """Clamped: past a handful of threads this model stops scaling and the extra
+    threads only add contention."""
+    assert antispoof._resolve_thread_count(env=None, quota_reader=lambda: 64.0) == 4
+
+
+def test_resolve_thread_count_falls_back_when_quota_unreadable():
+    """An unreadable quota must not raise and must not fall back to 'unbounded'."""
+    def _boom():
+        raise OSError("no cgroup here")
+
+    assert antispoof._resolve_thread_count(env=None, quota_reader=_boom) == 2
+
+
+def test_resolve_thread_count_rejects_garbage_env():
+    """A malformed override falls back to the quota path rather than crashing the
+    voice turn."""
+    assert antispoof._resolve_thread_count(env="abc", quota_reader=lambda: 1.0) == 1
+    assert antispoof._resolve_thread_count(env="0", quota_reader=lambda: 1.0) == 1
+
+
+# --- Startup warmup gating. The same image serves jarvis-brain and jarvis-voice;
+# only the latter scores audio, and the CM model's ~1.2 GiB does not fit the
+# brain's container. ---
+
+def test_warmup_targets_exclude_cm_by_default(monkeypatch):
+    """Default OFF: the brain must not pre-load a model it never calls."""
+    from app import main
+
+    monkeypatch.setattr(config, "CM_WARMUP", False)
+    monkeypatch.setattr(config, "CM_ENABLED", True)
+    assert [n for n, _ in main._warmup_targets()] == ["e5", "ecapa"]
+
+
+def test_warmup_targets_include_cm_when_opted_in(monkeypatch):
+    """Opted in (the voice service): CM joins so the first utterance after a cold
+    start does not spend its whole budget loading weights."""
+    from app import main
+
+    monkeypatch.setattr(config, "CM_WARMUP", True)
+    monkeypatch.setattr(config, "CM_ENABLED", True)
+    assert [n for n, _ in main._warmup_targets()] == ["e5", "ecapa", "cm"]
+
+
+def test_warmup_targets_respect_cm_disabled(monkeypatch):
+    """CM switched off wins over the warmup opt-in -- warming a gate that will
+    never run is pure waste."""
+    from app import main
+
+    monkeypatch.setattr(config, "CM_WARMUP", True)
+    monkeypatch.setattr(config, "CM_ENABLED", False)
+    assert [n for n, _ in main._warmup_targets()] == ["e5", "ecapa"]

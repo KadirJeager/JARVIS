@@ -10,8 +10,10 @@ Torch and heavy ML libraries are imported lazily inside functions so this module
 can be imported in lightweight / torch-less test environments.
 """
 import json
+import logging
 import os
 import threading
+import time
 from typing import Callable
 
 from . import config
@@ -19,6 +21,65 @@ from . import config
 _model = None
 _model_lock = threading.Lock()
 _score_fn: Callable[[bytes], float | tuple[bool, float]] | None = None
+
+_THREAD_FALLBACK = 2   # what the 6 Aug benchmark actually measured at
+_THREAD_CEILING = 4    # past this the model stops scaling; extra threads only contend
+
+
+def _read_cpu_quota() -> float:
+    """Container CPU quota in cores, from cgroup v2 (`cpu.max`) or v1.
+
+    Raises OSError/ValueError when no quota is readable -- the caller decides the
+    fallback. `os.cpu_count()` is deliberately NOT used: it reports HOST cores,
+    which is exactly the number torch would pick on its own and exactly what
+    oversubscribes a `cpu=1000m` Cloud Run container.
+    """
+    with open("/sys/fs/cgroup/cpu.max", "r", encoding="utf-8") as f:
+        quota_s, period_s = f.read().split()
+    if quota_s == "max":
+        raise ValueError("no cpu quota set")
+    return float(quota_s) / float(period_s)
+
+
+def _resolve_thread_count(env: str | None = None, quota_reader: Callable[[], float] | None = None) -> int:
+    """Intra-op thread count for CM inference.
+
+    Precedence: explicit env override -> cgroup CPU quota -> fallback. Torch sizes
+    its pool to the host core count, which under a fractional CPU quota means
+    dozens of threads fighting over one core's worth of time slice.
+    """
+    if env:
+        try:
+            n = int(env)
+            if n > 0:
+                return n
+        except ValueError:
+            pass  # malformed override must not break the turn -- fall through
+    reader = quota_reader or _read_cpu_quota
+    try:
+        cores = reader()
+    except Exception:
+        return _THREAD_FALLBACK
+    return max(1, min(_THREAD_CEILING, int(cores)))
+
+
+def _bounded_window(pcm: bytes, max_seconds: float, rate: int) -> bytes:
+    """At most `max_seconds` of audio, taken from the CENTRE of the utterance.
+
+    wav2vec2 self-attention is quadratic in sequence length, so an unbounded
+    utterance is an unbounded inference cost. Centred rather than leading:
+    the head of a buffered utterance is usually room tone before onset, and the
+    tail can be clipped mid-word by the turn boundary.
+
+    The returned window always starts on an even byte -- PCM16 samples are two
+    bytes wide and a one-byte shift reinterprets the entire stream as noise.
+    """
+    max_bytes = int(max_seconds * rate) * 2
+    if len(pcm) <= max_bytes:
+        return pcm
+    start = (len(pcm) - max_bytes) // 2
+    start -= start % 2
+    return pcm[start:start + max_bytes]
 
 
 def _load_model():
@@ -30,6 +91,16 @@ def _load_model():
     import torch.nn as nn
     from safetensors.torch import load_file
     from transformers import Wav2Vec2Config, Wav2Vec2Model
+
+    # Pin the intra-op pool BEFORE the first forward pass. Left alone, torch sizes
+    # it to the host's core count; under Cloud Run's `cpu=1000m` that is dozens of
+    # threads contending for one core's time slice. Prod evidence 2026-08-10: CM
+    # exceeded its 8 s budget on 3/3 utterances while the bench measured 0.46 s
+    # for 3 s of audio at 2 threads.
+    threads = _resolve_thread_count(os.environ.get("JARVIS_CM_TORCH_THREADS"))
+    torch.set_num_threads(threads)
+    torch.set_num_interop_threads(1)
+    logging.info("CM: torch threads pinned to %d (interop=1)", threads)
 
     model_id = "nii-yamagishilab/mms-300m-anti-deepfake"
     cm_dir = os.environ.get("CM_MODEL_DIR") or getattr(config, "CM_MODEL_DIR", "/opt/antispoof")
@@ -161,9 +232,16 @@ def is_bonafide(pcm: bytes) -> tuple[bool, float]:
 
     import torch
 
-    w2v_model, proj_fc = _get_model()
+    rate = getattr(config, "CM_AUDIO_RATE", 16000)
+    dur_in = len(pcm) / (rate * 2)
+    window = _bounded_window(pcm, getattr(config, "CM_MAX_SECONDS", 4.0), rate)
+    dur_used = len(window) / (rate * 2)
 
-    wav_tensor = pcm16_to_tensor(pcm)
+    started = time.monotonic()
+    w2v_model, proj_fc = _get_model()
+    loaded_at = time.monotonic()
+
+    wav_tensor = pcm16_to_tensor(window)
     wav = torch.nn.functional.layer_norm(wav_tensor, wav_tensor.shape)
     if wav.dim() == 1:
         wav = wav.unsqueeze(0)
@@ -178,5 +256,18 @@ def is_bonafide(pcm: bytes) -> tuple[bool, float]:
     cm_fake_prob = float(probs[0].item())
     threshold = getattr(config, "CM_REJECT_THRESHOLD", 0.85)
     cm_is_bonafide = cm_fake_prob < threshold
+
+    # DATA-level line: inputs -> intermediates -> output, with units. This still
+    # prints when the caller's wait_for has already given up (asyncio cannot
+    # cancel the worker thread), so it is how the REAL inference cost gets
+    # measured rather than inferred from the timeout.
+    done = time.monotonic()
+    logging.info(
+        "CM: dur_in=%.2fs dur_used=%.2fs threads=%d load_ms=%d infer_ms=%d "
+        "p_fake=%.4f threshold=%.2f verdict=%s",
+        dur_in, dur_used, torch.get_num_threads(),
+        int((loaded_at - started) * 1000), int((done - loaded_at) * 1000),
+        cm_fake_prob, threshold, "bonafide" if cm_is_bonafide else "SPOOF",
+    )
 
     return cm_is_bonafide, cm_fake_prob

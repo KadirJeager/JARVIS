@@ -44,13 +44,27 @@ spec:
             secretKeyRef:
               key: latest
               name: cliproxy-api-key
+        # Pre-load the CM model here and NOT in jarvis-brain: same image, but
+        # the brain never scores audio and its container has no room for the
+        # model's ~1.2 GiB. Without this the first utterance of every cold start
+        # spends its entire CM budget loading weights and loses its verdict.
+        - name: JARVIS_CM_WARMUP
+          value: "1"
         resources:
           limits:
             cpu: 1000m
             # 2Gi -> 3Gi: ECAPA peak was measured ~590 MB; the e5 memory
             # embedder adds ~1.1 GB weights + encode buffers in the same
-            # process (torch is shared). 3Gi keeps ~40% headroom.
-            memory: 3Gi
+            # process (torch is shared).
+            #
+            # 3Gi -> 4Gi (2026-08-10, PROD OOM): the CM model landed on 6 Aug
+            # without a memory revision. Cloud Run enforces the limit across the
+            # WHOLE instance, so voice 3Gi + llm-proxy 256Mi = 3328 MiB, and the
+            # first real voice turn peaked at 3360 MiB and killed the instance
+            # mid-reply. Composition: e5 ~1.1 GiB + CM 1210.8 MiB (measured from
+            # the HF weights) + ECAPA ~80 MiB + torch/ADK/FastAPI ~500 MiB.
+            # Do NOT lower this back to 3Gi -- the OOM returns.
+            memory: 4Gi
         startupProbe:
           failureThreshold: 1
           periodSeconds: 240

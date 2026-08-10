@@ -68,10 +68,7 @@ async def _warm_heavy_models() -> None:
     from . import speaker as speaker_mod
 
     def _warm() -> None:
-        for name, load in (
-            ("e5", memory_mod._get_e5_model),
-            ("ecapa", speaker_mod._get_model),
-        ):
+        for name, load in _warmup_targets():
             try:
                 load()
                 logging.info("warmup: %s model loaded", name)
@@ -79,6 +76,27 @@ async def _warm_heavy_models() -> None:
                 logging.exception("warmup: %s model failed to pre-load (lazy path remains)", name)
 
     threading.Thread(target=_warm, name="model-warmup", daemon=True).start()
+
+
+def _warmup_targets() -> list:
+    """Which heavy models this process pre-loads.
+
+    e5 and ECAPA are warmed everywhere. The CM model is warmed ONLY where it is
+    opted in, because the same image serves both jarvis-brain and jarvis-voice:
+    the brain never calls `antispoof.is_bonafide`, so its lazy singleton stays
+    unloaded there, and warming its ~1.2 GiB unconditionally would push the 3Gi
+    brain container into exactly the OOM that took the 4Gi voice container down
+    on 2026-08-10. Opt-in is explicit rather than sniffing `K_SERVICE`: the
+    service that needs it should say so.
+    """
+    from . import antispoof as antispoof_mod
+    from . import memory as memory_mod
+    from . import speaker as speaker_mod
+
+    targets = [("e5", memory_mod._get_e5_model), ("ecapa", speaker_mod._get_model)]
+    if config.CM_ENABLED and config.CM_WARMUP:
+        targets.append(("cm", antispoof_mod._get_model))
+    return targets
 
 
 _runner: Runner | None = None
