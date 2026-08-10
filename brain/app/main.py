@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel, Field, field_validator
 
-from . import approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_challenge, voice_manage, voice_trust
+from . import antispoof, approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_challenge, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_google_user, require_scheduler, require_user
 
@@ -602,6 +602,36 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
             status_code=409,
             detail="Ses kaydı için önce sesli doğrulama kodu gereklidir (/api/voice/challenge)",
         )
+    raw_clips = [base64.b64decode(clip) for clip in req.clips]
+
+    # Anchors are immutable and un-evictable (config.CM_ENROLL_REQUIRED
+    # docstring), so this gate fails CLOSED: no verdict is not a pass, unlike
+    # the live verify path which fails open so Kadir is never locked out
+    # mid-conversation. Runs BEFORE the ECAPA embedding below so a rejected
+    # clip costs no inference.
+    if config.CM_ENABLED and config.CM_ENROLL_REQUIRED:
+        try:
+            verdicts = await asyncio.to_thread(
+                lambda: [antispoof.is_bonafide(pcm) for pcm in raw_clips]
+            )
+        except Exception:
+            logging.exception("enroll: CM evaluation failed for %s", email)
+            raise HTTPException(
+                status_code=503,
+                detail="Ses doğrulaması şu anda yapılamıyor, birazdan tekrar dene",
+            )
+        for idx, (ok, fake_prob) in enumerate(verdicts):
+            logging.info(
+                "enroll CM: user=%s clip=%d/%d bytes=%d p_fake=%.4f verdict=%s",
+                email, idx + 1, len(verdicts), len(raw_clips[idx]), fake_prob,
+                "bonafide" if ok else "SPOOF",
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{idx + 1}. ses klibi sahte olarak işaretlendi, kayıt yapılmadı",
+                )
+
     try:
         # OFF THE EVENT LOOP, for the same reason the live verify path is
         # (app/voice.py): speaker.embed is real ECAPA inference plus, on the
@@ -610,7 +640,7 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
         # async endpoint it stalls the whole loop, and jarvis-brain serves
         # /api/chat and /ws/voice from that same loop.
         vecs = await asyncio.to_thread(
-            lambda: [speaker.embed(base64.b64decode(clip)) for clip in req.clips]
+            lambda: [speaker.embed(pcm) for pcm in raw_clips]
         )
         # Via SpeakerService, NOT speaker_store directly: enrollment's
         # load->extend->save must share the gallery lock with identify()'s

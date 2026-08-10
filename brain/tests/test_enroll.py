@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_mod
 import app.speaker_store as speaker_store_mod
+from app import antispoof, config
 from app.auth import require_google_user, require_user
 from app.speaker_store import load_profile
 from tests.fakes import FakeDB
@@ -26,6 +27,11 @@ def enroll_client(monkeypatch):
     monkeypatch.setattr(main_mod, "_speaker_service", None)
     monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
     monkeypatch.setattr("app.voice_challenge.has_valid_grant", lambda db, user_id, now_fn=None: True)
+    # Default CM verdict is bonafide so tests unrelated to the CM gate (below)
+    # don't fall through to the real torch-backed model, which isn't
+    # installed in this test environment and would 503 every one of them.
+    # Individual CM-gate tests override this with their own monkeypatch call.
+    monkeypatch.setattr("app.antispoof._score_fn", lambda pcm: 0.01)
     with TestClient(main_mod.app) as c:
         yield c, db
     main_mod.app.dependency_overrides.clear()
@@ -308,6 +314,7 @@ def test_enroll_with_real_grant_flow(monkeypatch):
     monkeypatch.setattr(main_mod, "_enroll_db", lambda: db, raising=False)
     monkeypatch.setattr(main_mod, "_speaker_service", None)
     monkeypatch.setattr("app.speaker.embed", lambda pcm: [1.0, 0.0])
+    monkeypatch.setattr("app.antispoof._score_fn", lambda pcm: 0.01)
 
     main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
     main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
@@ -324,3 +331,83 @@ def test_enroll_with_real_grant_flow(monkeypatch):
             assert r.json() == {"anchors": 1}
     finally:
         main_mod.app.dependency_overrides.clear()
+
+
+# --- CM (anti-spoofing) gate on enrollment anchors ---------------------------
+# Task 1 (2026-08-11 ses-kimligi-pixel-dogrulugu): enrollment writes immutable
+# anchors that anchor_score refereeing depends on (app/speaker.py:99-106), so
+# a missing or failed CM verdict must block -- unlike the live verify path,
+# which fails open so Kadir is never locked out mid-conversation.
+#
+# enroll_client already monkeypatches app.voice_challenge.has_valid_grant to
+# True, so the liveness grant is satisfied here without extra plumbing.
+# antispoof._score_fn is set via monkeypatch (not raw assignment) so it is
+# restored automatically at teardown and cannot leak into later tests.
+
+
+def test_enroll_rejects_spoofed_clip(enroll_client, monkeypatch):
+    """A clip the CM calls spoof must never become an anchor: anchors are
+    immutable and are what anchor_score refereeing depends on."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: 0.99)  # >= CM_REJECT_THRESHOLD
+    r = c.post("/api/voice/enroll", json={"clips": [_clip(), _clip()]})
+    assert r.status_code == 422
+    assert "sahte" in r.json()["detail"].lower()
+
+
+def test_enroll_rejects_when_cm_has_no_verdict(enroll_client, monkeypatch):
+    """No verdict is not a pass. Unlike the live path (which fails open so Kadir
+    is never locked out mid-turn), enrollment is a deliberate repeatable action,
+    so a CM failure blocks."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+
+    def _boom(pcm):
+        raise RuntimeError("cm down")
+
+    monkeypatch.setattr(antispoof, "_score_fn", _boom)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 503
+
+
+def test_enroll_accepts_bonafide_clips(enroll_client, monkeypatch):
+    """The happy path still writes anchors."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: 0.01)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip(), _clip()]})
+    assert r.status_code == 200
+    assert r.json()["anchors"] >= 2
+
+
+def test_enroll_checks_every_clip_not_just_the_first(enroll_client, monkeypatch):
+    """One bad clip in a batch poisons the gallery just as thoroughly as a batch
+    of bad clips."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    seen = []
+
+    def _score(pcm):
+        seen.append(pcm)
+        return 0.01 if len(seen) == 1 else 0.99
+
+    monkeypatch.setattr(antispoof, "_score_fn", _score)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip(), _clip()]})
+    assert r.status_code == 422
+    assert len(seen) == 2
+
+
+def test_enroll_skips_cm_when_disabled(enroll_client, monkeypatch):
+    """CM_ENABLED=0 is the operator's kill switch and must not brick enrollment."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(config, "CM_ENABLED", False)
+    monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: 0.99)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 200

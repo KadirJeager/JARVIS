@@ -220,6 +220,11 @@ CM_AUDIO_RATE = 16000
 # alone exceeded the 8 s CM budget, so the first utterance of every cold start
 # lost its spoof verdict.
 CM_WARMUP = os.environ.get("JARVIS_CM_WARMUP", "0") == "1"
+# Enrollment writes ANCHORS -- immutable, un-evictable, and the reference that
+# anchor_score refereeing depends on (app/speaker.py:99-106). A poisoned anchor
+# is permanent, so this path fails CLOSED, unlike the live verify path which
+# fails open so Kadir is never locked out mid-conversation.
+CM_ENROLL_REQUIRED = os.environ.get("JARVIS_CM_ENROLL_REQUIRED", "1") == "1"
 CM_MODEL_DIR = os.environ.get("CM_MODEL_DIR", "/opt/antispoof")
 # Rolling mic-buffer window kept for the next speaker verification. The buffer
 # is drained at a turn boundary, but a turn boundary is NOT guaranteed to
