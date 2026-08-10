@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
-from app import speaker_history
+from app import speaker, speaker_history
 from app.auth import require_google_user, require_user
 from app.speaker import make_sample
 from app.speaker_store import enroll_anchors, load_profile, save_profile
@@ -32,10 +32,15 @@ def _auth():
     main_mod.app.dependency_overrides[require_google_user] = lambda: USER
 
 
-def _entry(i, *, score=0.8, verified=True, device="phone", adapted=None):
+def _entry(i, *, score=0.8, verified=True, device="phone", adapted=None,
+           cm_fake_prob=0.01):
+    # cm_fake_prob default (0.01 = comfortably bonafide) keeps every
+    # pre-existing caller of this helper clear of the CM confirm-gate; tests
+    # that exercise the gate itself pass an explicit value.
     return {"id": f"e{i}", "ts": f"t{i}", "score": score, "verified": verified,
             "device_hint": device, "presence": "locked", "trust_level": "MEDIUM",
-            "adapted_sample_id": adapted, "correction": None, "vec": [0.1, 0.2]}
+            "adapted_sample_id": adapted, "correction": None,
+            "cm_fake_prob": cm_fake_prob, "vec": [0.1, 0.2]}
 
 
 def _assert_no_vec(obj):
@@ -251,8 +256,47 @@ def _seed_history(db, *, adapted=None, correction=None):
     speaker_history.record(db, USER, {
         "id": "e1", "ts": "t1", "score": 0.5, "verified": True,
         "device_hint": "phone", "presence": "locked", "trust_level": "MEDIUM",
-        "adapted_sample_id": adapted, "correction": correction, "vec": B,
+        "adapted_sample_id": adapted, "correction": correction,
+        "cm_fake_prob": 0.01, "vec": B,
     }, cap=50)
+
+
+def _service_with_history(cm_fake_prob):
+    """A SpeakerService whose history holds exactly one auto entry carrying the
+    given CM score."""
+    db = FakeDB()
+    svc = speaker.SpeakerService(db)
+    speaker_history.record(db, "kadir@example.com", {
+        "id": "entry-1", "ts": "2026-08-11T00:00:00Z", "score": 0.72,
+        "verified": True, "device_hint": "android-Pixel 10 Pro",
+        "presence": "foreground", "trust_level": "HIGH",
+        "adapted_sample_id": None, "correction": None,
+        "cm_fake_prob": cm_fake_prob, "vec": [0.1] * 192,
+    }, 50)
+    return svc, db
+
+
+def test_confirm_rejects_entry_the_cm_called_spoof():
+    """The utterance was flagged at the time it was spoken; confirming it must
+    not launder it into the gallery."""
+    svc, db = _service_with_history(cm_fake_prob=0.95)
+    with pytest.raises(speaker.RuleViolation):
+        svc.confirm_history("kadir@example.com", "entry-1")
+
+
+def test_confirm_rejects_entry_with_no_cm_evidence():
+    """cm_fake_prob=None means the CM never answered for this utterance (timeout,
+    disabled, or an old record). Absence of evidence is not evidence of absence."""
+    svc, db = _service_with_history(cm_fake_prob=None)
+    with pytest.raises(speaker.RuleViolation):
+        svc.confirm_history("kadir@example.com", "entry-1")
+
+
+def test_confirm_accepts_bonafide_entry():
+    svc, db = _service_with_history(cm_fake_prob=0.01)
+    out = svc.confirm_history("kadir@example.com", "entry-1")
+    assert out["already"] is False
+    assert out["added_sample_id"]
 
 
 def test_confirm_endpoint_adds_a_manual_sample(manage_client):

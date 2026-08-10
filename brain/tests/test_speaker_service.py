@@ -224,10 +224,14 @@ def test_update_sample_holds_the_gallery_lock_across_its_save(monkeypatch):
 from app import speaker_history
 
 
-def _hist_entry(i, vec, *, adapted=None, correction=None):
+def _hist_entry(i, vec, *, adapted=None, correction=None, cm_fake_prob=0.01):
+    # cm_fake_prob default (0.01 = comfortably bonafide) keeps every
+    # pre-existing caller clear of confirm_history's CM gate (speaker.py);
+    # tests that exercise the gate itself live in test_voice_manage.py.
     return {"id": f"e{i}", "ts": f"t{i}", "score": 0.5, "verified": True,
             "device_hint": "phone", "presence": "locked", "trust_level": "MEDIUM",
-            "adapted_sample_id": adapted, "correction": correction, "vec": vec}
+            "adapted_sample_id": adapted, "correction": correction,
+            "cm_fake_prob": cm_fake_prob, "vec": vec}
 
 
 def _mgmt_svc(db, manual_cap=5):

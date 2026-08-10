@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
+from . import config
 from .memory import _cosine_similarity  # DRY: reuse Katman-1 cosine
 
 
@@ -405,6 +406,23 @@ class SpeakerService:
             if entry.get("correction") == "confirmed":
                 return {"added_sample_id": entry.get("adapted_sample_id"),
                         "already": True}
+
+            # The CM verdict for this utterance was computed and stored when it
+            # was spoken (record_history, cm_fake_prob). Confirming an utterance
+            # promotes it into the gallery, so re-read that verdict rather than
+            # trusting the user's tap: "Bu bendim" answers "is this Kadir", not
+            # "is this a live human".
+            fake_prob = entry.get("cm_fake_prob")
+            if config.CM_ENABLED:
+                if fake_prob is None:
+                    raise RuleViolation(
+                        "Bu söyleyiş için sahtelik kontrolü yapılamamış, galeriye eklenemez"
+                    )
+                if fake_prob >= config.CM_REJECT_THRESHOLD:
+                    raise RuleViolation(
+                        "Bu söyleyiş sahte olarak işaretlenmiş, galeriye eklenemez"
+                    )
+
             profile = speaker_store.load_profile(self.db, user_id)
             manual_count = sum(
                 1 for s in profile.adaptive if s["source"] == "manual")
