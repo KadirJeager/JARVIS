@@ -411,3 +411,14 @@ def test_enroll_skips_cm_when_disabled(enroll_client, monkeypatch):
     monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: 0.99)
     r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
     assert r.status_code == 200
+
+
+def test_enroll_rejects_malformed_base64_clip(enroll_client):
+    """A clip that isn't valid base64 is a client error (400), not an
+    infrastructure failure (500/502) -- decoding happens before the CM check
+    even runs, so this must be caught on its own."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    r = c.post("/api/voice/enroll", json={"clips": ["not-valid-base64!!"]})
+    assert r.status_code == 400

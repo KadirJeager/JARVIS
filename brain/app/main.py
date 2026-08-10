@@ -602,7 +602,14 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
             status_code=409,
             detail="Ses kaydı için önce sesli doğrulama kodu gereklidir (/api/voice/challenge)",
         )
-    raw_clips = [base64.b64decode(clip) for clip in req.clips]
+    try:
+        raw_clips = [base64.b64decode(clip) for clip in req.clips]
+    except Exception:
+        logging.exception("enroll: clip decode failed for user_id=%s", email)
+        raise HTTPException(
+            status_code=400,
+            detail="Ses klibi çözümlenemedi (geçersiz base64)",
+        )
 
     # Anchors are immutable and un-evictable (config.CM_ENROLL_REQUIRED
     # docstring), so this gate fails CLOSED: no verdict is not a pass, unlike
