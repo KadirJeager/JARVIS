@@ -618,8 +618,18 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
     # clip costs no inference.
     if config.CM_ENABLED and config.CM_ENROLL_REQUIRED:
         try:
-            verdicts = await asyncio.to_thread(
-                lambda: [antispoof.is_bonafide(pcm) for pcm in raw_clips]
+            # Budgeted like the sibling live-verify call (app/voice.py:378-380):
+            # a stuck forward pass, or _load_model() blocking on
+            # huggingface_hub.snapshot_download when CM_MODEL_DIR is
+            # unpopulated, must not hang this request forever. TimeoutError is
+            # caught by the same except below -> 503, so fail-closed semantics
+            # are unchanged. asyncio cannot cancel the worker thread itself
+            # (see antispoof.is_bonafide's logging note), only stop waiting on it.
+            verdicts = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: [antispoof.is_bonafide(pcm) for pcm in raw_clips]
+                ),
+                config.CM_TIMEOUT_S,
             )
         except Exception:
             logging.exception("enroll: CM evaluation failed for %s", email)
@@ -627,13 +637,13 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
                 status_code=503,
                 detail="Ses doğrulaması şu anda yapılamıyor, birazdan tekrar dene",
             )
-        for idx, (ok, fake_prob) in enumerate(verdicts):
+        for idx, (cm_ok, cm_fake_prob) in enumerate(verdicts):
             logging.info(
-                "enroll CM: user=%s clip=%d/%d bytes=%d p_fake=%.4f verdict=%s",
-                email, idx + 1, len(verdicts), len(raw_clips[idx]), fake_prob,
-                "bonafide" if ok else "SPOOF",
+                "enroll CM: user=%s clip=%d/%d bytes=%d cm_fake_prob=%.4f verdict=%s",
+                email, idx + 1, len(verdicts), len(raw_clips[idx]), cm_fake_prob,
+                "bonafide" if cm_ok else "SPOOF",
             )
-            if not ok:
+            if not cm_ok:
                 raise HTTPException(
                     status_code=422,
                     detail=f"{idx + 1}. ses klibi sahte olarak işaretlendi, kayıt yapılmadı",

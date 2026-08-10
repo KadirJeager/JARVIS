@@ -2,6 +2,7 @@
 voiceprint anchors (Katman 2b Dilim 3a, spec §5). Torch-free: app.speaker.embed
 is monkeypatched to a fixed vector, so this never touches the real ECAPA model."""
 import base64
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -422,3 +423,22 @@ def test_enroll_rejects_malformed_base64_clip(enroll_client):
     main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
     r = c.post("/api/voice/enroll", json={"clips": ["not-valid-base64!!"]})
     assert r.status_code == 400
+
+
+def test_enroll_returns_503_when_cm_exceeds_timeout(enroll_client, monkeypatch):
+    """A stuck CM forward pass -- or a cold model load blocking on
+    huggingface_hub.snapshot_download when CM_MODEL_DIR is unpopulated --
+    must not hang the request forever. The sibling live-verify call budgets
+    this with CM_TIMEOUT_S (app/voice.py:378-380); enrollment must too."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(config, "CM_TIMEOUT_S", 0.01)
+
+    def _slow(pcm):
+        time.sleep(0.2)
+        return 0.01
+
+    monkeypatch.setattr(antispoof, "_score_fn", _slow)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 503
