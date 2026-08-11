@@ -57,6 +57,7 @@ class VoiceEnrollApiTest {
         val request = server.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/api/voice/challenge", request.url.encodedPath)
+        assertEquals("challenge_created", out.status)
         assertTrue(out.code_spoken)
     }
 
@@ -70,6 +71,9 @@ class VoiceEnrollApiTest {
         assertEquals("POST", request.method)
         assertEquals("/api/voice/enroll", request.url.encodedPath)
         val body = checkNotNull(request.body) { "enroll gövdesiz gitti" }.utf8()
+        assertTrue(body.contains("\"clips\""))
+        assertTrue(body.contains("AAEC"))
+        assertTrue(body.contains("AAED"))
         assertTrue(body.contains("device_hint"))
         assertTrue(body.contains("android-Pixel 10 Pro"))
         assertEquals(9, out.anchors)
