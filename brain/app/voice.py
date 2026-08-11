@@ -498,40 +498,46 @@ class VoiceBridge:
         self._ws = ws
         self._user_id = user_id
         active_bridges[user_id] = self
-        session_id = f"voice-{user_id}"
-        # The session must EXIST before the first turn: Runner.run_async's
-        # auto_create_session defaults to False (runners.py), so the runner's
-        # own _get_or_create_session would raise SessionNotFoundError
-        # otherwise. The returned object is only ADK's copy -- never a channel
-        # back to the runner (voice_trust.py) -- so nothing is kept from it.
-        session = await self.session_service.get_session(
-            app_name=APP_NAME, user_id=user_id, session_id=session_id
-        )
-        if session is None:
-            await self.session_service.create_session(
+        try:
+            # Everything below, through the receive loop, must stay inside
+            # this try: a failure anywhere in session setup (get_session,
+            # create_session, trust.assess) would otherwise leave the
+            # registration above stranded with no cleanup -- a dead entry
+            # that /api/voice/challenge's active_bridges.get(email) would
+            # still "find" and try to speak into.
+            session_id = f"voice-{user_id}"
+            # The session must EXIST before the first turn: Runner.run_async's
+            # auto_create_session defaults to False (runners.py), so the runner's
+            # own _get_or_create_session would raise SessionNotFoundError
+            # otherwise. The returned object is only ADK's copy -- never a channel
+            # back to the runner (voice_trust.py) -- so nothing is kept from it.
+            session = await self.session_service.get_session(
                 app_name=APP_NAME, user_id=user_id, session_id=session_id
             )
-        self._session_id = session_id
-        self._trust_key = voice_trust.key_for(APP_NAME, user_id, session_id)
-        if self.speaker_service is not None:
-            # Initialize THIS connection's trust from its own context: a new
-            # connection must never inherit a previous one's level, and any
-            # tool call that lands before the first utterance is verified must
-            # already see the tightened, no-voice-evidence-yet level rather
-            # than the HIGH default.
-            self._publish_trust(
-                trust.assess(
-                    trust.TrustContext(
-                        auth_verified=True, presence=self.presence,
-                        voice_score=None,   # no voice evidence yet this connection
-                        device_hint=self.device_hint,
+            if session is None:
+                await self.session_service.create_session(
+                    app_name=APP_NAME, user_id=user_id, session_id=session_id
+                )
+            self._session_id = session_id
+            self._trust_key = voice_trust.key_for(APP_NAME, user_id, session_id)
+            if self.speaker_service is not None:
+                # Initialize THIS connection's trust from its own context: a new
+                # connection must never inherit a previous one's level, and any
+                # tool call that lands before the first utterance is verified must
+                # already see the tightened, no-voice-evidence-yet level rather
+                # than the HIGH default.
+                self._publish_trust(
+                    trust.assess(
+                        trust.TrustContext(
+                            auth_verified=True, presence=self.presence,
+                            voice_score=None,   # no voice evidence yet this connection
+                            device_hint=self.device_hint,
+                        ),
+                        config.SPEAKER_ACCEPT_THRESHOLD,
                     ),
-                    config.SPEAKER_ACCEPT_THRESHOLD,
-                ),
-                voice_score=None,
-            )
-        self._user_id = user_id
-        try:
+                    voice_score=None,
+                )
+            self._user_id = user_id
             # The receive loop is the ONLY pump: mic PCM and control frames
             # arrive on the same socket, and turns run as tasks (see
             # _on_utterance_final) so a multi-second run_async never blocks

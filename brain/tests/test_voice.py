@@ -1194,6 +1194,39 @@ async def test_teardown_of_a_replaced_connection_keeps_the_live_bridge_registere
     assert active_bridges.get(USER) is None
 
 
+class _ExplodingSessions:
+    """Session service whose get_session always raises -- stands in for any
+    session-setup failure between registration and run()'s try/finally."""
+
+    async def get_session(self, **k):
+        raise RuntimeError("session service unavailable")
+
+    async def create_session(self, **k):
+        raise AssertionError("get_session must raise before create_session is reached")
+
+
+@pytest.mark.asyncio
+async def test_setup_failure_after_registration_still_deregisters_the_bridge():
+    """run() registers into active_bridges (its very first line, so a
+    challenge lookup can find the connection as early as possible) before the
+    session-setup code that follows -- get_session/create_session,
+    _publish_trust's trust.assess. If any of that raises, the entry must not
+    be left stranded: /api/voice/challenge would find a dead bridge for the
+    user, "succeed" at looking it up, and speak into a socket nobody is
+    listening on -- the enrollment flow stalls with no diagnosable error.
+    """
+    bridge = VoiceBridge(runner=_NoTurnsRunner(), session_service=_ExplodingSessions(),
+                         speaker_service=FakeSpeaker((True, 0.9)),
+                         presence="locked", device_hint="phone")
+
+    with pytest.raises(RuntimeError, match="session service unavailable"):
+        await bridge.run(FakeWS([]), user_id=USER)
+
+    assert active_bridges.get(USER) is None, (
+        "a setup failure between registration and the try/finally left a "
+        "dead bridge stranded in active_bridges")
+
+
 def test_clear_is_a_no_op_for_a_foreign_owner(caplog):
     """Unit-level statement of the same rule, plus the DATA log that makes a
     skipped clear visible instead of mysterious."""
