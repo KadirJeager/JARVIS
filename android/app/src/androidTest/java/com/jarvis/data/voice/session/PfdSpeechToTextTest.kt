@@ -48,12 +48,18 @@ import org.junit.runner.RunWith
  * interface -- unlike the probe, it never touches a `ParcelFileDescriptor` directly,
  * because [AndroidSpeechToText] already owns that whole lifecycle end to end.
  *
- * Also reports which recognizer path served the cycle: [AndroidSpeechToText.createRecognizer]
- * prefers `createOnDeviceSpeechRecognizer` on API 31+ when
- * `SpeechRecognizer.isOnDeviceRecognitionAvailable` is true. Task 7's probe only ever
- * exercised `createSpeechRecognizer` (the network path); logging that availability bit
- * here records whether this run's emulator ever proves the on-device path at all,
- * rather than silently implying coverage it doesn't have.
+ * Also reports which recognizer path actually served the cycle. `onDeviceAvailable=` is
+ * the capability check at start() time -- [AndroidSpeechToText.createRecognizer] prefers
+ * `createOnDeviceSpeechRecognizer` on API 31+ when
+ * `SpeechRecognizer.isOnDeviceRecognitionAvailable` is true -- but round-2 review (the
+ * "ALSO" test-semantics finding) established that this stopped being the same thing as
+ * "which recognizer served the cycle" once `AndroidSpeechToText.fallbackToNetworkRecognizer`
+ * could flip a cycle to the network recognizer even when on-device WAS available.
+ * `servedBy=` (via the class's `currentlyUsingOnDeviceRecognizer()` test hook, read
+ * before destroy() resets it) reports the actual answer, so this test cannot silently
+ * claim on-device coverage for a cycle the fallback actually served over the network.
+ * Task 7's probe only ever exercised `createSpeechRecognizer` (the network path)
+ * directly; logging both fields here records what THIS run's emulator actually proved.
  */
 @RunWith(AndroidJUnit4::class)
 class PfdSpeechToTextTest {
@@ -82,8 +88,8 @@ class PfdSpeechToTextTest {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             Log.i(
                 TAG,
-                "$VERDICT_PREFIX$VERDICT_NO_RECOGNIZER onDevice=false bytesFed=0 elapsedMs=0 " +
-                    "result=ERROR:no_recognizer",
+                "$VERDICT_PREFIX$VERDICT_NO_RECOGNIZER onDeviceAvailable=false servedBy=none " +
+                    "bytesFed=0 elapsedMs=0 result=ERROR:no_recognizer",
             )
             // Throws AssumptionViolatedException -- JUnit reports this test as
             // "ignored", not failed, matching RecognizerPipeProbeTest's convention: a
@@ -125,6 +131,15 @@ class PfdSpeechToTextTest {
             val result = outcome.poll(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
             val bytesFed = fakeTap.totalBytesFed.get()
+            // Read BEFORE destroy() (in the finally block below), which resets this to
+            // false -- and BEFORE, not after, is also what makes the read meaningful:
+            // when result is non-null, outcome.poll() returning it establishes a
+            // happens-before edge (java.util.concurrent queue semantics) against every
+            // write AndroidSpeechToText made on the main thread before its offer(), so
+            // this plain (non-@Volatile) field read is guaranteed to see the LAST value
+            // set for this cycle. On a timeout (result == null) that edge does not
+            // exist, so this is a best-effort diagnostic read there, not a proof.
+            val servedBy = if (speechToText.currentlyUsingOnDeviceRecognizer()) "onDevice" else "network"
 
             // Subject form (when(result), not condition-chained) so the compiler
             // exhaustively checks every Outcome subtype plus the null (timeout) case --
@@ -141,10 +156,14 @@ class PfdSpeechToTextTest {
 
             // Single greppable line per the controller's verdict discipline: all four
             // outcomes are informative findings, never a build failure by themselves.
+            // onDeviceAvailable= is the start()-time capability check; servedBy= is
+            // which recognizer ACTUALLY ran this cycle -- they can now legitimately
+            // differ (onDeviceAvailable=true, servedBy=network) when
+            // fallbackToNetworkRecognizer() fired (round-2 review, "ALSO").
             Log.i(
                 TAG,
-                "$VERDICT_PREFIX$verdict onDevice=$onDeviceAvailable bytesFed=$bytesFed " +
-                    "elapsedMs=$elapsedMs result=$resultLabel",
+                "$VERDICT_PREFIX$verdict onDeviceAvailable=$onDeviceAvailable servedBy=$servedBy " +
+                    "bytesFed=$bytesFed elapsedMs=$elapsedMs result=$resultLabel",
             )
 
             // Only asserts that a verdict was computed at all -- membership in the

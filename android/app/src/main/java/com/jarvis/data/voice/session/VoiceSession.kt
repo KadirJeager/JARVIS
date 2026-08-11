@@ -519,9 +519,19 @@ class VoiceSession(
      */
     private fun relisten(gen: Int) {
         // The latch describes ONE recognition cycle and is consumed by that cycle's
-        // end. Every terminal recognizer callback (final result, recoverable error)
-        // funnels through here, so the latch can never survive into a later utterance
-        // -- the failure mode this file's history is full of.
+        // end. Every terminal recognizer callback THIS SESSION IS TOLD ABOUT (a final
+        // result via onResult, a recoverable error via onRecoverableError) funnels
+        // through here, so the latch can never survive into a later utterance -- the
+        // failure mode this file's history is full of. ONE deliberate exception, not an
+        // oversight: AndroidSpeechToText.fallbackToNetworkRecognizer() (its own
+        // ERROR_LANGUAGE_UNAVAILABLE / ERROR_LANGUAGE_NOT_SUPPORTED handling, round-2
+        // review) re-arms stt.listen() directly and never calls this session's
+        // SpeechToTextListener at all -- there is no onError equivalent on that
+        // interface for this session to observe, so it never reaches relisten() and
+        // this latch is not reset for that re-arm. Harmless today because both codes
+        // fire at the START of a cycle, before any onset can be latched -- but that is a
+        // fact about WHEN those errors occur, not a guarantee this file enforces, so a
+        // future widening of that fallback's error set must re-examine this invariant.
         onsetDuringJarvisSpeech = false
         firstPartialLogged = false
         sttRestartJob?.cancel()

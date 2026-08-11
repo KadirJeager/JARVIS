@@ -25,16 +25,23 @@ import java.util.concurrent.atomic.AtomicLong
  * On-device availability ([SpeechRecognizer.isOnDeviceRecognitionAvailable]) is a
  * GENERIC capability flag -- it says nothing about whether the requested language
  * (tr-TR) is actually installed. If the on-device recognizer reports
- * `ERROR_LANGUAGE_UNAVAILABLE` (its language pack is missing, e.g. evicted under
- * storage pressure), [fallbackToNetworkRecognizer] transparently tears down the
- * on-device recognizer, rebuilds on `SpeechRecognizer.createSpeechRecognizer` (the
- * network one), and re-arms listening for the SAME turn instead of surfacing
+ * `ERROR_LANGUAGE_UNAVAILABLE` or `ERROR_LANGUAGE_NOT_SUPPORTED` (its language pack is
+ * missing or absent on this SODA build, e.g. evicted under storage pressure),
+ * [fallbackToNetworkRecognizer] transparently tears down the on-device recognizer,
+ * rebuilds on `SpeechRecognizer.createSpeechRecognizer` (the network one) WITHOUT
+ * `EXTRA_PREFER_OFFLINE` (see [networkOnlyRecognizeIntent]'s doc -- keeping that extra
+ * makes even the network service refuse an uninstalled language, measured on
+ * emulator-5556), and re-arms listening for the SAME turn instead of surfacing
  * [SpeechToTextListener.onFatalError] -- see [sttErrorAction] for the full decision
- * table. The flip is one-way and sticky for the rest of this instance's life
- * (mirroring [PfdFeedPolicy]'s own "permanent for this instance" shape): once
- * [usingOnDeviceRecognizer] is false, it never goes back to true. If the network
- * recognizer then reports the SAME code, that IS fatal -- there is nowhere left to
- * fall back to.
+ * table. The flip is one-way and sticky for the rest of THIS CALL: once
+ * [usingOnDeviceRecognizer] is false, [onError] never sets it back to true for the
+ * lifetime of the current `start()`/[destroy] pair. It is NOT permanent for the whole
+ * `AndroidSpeechToText` instance the way [PfdFeedPolicy]'s legacy-mode flip is --
+ * [destroy] resets it and the next [start] re-derives it from the platform's own
+ * capability check, exactly as a fresh call should. If the network recognizer then
+ * reports the SAME code, that IS fatal -- there is nowhere left to fall back to. The
+ * re-arm also intentionally does NOT go through [VoiceSession]'s `relisten()` -- see
+ * the amended comment on `VoiceSession.relisten()` for the one exception this creates.
  *
  * PFD feed (Task 3 of docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md): when
  * [tapSource] is non-null, each recognizer cycle is fed from the session's own
@@ -131,8 +138,18 @@ class AndroidSpeechToText(
     // is (re)built, in start() and in fallbackToNetworkRecognizer(). Read by onError
     // to decide sttErrorAction()'s FallbackToNetwork branch. Distinct from the PFD
     // [policy]'s legacy-mode flip: this is about which SpeechRecognizer implementation
-    // is in use, not which audio feed path it gets.
+    // is in use, not which audio feed path it gets. Reset in destroy(), re-derived in
+    // start() -- sticky for the CALL, not for the instance (see class doc).
     private var usingOnDeviceRecognizer = false
+
+    // Main-thread only. True once fallbackToNetworkRecognizer() has actually fired
+    // during this call -- distinct from usingOnDeviceRecognizer being false because
+    // on-device was never available at start() at all. Selects listen()'s base intent:
+    // only a POST-FLIP cycle must drop EXTRA_PREFER_OFFLINE (networkOnlyRecognizeIntent);
+    // an instance that was always on network keeps today's existing recognizeIntent,
+    // unchanged, per the round-2 review's "keep the legacy/on-device intent unchanged"
+    // scope. Reset in destroy(), alongside usingOnDeviceRecognizer.
+    private var networkFallbackActive = false
 
     // Written by start()/destroy() (any thread), read from main-thread callbacks.
     @Volatile
@@ -170,7 +187,7 @@ class AndroidSpeechToText(
             endCurrentPfdCycle()
             when (sttErrorAction(error, usingOnDeviceRecognizer)) {
                 SttErrorAction.Retry -> listener?.onRecoverableError()
-                SttErrorAction.FallbackToNetwork -> fallbackToNetworkRecognizer()
+                SttErrorAction.FallbackToNetwork -> fallbackToNetworkRecognizer(error)
                 SttErrorAction.Fatal -> {
                     Log.w(TAG, "SpeechRecognizer fatal error: $error")
                     listener?.onFatalError()
@@ -205,8 +222,14 @@ class AndroidSpeechToText(
             }
             // One policy instance per start() call (see class doc).
             policy = tapSource?.let { PfdFeedPolicy() }
-            usingOnDeviceRecognizer = isOnDeviceRecognizerAvailable(context)
-            recognizer = createRecognizer(context).apply {
+            // Computed once and threaded through -- isOnDeviceRecognizerAvailable(context)
+            // and createRecognizer() used to each re-run this same platform check, which
+            // only shared the PREDICATE, not the evaluation: nothing actually stopped the
+            // two calls from disagreeing if the capability flipped between them (however
+            // unlikely mid-call). A local value cannot disagree with itself.
+            val onDeviceAvailable = isOnDeviceRecognizerAvailable(context)
+            usingOnDeviceRecognizer = onDeviceAvailable
+            recognizer = createRecognizer(context, onDeviceAvailable).apply {
                 setRecognitionListener(recognitionListener)
             }
         }
@@ -222,19 +245,23 @@ class AndroidSpeechToText(
             hadPartial = false
             hadResult = false
 
+            // Post-flip cycles must not carry EXTRA_PREFER_OFFLINE (see
+            // networkOnlyRecognizeIntent's doc) -- every other cycle keeps today's
+            // existing recognizeIntent, unchanged.
+            val baseIntent = if (networkFallbackActive) networkOnlyRecognizeIntent else recognizeIntent
             val tap = tapSource
             val activePolicy = policy
             val intent = if (tap != null && activePolicy != null && activePolicy.shouldUsePfd()) {
-                buildPfdCycleIntent(tap) ?: run {
+                buildPfdCycleIntent(tap, baseIntent) ?: run {
                     // Pipe setup itself failed before any recognizer session started --
                     // fall back for just this call. No cycle was attempted, so the
                     // policy's streak is untouched; the next listen() retries PFD.
                     Log.w(TAG, "tl ev=pfd.setupFailed")
-                    recognizeIntent
+                    baseIntent
                 }
             } else {
                 logFallbackOnce(tap, activePolicy)
-                recognizeIntent
+                baseIntent
             }
             // null when start() has not completed or declared a fatal error -- the
             // session is already tearing down in that case, so dropping is correct.
@@ -248,17 +275,54 @@ class AndroidSpeechToText(
      * [onError] has already called [endCurrentPfdCycle] unconditionally (it runs before
      * the `when` that dispatches here), so there is no PFD cycle left to tear down; the
      * re-armed [listen] call below builds a fresh one exactly as any other listen() call
-     * would. [usingOnDeviceRecognizer] flips to false immediately -- the SAME instant
-     * [onError] observed it fail -- but destroying the old recognizer and building the
-     * new one is deferred one more turn through [main] even though [onError] already
-     * runs on the main thread: everything else that mutates [recognizer] in this class
-     * goes through `main.post`, and doing the same here means `recognizer.destroy()`
-     * never runs from inside that SAME recognizer's own callback stack.
+     * would. [usingOnDeviceRecognizer] and [networkFallbackActive] flip immediately --
+     * the SAME instant [onError] observed the failure -- but destroying the old
+     * recognizer and building the new one is deferred one more turn through [main] even
+     * though [onError] already runs on the main thread: everything else that mutates
+     * [recognizer] in this class goes through `main.post`, and doing the same here
+     * means `recognizer.destroy()` never runs from inside that SAME recognizer's own
+     * callback stack.
+     *
+     * Skips [VoiceSession]'s `relisten()` entirely -- this re-arm is a same-turn
+     * recognizer-level retry the session never sees an `onError` for, not a session-level
+     * restart -- see the amended comment on `VoiceSession.relisten()` for the one
+     * exception this creates and why it is harmless today. Skipping `relisten()` also
+     * means skipping its `STT_RESTART_DELAY_MS` pause; that is safe here specifically
+     * because this flip is one-way and fires AT MOST ONCE per call, so an immediate
+     * re-arm cannot hot-spin the way a repeatedly-erroring cycle could -- a future
+     * widening of [sttErrorAction]'s fallback set to a code that can recur must
+     * re-examine this assumption or reintroduce a delay.
+     *
+     * Round-2 review (CRITICAL 1): [destroy] can race in on another thread (VoiceSession
+     * calls it from OkHttp's reader thread) between [onError] posting this block and the
+     * block actually running. [destroy] sets [listener] to null SYNCHRONOUSLY, before it
+     * posts its own teardown -- so `listener == null` here is proof destroy() has
+     * already claimed teardown, and this block must do nothing: build no recognizer,
+     * call no listen(), or the call would be resurrected with a live recognizer nothing
+     * will ever destroy, and the NEXT start() would early-return at `recognizer != null`
+     * and silently skip rebuilding `policy`, running the rest of the process in legacy
+     * (non-PFD, non-AEC) mode. Round-2 review (minor 4): [recognizer]'s listener is
+     * detached SYNCHRONOUSLY, before the post, not deferred alongside the rebuild --
+     * deferring it would leave the OLD (on-device) recognizer still wired to
+     * [recognitionListener] for this entire extra turn, so a second, late `onError` from
+     * that same stale recognizer would read the ALREADY-flipped [usingOnDeviceRecognizer]
+     * and be misjudged Fatal instead of Retry/FallbackToNetwork.
      */
-    private fun fallbackToNetworkRecognizer() {
-        Log.i(TAG, "tl ev=stt.recognizerFallback from=onDevice to=network reason=languageUnavailable")
+    private fun fallbackToNetworkRecognizer(errorCode: Int) {
+        val reason = if (errorCode == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED) {
+            "languageNotSupported"
+        } else {
+            "languageUnavailable"
+        }
+        Log.i(TAG, "tl ev=recognizer.fallback from=onDevice to=network reason=$reason")
         usingOnDeviceRecognizer = false
+        networkFallbackActive = true
+        // See the minor-4 paragraph above: detach now, synchronously, not inside the
+        // deferred block below.
+        recognizer?.setRecognitionListener(null)
         main.post {
+            // See the CRITICAL-1 paragraph above.
+            if (listener == null) return@post
             recognizer?.destroy()
             // SpeechRecognizer.createSpeechRecognizer directly, NOT the createRecognizer()
             // factory below -- that one re-checks on-device availability and would just
@@ -280,16 +344,35 @@ class AndroidSpeechToText(
             policy = null
             loggedFallback = false
             usingOnDeviceRecognizer = false
+            networkFallbackActive = false
         }
     }
 
     /**
-     * Builds a fresh pipe + writer + tap for one recognizer cycle and returns the
-     * intent carrying the four PFD extras, or null if the pipe itself could not be
-     * created ([ParcelFileDescriptor.createPipe] threw, e.g. the process is out of
-     * file descriptors) -- in which case no cycle state is installed at all.
+     * Test-only observability hook (round-2 review, "ALSO"): PfdSpeechToTextTest
+     * (androidTest) reports which recognizer actually served a cycle, not just which
+     * was available at start() -- that stopped being the same thing once
+     * [fallbackToNetworkRecognizer] could serve a cycle on the network recognizer even
+     * though on-device was available. Not part of the [SpeechToText] contract, so it is
+     * `internal` rather than added to the interface every fake implementation would
+     * then need to grow a stub for. Safe to read from the test's own thread (not main)
+     * ONLY after the test has observed a terminal callback for that cycle -- the
+     * `LinkedBlockingQueue.poll()` that receives it establishes a happens-before edge
+     * with every write this class made on the main thread before offering to that
+     * queue, per `java.util.concurrent`'s queue semantics, without needing this field
+     * itself to be `@Volatile`.
      */
-    private fun buildPfdCycleIntent(tap: PcmTapSource): Intent? {
+    internal fun currentlyUsingOnDeviceRecognizer(): Boolean = usingOnDeviceRecognizer
+
+    /**
+     * Builds a fresh pipe + writer + tap for one recognizer cycle and returns
+     * [baseIntent] (either [recognizeIntent] or, post-flip,
+     * [networkOnlyRecognizeIntent] -- see [listen]) carrying the four PFD extras on top,
+     * or null if the pipe itself could not be created ([ParcelFileDescriptor.createPipe]
+     * threw, e.g. the process is out of file descriptors) -- in which case no cycle
+     * state is installed at all.
+     */
+    private fun buildPfdCycleIntent(tap: PcmTapSource, baseIntent: Intent): Intent? {
         val pipe = try {
             ParcelFileDescriptor.createPipe()
         } catch (io: IOException) {
@@ -327,7 +410,7 @@ class AndroidSpeechToText(
         // performing it synchronously, so closing our copy immediately can race that
         // hand-off (observed as a spurious ERROR:5 -- see RecognizerPipeProbeTest).
         // readFd is closed only in endCurrentPfdCycle().
-        return Intent(recognizeIntent).apply {
+        return Intent(baseIntent).apply {
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
             // AUDIO_IN_RATE_HZ, not a separate 16000 literal: this must always match
             // the rate AndroidMicSource was actually started at (VoiceSession.kt calls
@@ -545,6 +628,18 @@ class AndroidSpeechToText(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "tr-TR")
             // Ask for the offline recognizer; platforms without one silently fall back
             // to the network recognizer, which is still better than failing the call.
+            // MEASURED (round-2 review, IMPORTANT 2): this extra is not a harmless hint
+            // once AndroidSpeechToText has flipped to the network recognizer via
+            // fallbackToNetworkRecognizer() -- on emulator-5556, sending
+            // EXTRA_PREFER_OFFLINE=true to `createSpeechRecognizer`'s network service
+            // still made it refuse a tr-TR that has no local pack, reproducing the exact
+            // ERROR_LANGUAGE_UNAVAILABLE the flip exists to escape, while
+            // RecognizerPipeProbeTest (which never sets this extra) transcribed the same
+            // fixture fine over the network path on the same emulator minutes earlier.
+            // Left `true` HERE regardless -- this intent stays the untouched
+            // legacy/on-device base (round-2 review scope: "keep the legacy/on-device
+            // intent unchanged") -- see networkOnlyRecognizeIntent below for the
+            // post-flip variant that drops it.
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             // NOT setting RecognizerIntent.EXTRA_AUDIO_SOURCE here is deliberate -- this
@@ -599,15 +694,33 @@ class AndroidSpeechToText(
             )
         }
 
-        // Shared by createRecognizer() and start()'s usingOnDeviceRecognizer bookkeeping
-        // so the two never drift apart into disagreeing about which recognizer a given
-        // start() actually built.
+        /**
+         * [recognizeIntent] minus `EXTRA_PREFER_OFFLINE` -- used ONLY for a cycle that
+         * runs after [fallbackToNetworkRecognizer] has flipped this instance to the
+         * network recognizer (see [listen]'s `networkFallbackActive` check). MEASURED
+         * (round-2 review, IMPORTANT 2), not a hypothesis: keeping `EXTRA_PREFER_OFFLINE`
+         * on the network recognizer reproduced the exact `ERROR_LANGUAGE_UNAVAILABLE`
+         * the flip exists to escape -- see the comment on that extra in [recognizeIntent]
+         * for the controlled comparison (RecognizerPipeProbeTest, which never sets it,
+         * transcribed fine over the network on the same emulator). Every other extra is
+         * identical to [recognizeIntent]'s -- language, endpointing tuning, biasing
+         * strings -- only the offline preference is dropped, because the whole meaning
+         * of the flip is "offline isn't available here".
+         */
+        val networkOnlyRecognizeIntent: Intent = Intent(recognizeIntent).apply {
+            removeExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE)
+        }
+
         fun isOnDeviceRecognizerAvailable(context: Context): Boolean =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
 
-        fun createRecognizer(context: Context): SpeechRecognizer =
-            if (isOnDeviceRecognizerAvailable(context)) {
+        // onDeviceAvailable is a parameter, not re-derived from context here, so this
+        // can never disagree with the caller's own isOnDeviceRecognizerAvailable()
+        // read (round-2 review, minor 2) -- start() computes it once and threads it
+        // through to both usingOnDeviceRecognizer and this call.
+        fun createRecognizer(context: Context, onDeviceAvailable: Boolean): SpeechRecognizer =
+            if (onDeviceAvailable) {
                 SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
             } else {
                 SpeechRecognizer.createSpeechRecognizer(context)
@@ -668,38 +781,46 @@ enum class SttErrorAction {
 
 /**
  * Superset of [isRecoverableSttError] that also knows which recognizer just failed.
- * `SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE` (13) means the recognizer's language
- * pack -- here, tr-TR -- is supported but not currently installed. Measured on
- * emulator-5556 (API 36): the on-device SODA pack is absent, so the on-device
- * recognizer fails EVERY call with this code, and code 13 is not in
- * [isRecoverableSttError]'s recoverable set, so without this function it always
- * reached [SttErrorAction.Fatal].
+ * Two codes are fallback-worthy while [usingOnDeviceRecognizer] is true:
  *
- * The fallback is deliberately narrow: only ERROR_LANGUAGE_UNAVAILABLE, and only while
- * [usingOnDeviceRecognizer] is true. The network recognizer downloads its language model
- * server-side rather than depending on an on-device pack, so it is a genuinely different
- * failure surface worth trying once. If the SAME code then arrives from the network
- * recognizer, there is nowhere left to fall back to -- that IS fatal, which is exactly
- * what falls out of this `when` once [AndroidSpeechToText.usingOnDeviceRecognizer] has
- * been flipped to false by the first fallback (see [AndroidSpeechToText.fallbackToNetworkRecognizer]).
- * Every other code keeps [isRecoverableSttError]'s existing recoverable/fatal split
- * unchanged by BOTH values of [usingOnDeviceRecognizer] -- this function must not change
- * behaviour for any code besides 13.
+ * - `ERROR_LANGUAGE_UNAVAILABLE` (13): the language -- here, tr-TR -- is supported but
+ *   not currently installed. Measured on emulator-5556 (API 36): the on-device SODA
+ *   pack is absent, so the on-device recognizer fails EVERY call with this code.
+ * - `ERROR_LANGUAGE_NOT_SUPPORTED` (12): round-2 review finding -- a different SODA
+ *   build may report "does not support tr-TR at all" instead of "supported but not
+ *   downloaded" for the exact same underlying condition (no local tr-TR model). Which
+ *   of the two codes a given build emits is an implementation detail, not a contract
+ *   this fix should pin itself to: the SUBJECT of the claim is THIS recognizer, but the
+ *   REMEDY is a DIFFERENT one -- the network recognizer's language inventory does not
+ *   depend on what SODA has locally, so both codes get the same one try.
  *
- * Deliberately NOT included: ERROR_SERVER_DISCONNECTED (11) -- that is a network-recognizer
- * failure (the streaming connection dropped), which on-device never raises and which a
- * network-to-network "fallback" cannot fix; ERROR_LANGUAGE_NOT_SUPPORTED (12) -- per the
- * platform docs this means the recognizer does not support the language AT ALL (not "not
- * installed"), a stronger claim than 13, and Android's own doc for it does not carry 13's
- * "supported, but not available currently (e.g. not downloaded)" language, so treating it
- * the same would be an unverified guess rather than the narrowly-scoped fix asked for.
+ * Neither code is in [isRecoverableSttError]'s recoverable set, so without this
+ * function both always reached [SttErrorAction.Fatal].
+ *
+ * If the SAME code then arrives from the network recognizer, there is nowhere left to
+ * fall back to -- that IS fatal, which is exactly what falls out of this `when` once
+ * [AndroidSpeechToText.usingOnDeviceRecognizer] has been flipped to false by the first
+ * fallback (see [AndroidSpeechToText.fallbackToNetworkRecognizer]). Every other code
+ * keeps [isRecoverableSttError]'s existing recoverable/fatal split unchanged by BOTH
+ * values of [usingOnDeviceRecognizer] -- this function must not change behaviour for
+ * any code besides 12 and 13.
+ *
+ * Deliberately NOT included: `ERROR_SERVER_DISCONNECTED` (11) -- that is a
+ * network-recognizer failure (the streaming connection dropped), which on-device never
+ * raises and which a network-to-network "fallback" cannot fix. This exclusion, and the
+ * 12/13 inclusion, are both pinned by assertion in SttErrorMappingTest, not left to
+ * prose.
  *
  * Pure Kotlin over compile-time-constant error codes on purpose, so the mapping itself is
  * unit-testable on the JVM (SttErrorMappingTest), exactly like [isRecoverableSttError].
  */
 fun sttErrorAction(errorCode: Int, usingOnDeviceRecognizer: Boolean): SttErrorAction = when {
     isRecoverableSttError(errorCode) -> SttErrorAction.Retry
-    errorCode == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE && usingOnDeviceRecognizer ->
+    isLanguageUnavailableToOnDeviceRecognizer(errorCode) && usingOnDeviceRecognizer ->
         SttErrorAction.FallbackToNetwork
     else -> SttErrorAction.Fatal
 }
+
+private fun isLanguageUnavailableToOnDeviceRecognizer(errorCode: Int): Boolean =
+    errorCode == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+        errorCode == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
