@@ -84,6 +84,11 @@ class VoiceProfileScreenTest {
                 onReject = onReject,
                 onDeleteProfile = onDeleteProfile,
                 onDismissError = {},
+                // Task 9's enrollment flow has its own ViewModel; this screen test is
+                // not about it, so it renders idle and inert.
+                enrollState = EnrollState.Idle,
+                onStartEnrollDevice = {},
+                onProceedToRecording = {},
             )
         }
     }

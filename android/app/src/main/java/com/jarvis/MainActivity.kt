@@ -27,9 +27,11 @@ import com.jarvis.ui.Nav
 import com.jarvis.ui.Route
 import com.jarvis.ui.VoiceActions
 import com.jarvis.ui.chat.ChatViewModel
+import com.jarvis.data.voice.session.AndroidClipRecorder
 import com.jarvis.data.voice.session.VoicePhase
 import com.jarvis.ui.theme.JarvisTheme
 import com.jarvis.data.wear.PairResult
+import com.jarvis.ui.voice.EnrollDeviceViewModel
 import com.jarvis.ui.voice.VoiceProfileViewModel
 import com.jarvis.ui.voicecall.VoiceCallOverlay
 import com.jarvis.ui.voicecall.VoiceCallViewModel
@@ -97,6 +99,18 @@ class MainActivity : FragmentActivity() {
                 val voiceVm: VoiceProfileViewModel =
                     viewModel { VoiceProfileViewModel(container.voiceProfileRepository) }
                 val voiceState by voiceVm.state.collectAsState()
+
+                // Task 9: "Bu cihazı tanıt". deviceHint matches JarvisApp.kt's own
+                // "android-" + Build.MODEL verbatim -- otherwise enrollment would write
+                // anchors under a channel label the live voice bridge never sends.
+                val enrollVm: EnrollDeviceViewModel = viewModel {
+                    EnrollDeviceViewModel(
+                        container.voiceApi,
+                        AndroidClipRecorder(),
+                        "android-" + android.os.Build.MODEL,
+                    )
+                }
+                val enrollState by enrollVm.state.collectAsState()
                 // rememberSaveable, not remember: a rotation while on the voice screen
                 // must not silently drop the user back to chat. Safe now that every entry
                 // re-locks (see onGateRequested below) — a restored VOICE_PROFILE route
@@ -325,7 +339,10 @@ class MainActivity : FragmentActivity() {
                         onReject = voiceVm::reject,
                         onDeleteProfile = voiceVm::deleteProfile,
                         onDismissError = voiceVm::dismissError,
+                        onStartEnrollDevice = enrollVm::start,
+                        onProceedToRecording = enrollVm::proceedToRecording,
                     ),
+                    enrollState = enrollState,
                     onSignIn = {
                         scope.launch {
                             vm.onSignInStarted()

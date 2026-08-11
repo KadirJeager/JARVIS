@@ -6,6 +6,7 @@ import com.jarvis.ui.auth.SignInScreen
 import com.jarvis.ui.chat.AuthPhase
 import com.jarvis.ui.chat.ChatScreen
 import com.jarvis.ui.chat.ChatUiState
+import com.jarvis.ui.voice.EnrollState
 import com.jarvis.ui.voice.VoiceProfileScreen
 import com.jarvis.ui.voice.VoiceProfileUiState
 
@@ -23,6 +24,11 @@ class VoiceActions(
     val onReject: (String) -> Unit,
     val onDeleteProfile: () -> Unit,
     val onDismissError: () -> Unit,
+    // Task 9: "Bu cihazı tanıt" -- a separate ViewModel/state machine
+    // (EnrollDeviceViewModel) from the rest of this screen, so its own async
+    // challenge/record/upload sequence does not have to fit VoiceProfileUiState's shape.
+    val onStartEnrollDevice: () -> Unit,
+    val onProceedToRecording: () -> Unit,
 )
 
 /**
@@ -39,6 +45,7 @@ fun Nav(
     route: Route,
     voiceState: VoiceProfileUiState,
     voiceActions: VoiceActions,
+    enrollState: EnrollState,
     onSignIn: () -> Unit,
     onInput: (String) -> Unit,
     onSend: () -> Unit,
@@ -88,6 +95,9 @@ fun Nav(
                 onReject = voiceActions.onReject,
                 onDeleteProfile = voiceActions.onDeleteProfile,
                 onDismissError = voiceActions.onDismissError,
+                enrollState = enrollState,
+                onStartEnrollDevice = voiceActions.onStartEnrollDevice,
+                onProceedToRecording = voiceActions.onProceedToRecording,
             )
         }
     }

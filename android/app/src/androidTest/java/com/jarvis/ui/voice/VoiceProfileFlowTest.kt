@@ -76,6 +76,11 @@ class VoiceProfileFlowTest {
                 onSetLabel = vm::setLabel, onDeleteSample = vm::deleteSample,
                 onConfirm = vm::confirm, onReject = vm::reject,
                 onDeleteProfile = vm::deleteProfile, onDismissError = vm::dismissError,
+                // This flow test drives VoiceProfileViewModel end to end; Task 9's
+                // enrollment flow has its own ViewModel and is not this test's concern.
+                enrollState = EnrollState.Idle,
+                onStartEnrollDevice = {},
+                onProceedToRecording = {},
             )
         }
 

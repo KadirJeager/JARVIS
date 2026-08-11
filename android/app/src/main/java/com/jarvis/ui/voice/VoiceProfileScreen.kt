@@ -81,6 +81,9 @@ fun VoiceProfileScreen(
     onReject: (String) -> Unit,
     onDeleteProfile: () -> Unit,
     onDismissError: () -> Unit,
+    enrollState: EnrollState,
+    onStartEnrollDevice: () -> Unit,
+    onProceedToRecording: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().background(JarvisBg).systemBarsPadding(),
@@ -99,6 +102,9 @@ fun VoiceProfileScreen(
                 onReject = onReject,
                 onDeleteProfile = onDeleteProfile,
                 onDismissError = onDismissError,
+                enrollState = enrollState,
+                onStartEnrollDevice = onStartEnrollDevice,
+                onProceedToRecording = onProceedToRecording,
             )
         }
     }
@@ -159,6 +165,9 @@ private fun Unlocked(
     onReject: (String) -> Unit,
     onDeleteProfile: () -> Unit,
     onDismissError: () -> Unit,
+    enrollState: EnrollState,
+    onStartEnrollDevice: () -> Unit,
+    onProceedToRecording: () -> Unit,
 ) {
     val profile = state.profile
     Column(Modifier.fillMaxSize()) {
@@ -244,6 +253,13 @@ private fun Unlocked(
                             onDelete = onDeleteSample,
                         )
                     }
+                }
+                item {
+                    EnrollDeviceSection(
+                        enrollState = enrollState,
+                        onStart = onStartEnrollDevice,
+                        onProceedToRecording = onProceedToRecording,
+                    )
                 }
                 item { Placeholders() }
                 item { DangerZone(busy = state.mutatingId != null, onDeleteProfile = onDeleteProfile) }
@@ -538,6 +554,55 @@ private fun Placeholders() {
             enabled = false,
             modifier = Modifier.testTag("voice_placeholder_retrain"),
         ) { Text("Yeniden eğit (yakında)") }
+    }
+}
+
+/**
+ * "Bu cihazı tanıt" (Task 9): a new device's microphone is a different acoustic channel
+ * than the gallery was built on, and the gallery cannot learn one on its own (the adapt
+ * gate scores against immutable anchors -- see [EnrollDeviceViewModel][com.jarvis.ui.voice.EnrollDeviceViewModel]).
+ * Enrollment needs a live voice call: the server speaks the liveness code only over an
+ * open bridge, hence the supporting line below rather than a silent disabled button.
+ */
+@Composable
+private fun EnrollDeviceSection(
+    enrollState: EnrollState,
+    onStart: () -> Unit,
+    onProceedToRecording: () -> Unit,
+) {
+    val busy = enrollState !is EnrollState.Idle &&
+        enrollState !is EnrollState.Done &&
+        enrollState !is EnrollState.Failed
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Text(
+            "Yeni telefonun mikrofonu farklı ses bırakır; tanıtmadan Jarvis seni bu " +
+                "cihazda daha zor tanır.",
+            style = MaterialTheme.typography.bodySmall,
+            color = JarvisTextMuted,
+        )
+        enrollState.label()?.let {
+            Spacer(Modifier.size(6.dp))
+            Text(
+                it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enrollState is EnrollState.Failed) JarvisError else JarvisCyan,
+                modifier = Modifier.testTag("enroll_device_status"),
+            )
+        }
+        Spacer(Modifier.size(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(
+                onClick = onStart,
+                enabled = !busy,
+                modifier = Modifier.testTag("enroll_device"),
+            ) { Text("Bu cihazı tanıt", color = if (busy) JarvisTextMuted else JarvisCyan) }
+            if (enrollState is EnrollState.WaitingForSpokenCode) {
+                TextButton(
+                    onClick = onProceedToRecording,
+                    modifier = Modifier.testTag("enroll_device_proceed"),
+                ) { Text("Kodu söyledim, devam et", color = JarvisCyan) }
+            }
+        }
     }
 }
 

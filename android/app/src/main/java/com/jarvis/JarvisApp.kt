@@ -19,6 +19,7 @@ import com.jarvis.data.net.ApiSet
 import com.jarvis.data.net.DeviceTokenRequest
 import com.jarvis.data.net.NetworkModule
 import com.jarvis.data.net.VOICE_WS_URL
+import com.jarvis.data.net.VoiceApi
 import com.jarvis.data.push.FcmTokenRegistrar
 import com.jarvis.data.push.PUSH_LOG_TAG
 import com.jarvis.data.push.firebaseMessagingToken
@@ -97,6 +98,14 @@ class AppContainer(
     val conversationsRepository = ConversationsRepository(apis.conversations, sessionStore)
     val voiceProfileRepository = VoiceProfileRepository(apis.voice)
     val approvalRepository = ApprovalRepository(apis.approvals)
+
+    /**
+     * Exposed directly (not only wrapped in [voiceProfileRepository]) because
+     * [com.jarvis.ui.voice.EnrollDeviceViewModel] (Task 9) takes a [VoiceApi] itself --
+     * its constructor is pinned by its own test suite, and [VoiceProfileRepository]'s
+     * pass-through methods do not cover `challenge`/`enroll`.
+     */
+    val voiceApi: VoiceApi = apis.voice
 
     /**
      * Shared by BOTH producers of a token: `JarvisFCMService.onNewToken` and the app-open

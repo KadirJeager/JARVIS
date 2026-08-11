@@ -20,6 +20,7 @@ import com.jarvis.ui.Route
 import com.jarvis.ui.VoiceActions
 import com.jarvis.ui.chat.ChatViewModel
 import com.jarvis.ui.theme.JarvisTheme
+import com.jarvis.ui.voice.EnrollState
 import com.jarvis.ui.voice.VoiceProfileUiState
 import org.junit.Rule
 import org.junit.Test
@@ -62,7 +63,11 @@ class EndToEndTest {
                         onRetryUnlock = {}, onRetryLoad = {}, onSetLabel = { _, _ -> },
                         onDeleteSample = {}, onConfirm = {}, onReject = {},
                         onDeleteProfile = {}, onDismissError = {},
+                        onStartEnrollDevice = {}, onProceedToRecording = {},
                     ),
+                    // This test never opens the voice screen; Task 9's enrollment flow
+                    // has its own ViewModel and is not this test's concern.
+                    enrollState = EnrollState.Idle,
                     onSignIn = { vm.onSignedIn() },
                     onInput = vm::onInputChange,
                     onSend = vm::send,
