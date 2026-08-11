@@ -2,42 +2,88 @@ package com.jarvis.data.voice.session
 
 /**
  * Pure Kotlin fallback-decision engine for the piped recognizer feed.
- * Starts in PFD mode; flips to legacy after consecutive dead cycles detect
- * a broken pipe.
+ * Starts in PFD mode; flips to legacy after consecutive dead cycles look
+ * SILENT -- no partial, no result, and (once judged) too few bytes consumed
+ * or a stuck writer.
+ *
+ * Explicit limit: this does NOT detect a broken pipe in general, only a
+ * SILENT one. The classic PFD_IGNORED shape -- the recognizer ignores our fd
+ * entirely, opens its own microphone instead, and transcribes normally off
+ * ambient audio -- produces ordinary partials and results exactly like a
+ * working PFD feed would, so it sets hadResult=true (or hadPartial=true) and
+ * scores ALIVE forever. This class cannot tell "the recognizer heard OUR fed
+ * audio" from "the recognizer heard SOMETHING, from wherever its mic
+ * actually is" -- it has no access to what was fed, only to whether the
+ * recognizer produced output. What DOES cover that gap: the instrumented
+ * test (PfdSpeechToTextTest, Task 4 of
+ * docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md) feeds a known
+ * fixture through the tap and asserts the resulting transcript matches THAT
+ * fixture, not merely that a transcript arrived -- the only place in this
+ * plan that can actually distinguish "read our fd" from "ignored it and
+ * transcribed ambient audio instead".
  */
 class PfdFeedPolicy {
     private var failStreak: Int = 0
     private var usePfd: Boolean = true
     private var lastSummary: String = ""
 
+    // Consecutive INCONCLUSIVE verdicts in a row; reset by any ALIVE or DEAD
+    // verdict. See [consecutiveInconclusiveCount]'s doc for what this is for.
+    private var inconclusiveStreak: Int = 0
+
     companion object {
         /**
-         * Minimum bytes consumed to count a cycle as "alive" purely on byte count
-         * (only consulted for cycles that ran long enough to judge -- see
-         * [JUDGE_AFTER_MS] and [onCycleEnd]). 96_000 bytes = 3 seconds of 16 kHz
-         * PCM16.
-         *
-         * Deliberately set ABOVE the OS pipe buffer (~64 KB on Linux/Android): the
-         * writer thread can push up to that much into the pipe's kernel buffer even
-         * when NOTHING on the other end is reading it -- a recognizer that never
-         * touches the pipe still absorbs ~64 KB "for free" before the writer would
-         * ever block. A threshold at or below that buffer size cannot distinguish
-         * "the recognizer actually drained the pipe" from "the kernel buffer alone
-         * soaked up the bytes and the writer just hasn't blocked yet" -- exactly the
-         * failure this policy exists to catch (Task 7's probe used a 192 KB fixture
-         * for this same reason: it must exceed the buffer to prove real consumption).
-         * The original value here (32_000 = 1s) sat inside the buffer and made the
-         * permanent-fallback net decorative for the PFD_IGNORED case -- fixed in
-         * Task 3 fix round 1 (2026-08-11) alongside the [writerStuck] parameter,
-         * which covers the same failure from the other direction.
-         *
-         * [JUDGE_AFTER_MS] and this constant are ONE decision -- "how much silent,
-         * signal-free feed does it take before we're willing to call it suspicious"
-         * -- expressed twice, once as a duration and once as the byte count that
-         * duration implies at 16 kHz mono PCM16. Changing one without the other
-         * would make them describe two different durations; keep them in lockstep.
+         * The Linux/Android pipe kernel buffer size, in bytes: the most a writer
+         * can push into a pipe with NO reader ever draining it. Lower bound of
+         * the corridor [MIN_CONSUMED_BYTES] must sit in -- see that constant's
+         * doc.
          */
-        private const val MIN_CONSUMED_BYTES = 96_000L
+        private const val PIPE_BUFFER_BYTES = 65_536L
+
+        /**
+         * Minimum bytes consumed to count a cycle as "alive" purely on byte
+         * count (only consulted for cycles that ran long enough to judge -- see
+         * [JUDGE_AFTER_MS] and [onCycleEnd]). 80_000 bytes = 2.5 seconds of
+         * 16 kHz PCM16 (32_000 bytes/s).
+         *
+         * Must sit strictly inside the corridor ([PIPE_BUFFER_BYTES], 96_000) =
+         * (65_536, 96_000) -- 96_000 being what [JUDGE_AFTER_MS] implies at
+         * 32_000 B/s (3.000 s x 32_000 B/s):
+         *
+         * - Strictly ABOVE [PIPE_BUFFER_BYTES] (~64 KB): the writer thread can
+         *   push up to that much into the pipe's kernel buffer even when
+         *   NOTHING on the other end is reading it -- a recognizer that never
+         *   touches the pipe still absorbs that much "for free" before the
+         *   writer would ever block. Bytes at or below this prove nothing about
+         *   real consumption (Task 7's probe used a 192 KB fixture for this
+         *   same reason: it must exceed the buffer to prove real consumption).
+         *   Fixed in Task 3 fix round 1 (2026-08-11) -- the original value
+         *   (32_000 = 1s) sat inside the buffer and made the permanent-fallback
+         *   net decorative for the PFD_IGNORED case.
+         * - Strictly BELOW 96_000, i.e. MIN_CONSUMED_BYTES / 32_000 (its
+         *   implied seconds) must be strictly LESS than JUDGE_AFTER_MS / 1000
+         *   (its seconds) -- NOT equal. This is not a rounding nicety:
+         *   bytesWritten structurally lags elapsedMs on a perfectly healthy
+         *   cycle, for three independent reasons -- elapsedMs is stamped at
+         *   cycle creation and read AFTER readFd.close() + the writer join in
+         *   AndroidSpeechToText.endCurrentPfdCycle(), so teardown time is
+         *   inside the measured span while zero further bytes flow; the first
+         *   mic chunk itself costs ~40-64ms of clock before any byte exists
+         *   (AndroidMicSource.readFrame() blocks for a full getMinBufferSize()
+         *   read); and endCurrentPfdCycle()'s queue.clear() discards whatever
+         *   was still queued but not yet written, with those bytes never
+         *   counted. Net deficit ~50-200ms (~1.6-6.4 KB) on ordinary healthy
+         *   cycles. Fix round 2 (2026-08-11) set this constant EQUAL to
+         *   JUDGE_AFTER_MS's byte equivalent (96_000, both exactly 3.000s) on
+         *   the theory that the two described "one decision expressed twice,
+         *   keep them in lockstep" -- wrong: that equality meant a HEALTHY
+         *   no-signal cycle landing in roughly [3.00s, 3.20s] scored DEAD
+         *   purely from this structural lag, deterministically, on every
+         *   device whose recognizer silence-endpoints in that window. Fixed in
+         *   Task 3 fix round 3 (2026-08-11) by giving this constant real slack
+         *   (0.5s) under the duration gate instead of matching it exactly.
+         */
+        private const val MIN_CONSUMED_BYTES = 80_000L
 
         /**
          * Minimum cycle duration, in milliseconds, before its outcome is judged at
@@ -52,6 +98,11 @@ class PfdFeedPolicy {
          * this gate, two such ordinary short-silent cycles in a row would flip a
          * perfectly working device to legacy mode, silently, for the rest of the
          * call.
+         *
+         * See [MIN_CONSUMED_BYTES]'s doc for why this constant and that one are
+         * related by a strict inequality, not equality: bytesWritten structurally
+         * lags elapsedMs, so MIN_CONSUMED_BYTES's implied duration must sit strictly
+         * below this one's, never equal to or above it.
          */
         private const val JUDGE_AFTER_MS = 3_000L
 
@@ -96,7 +147,8 @@ class PfdFeedPolicy {
      * genuinely broken; counting an inconclusive cycle as a failure is exactly the
      * false positive this gate exists to remove (idle LISTENING-phase silence must
      * not accumulate towards the fallback). A cycle only moves the streak when it
-     * actually carries evidence either way.
+     * actually carries evidence either way. [consecutiveInconclusiveCount] tracks
+     * the OTHER side of that trade -- see its doc.
      */
     fun onCycleEnd(
         hadPartial: Boolean,
@@ -118,11 +170,15 @@ class PfdFeedPolicy {
                 if (failStreak >= FALLBACK_AFTER) {
                     usePfd = false
                 }
+                inconclusiveStreak = 0
             }
-            Verdict.ALIVE -> failStreak = 0
+            Verdict.ALIVE -> {
+                failStreak = 0
+                inconclusiveStreak = 0
+            }
             Verdict.INCONCLUSIVE -> {
-                // Deliberately a no-op -- see this function's doc for why neither
-                // incrementing nor resetting is correct here.
+                // failStreak deliberately untouched -- see this function's doc.
+                inconclusiveStreak++
             }
         }
 
@@ -146,4 +202,20 @@ class PfdFeedPolicy {
      * the verdict it reached, and the resulting mode.
      */
     fun cycleSummary(): String = lastSummary
+
+    /**
+     * How many consecutive cycles in a row have been INCONCLUSIVE (too short to
+     * judge); reset to 0 by any ALIVE or DEAD verdict. This is the trade
+     * INCONCLUSIVE buys, made observable: a recognizer that accepts our fd but
+     * never drains it, on a device whose cycles also happen to always end short
+     * of [JUDGE_AFTER_MS], would stay INCONCLUSIVE forever -- [shouldUsePfd]
+     * never flips to legacy, so STT stays silently deaf for the rest of the call
+     * with nothing in the log calling attention to it (fix round 3, 2026-08-11).
+     * Deliberately just a counter, not a log line: this class stays free of
+     * Android imports (JVM-pure by design, see the class doc and
+     * PfdFeedPolicyTest), so the caller (AndroidSpeechToText, which already owns
+     * every `tl ev=` log line) reads this after each [onCycleEnd] and logs the
+     * escape hatch itself.
+     */
+    fun consecutiveInconclusiveCount(): Int = inconclusiveStreak
 }

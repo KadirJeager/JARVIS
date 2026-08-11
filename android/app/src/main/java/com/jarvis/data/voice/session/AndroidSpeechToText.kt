@@ -377,11 +377,17 @@ class AndroidSpeechToText(
         // buffer silently absorbed (see PfdFeedPolicy.MIN_CONSUMED_BYTES's doc). Note
         // WRITER_JOIN_TIMEOUT_MS therefore bounds two different things at once: how
         // long this call can stall the main thread, AND how long we wait before
-        // calling the writer "stuck" -- a recognizer that is merely slow (> 100ms) to
-        // close its own dup, without ever having been broken, would be reported
-        // stuck here. The duration gate below is what keeps that cheap: this signal
-        // only feeds a verdict at all on cycles that already ran >= 3s with no
-        // partial/result, which a merely-slow-but-healthy recognizer is not.
+        // calling the writer "stuck". `isAlive` is broader than "blocked inside
+        // write()" -- it is also true while the thread is merely runnable but not yet
+        // scheduled, so the realistic false positive here is NOT a recognizer being
+        // slow to close its dup (a writer can only actually block once the pipe's
+        // ~64KB kernel buffer is full, which a recognizer that closes its dup
+        // reasonably promptly never causes); it is the daemon writer thread simply
+        // not being scheduled onto a CPU within 100ms under system load. The duration
+        // gate below is what keeps that cheap either way: this signal only feeds a
+        // verdict at all on cycles that already ran >= 3s with no partial/result, and
+        // a healthy short cycle with a merely-delayed writer is not going to also
+        // produce a 3-second silent one on top of it.
         val writerStuck = cycle.writerThread.isAlive
         if (writerStuck) {
             // The thread is a daemon, so it cannot outlive the process, and its own
@@ -404,6 +410,20 @@ class AndroidSpeechToText(
         // accounting, with no error or log to reveal it happened.
         val elapsedMs = SystemClock.elapsedRealtime() - cycle.startedAtElapsedMs
         policy?.onCycleEnd(hadPartial, hadResult, cycle.bytesWritten.get(), writerStuck, elapsedMs)
+        // Observability escape hatch for the trade INCONCLUSIVE buys (fix round 3,
+        // minor a): a recognizer that accepts our fd but never drains it, on a
+        // device whose cycles also happen to always end short of
+        // PfdFeedPolicy.JUDGE_AFTER_MS, would sit INCONCLUSIVE forever --
+        // shouldUsePfd() never flips to legacy, so STT stays silently deaf for the
+        // rest of the call with nothing in the log calling attention to it. This
+        // check does NOT touch the fail streak or the mode (PfdFeedPolicy already
+        // left both alone for every INCONCLUSIVE cycle); it only logs once per run
+        // of 5 (the `== 5` check, not `>= 5`, is what makes it "once per run" --
+        // the count must drop back to 0 via an ALIVE/DEAD verdict before it can
+        // climb back up and log again).
+        if (policy?.consecutiveInconclusiveCount() == 5) {
+            Log.w(TAG, "tl ev=pfd.inconclusiveRun n=5")
+        }
         Log.i(TAG, "tl ev=pfd.cycle ${policy?.cycleSummary()} drops=${cycle.drops.get()}")
     }
 

@@ -34,8 +34,8 @@ class PfdFeedPolicyTest {
         // PfdFeedPolicy.MIN_CONSUMED_BYTES) but endpointed on silence with no
         // text: the PIPE works, there was just nothing to hear. Not a failure.
         val p = PfdFeedPolicy()
-        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 100_000, writerStuck = false, elapsedMs = 3_000)
-        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 100_000, writerStuck = false, elapsedMs = 3_000)
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 150_000, writerStuck = false, elapsedMs = 3_000)
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 150_000, writerStuck = false, elapsedMs = 3_000)
         assertTrue(p.shouldUsePfd())
     }
 
@@ -83,7 +83,7 @@ class PfdFeedPolicyTest {
     @Test fun bytesBelowNewThresholdWithWriterNotStuckIsStillDead() {
         // 64_000 bytes is exactly what the OS pipe buffer alone can absorb with no
         // reader at all -- the pre-fix-round-1 (32_000) threshold would have scored
-        // this alive; the corrected threshold (96_000) must not.
+        // this alive; the current threshold (80_000, fix round 3) must not.
         val p = PfdFeedPolicy()
         p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 64_000, writerStuck = false, elapsedMs = 3_000)
         p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 64_000, writerStuck = false, elapsedMs = 3_000)
@@ -151,14 +151,17 @@ class PfdFeedPolicyTest {
     }
 
     @Test fun bytesExactlyAtThresholdVerdictIsAlive() {
+        // Fix round 3 (2026-08-11): threshold lowered 96_000 -> 80_000 (see the
+        // "Fix round 3" section below for why 96_000, exactly JUDGE_AFTER_MS's
+        // byte equivalent, was itself a bug).
         val p = PfdFeedPolicy()
-        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 96_000, writerStuck = false, elapsedMs = 3_000)
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 80_000, writerStuck = false, elapsedMs = 3_000)
         assertTrue(p.cycleSummary().contains("verdict=alive"))
     }
 
     @Test fun bytesJustBelowThresholdVerdictIsDead() {
         val p = PfdFeedPolicy()
-        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 95_999, writerStuck = false, elapsedMs = 3_000)
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 79_999, writerStuck = false, elapsedMs = 3_000)
         assertTrue(p.cycleSummary().contains("verdict=dead"))
     }
 
@@ -176,5 +179,53 @@ class PfdFeedPolicyTest {
         val p = PfdFeedPolicy()
         p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 0, writerStuck = false, elapsedMs = 2_999)
         assertTrue(p.cycleSummary().contains("verdict=inconclusive"))
+    }
+
+    // Fix round 3 (2026-08-11): fix round 2 set MIN_CONSUMED_BYTES (96_000) EQUAL
+    // to JUDGE_AFTER_MS's byte equivalent (3_000ms x 32_000 B/s = 96_000), on the
+    // theory the two constants were "one decision expressed twice, keep them in
+    // lockstep". That was wrong: bytesWritten structurally lags elapsedMs on a
+    // perfectly healthy cycle (teardown time -- readFd.close() + the writer join
+    // -- falls inside the measured span; the first mic chunk costs ~40-64ms before
+    // any byte exists; queue.clear() discards an in-flight frame), so
+    // `bytesWritten <= 32 * elapsedMs` always holds physically but is NEVER an
+    // equality in practice -- any future test case must respect that inequality,
+    // not assume a cycle can produce exactly 32 bytes per elapsed millisecond.
+
+    @Test fun healthyCycleWithRealisticByteDeficitIsNotDead() {
+        // Pins the exact regression fix round 3 closes: on the OLD (round 2)
+        // threshold of 96_000, this cycle -- realistic, healthy, just carrying the
+        // structural lag described above -- would have scored DEAD purely from
+        // that lag, deterministically, on every device whose recognizer
+        // silence-endpoints in this window. bytesWritten is computed from the
+        // physical relation, not hardcoded, so this test fails loudly if a future
+        // edit reintroduces an equality between the two constants.
+        val p = PfdFeedPolicy()
+        val elapsedMs = 3_100L
+        val bytesPerMs = 32L // 16 kHz mono PCM16 = 32_000 B/s = 32 B/ms
+        val realisticDeficitBytes = 6_000L // ~187ms worth -- within the documented ~50-200ms lag
+        val bytesWritten = bytesPerMs * elapsedMs - realisticDeficitBytes // 93_200
+        p.onCycleEnd(
+            hadPartial = false,
+            hadResult = false,
+            bytesWritten = bytesWritten,
+            writerStuck = false,
+            elapsedMs = elapsedMs,
+        )
+        assertTrue(p.cycleSummary().contains("verdict=alive"))
+        assertTrue(p.shouldUsePfd())
+    }
+
+    @Test fun consecutiveInconclusiveCountTracksAndResetsOnAnyJudgedVerdict() {
+        val p = PfdFeedPolicy()
+        assertEquals(0, p.consecutiveInconclusiveCount())
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 0, writerStuck = false, elapsedMs = 200)
+        assertEquals(1, p.consecutiveInconclusiveCount())
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 0, writerStuck = false, elapsedMs = 200)
+        assertEquals(2, p.consecutiveInconclusiveCount())
+        // A DEAD verdict resets it just like an ALIVE one would -- only
+        // INCONCLUSIVE itself extends the streak.
+        p.onCycleEnd(hadPartial = false, hadResult = false, bytesWritten = 0, writerStuck = false, elapsedMs = 3_000)
+        assertEquals(0, p.consecutiveInconclusiveCount())
     }
 }
