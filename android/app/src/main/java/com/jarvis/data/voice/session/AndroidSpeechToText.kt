@@ -140,17 +140,20 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             // to the network recognizer, which is still better than failing the call.
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            // VOICE_COMMUNICATION = the AEC-enabled audio source (API 31+): without
-            // it the recognizer hears Jarvis's own TTS from the speaker, treats it as
-            // user speech, and barge-in kills every reply after a few words (prod
-            // report 2026-07-31: "kendi sesi yüzünden dinleme moduna geçiyor").
-            // The PCM mic path (AndroidMicSource) already uses this same source.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                putExtra(
-                    RecognizerIntent.EXTRA_AUDIO_SOURCE,
-                    android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                )
-            }
+            // NOT setting RecognizerIntent.EXTRA_AUDIO_SOURCE here is deliberate.
+            // That extra takes a ParcelFileDescriptor pointing at an already-open
+            // audio source; we were passing MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            // an Int, which the framework silently ignores. The sibling constants
+            // (EXTRA_AUDIO_SOURCE_CHANNEL_COUNT / _ENCODING / _SAMPLING_RATE) confirm
+            // the shape -- a bare AudioSource int would need none of them.
+            //
+            // So the recognizer has always opened its own microphone with its own
+            // default source, and the STT leg of the AEC chain was never established.
+            // The comment removed here claimed the opposite and is why the 5 Aug
+            // review recorded this as done. Feeding the recognizer from our single
+            // AudioRecord via ParcelFileDescriptor.createPipe() is the real fix; it
+            // is gated on confirming Google's tr-TR recognizer accepts a PFD feed
+            // (docs/superpowers/plans/2026-08-11-ses-kimligi-pixel-dogrulugu.md, Task 7).
             // Bias the recognizer towards the words it keeps getting wrong. Kadir said
             // "selam Jarvis nasılsın" and the transcript read "selam CEVİZ nasılsın"
             // (S23, 2026-08-03) -- a Turkish recognizer has no reason to expect an
