@@ -56,9 +56,14 @@ internal fun formatEffectReport(
  * solely for the AEC self-test telemetry below: this class has never needed a `Context`
  * and the callback needs exactly `registerAudioRecordingCallback`/`unregister...`.
  */
-class AndroidMicSource(private val audioManager: AudioManager) : MicSource {
+class AndroidMicSource(private val audioManager: AudioManager) : MicSource, PcmTapSource {
 
     private var audioRecord: AudioRecord? = null
+
+    // Set via setTap(); read on the capture read path in readFrame(). @Volatile because
+    // the tap is installed from a different coroutine/thread than the one running
+    // readFrame()'s Dispatchers.IO block.
+    @Volatile private var tap: ((ByteArray) -> Unit)? = null
 
     // Sized in start(): the read chunk size must match the buffer that was actually
     // allocated for the rate/format this call was opened with.
@@ -129,7 +134,19 @@ class AndroidMicSource(private val audioManager: AudioManager) : MicSource {
         // Blocking read, off the caller's dispatcher via withContext above -- AudioRecord
         // in blocking mode (the default) waits for readChunkBytes to become available.
         val read = record.read(buffer, 0, buffer.size)
-        if (read > 0) buffer.copyOf(read) else null
+        val frame = if (read > 0) buffer.copyOf(read) else null
+        // Tap sees every frame the primary consumer reads, before any session-level
+        // gating -- parity with a recognizer that owns its own microphone. Invoked here
+        // (not in VoiceSession) so the tap is upstream of ALL session-level decisions,
+        // not just the ones VoiceSession happens to apply after reading.
+        if (frame != null) {
+            tap?.invoke(frame)
+        }
+        frame
+    }
+
+    override fun setTap(tap: ((ByteArray) -> Unit)?) {
+        this.tap = tap
     }
 
     override fun stop() {

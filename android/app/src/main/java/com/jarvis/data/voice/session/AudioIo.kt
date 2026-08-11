@@ -20,3 +20,21 @@ interface MicSource {
     /** Stops capture and releases the input device. Safe to call even if never started. */
     fun stop()
 }
+
+/**
+ * A source whose PCM frames can be tapped by ONE additional consumer without
+ * disturbing the primary read path. The tap sees every frame the primary
+ * consumer reads, BEFORE any gating the session applies -- parity with a
+ * recognizer that owns its own microphone. JVM-pure on purpose.
+ */
+interface PcmTapSource {
+    /**
+     * Installs (or clears, with null) the single tap. Thread-safe.
+     *
+     * The tap must never block: it runs on the capture read path, so a slow or
+     * suspending tap body directly delays the next PCM frame reaching the
+     * primary consumer. Tap bodies must be a non-blocking operation (e.g. a
+     * queue offer that drops on a full queue), never a suspend point.
+     */
+    fun setTap(tap: ((ByteArray) -> Unit)?)
+}
