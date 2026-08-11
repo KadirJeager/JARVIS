@@ -37,6 +37,7 @@ aralık filtresi bir composite index ister; kuyruk zaten MAX_PENDING ile sınır
 olduğu için karşılaştırmayı burada yapmak hem indekssiz hem de daha okunur.
 """
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -79,6 +80,37 @@ MAX_PENDING = 50
 # slug -> Turkish-phrase map both need this vocabulary in one place.
 CAUSE_RED_ZONE = "red_zone"              # policy._decide[_voice] returned "block"
 CAUSE_CAPABILITY_REQUEST = "capability_request"  # tool_grant/agent_grant proposal
+
+
+@dataclass(frozen=True)
+class RejectReason:
+    """One preset rejection reason served to the client's reject picker
+    (Onay Kartı 2.0, Task 3, P2c).
+
+    `title` is the short Turkish label a picker button shows. `prompt_fill`
+    is a DIFFERENT, longer Turkish clause -- the text a client is expected to
+    send back as the actual `reason` when this preset is chosen, because it
+    has to read as a full sentence once substituted into
+    `main.REJECTION_MODEL_NOTICE`'s "... çağrısını reddetti: {reason}" slot,
+    which a bare noun-phrase title does not."""
+
+    id: str
+    title: str
+    prompt_fill: str
+
+
+# Starting set (Task 3 brief, Step 4). Free text is also accepted by the
+# reject route -- these are picker shortcuts, not the only allowed values.
+REJECT_REASONS: tuple[RejectReason, ...] = (
+    RejectReason("wrong_target", "Yanlış kişi/hedef",
+                "yanlış kişi ya da hedef seçilmiş"),
+    RejectReason("not_now", "Şimdi olmaz, sonra",
+                "şimdi uygun değil, daha sonra tekrar denenebilir"),
+    RejectReason("no_share", "Bu bilgiyi paylaşma",
+                "bu bilgi paylaşılmamalı"),
+    RejectReason("different_approach", "Farklı yap (açıklayacağım)",
+                "istenen farklı; Kadir ayrıntıyı kendisi anlatacak"),
+)
 
 EXPIRED_OUTCOME = "Onay süresi doldu; eylem çalıştırılmadı."
 NO_EXECUTOR_OUTCOME = "bu araç onaydan sonra çalıştırılamıyor (yürütücü kayıtlı değil)"
@@ -169,6 +201,11 @@ def _project(approval_id: str, d: dict) -> dict:
         "decided_at": d.get("decided_at"),
         "decided_by": d.get("decided_by"),
         "outcome": d.get("outcome"),
+        # Task 3 (Onay Kartı 2.0): only rejections carry this key at all (see
+        # decide() below) -- .get() reports it as None for every approved
+        # decision and for every document written before this change, same
+        # absence-not-sentinel contract as actor/trust_level/cause/... below.
+        "decision_reason": d.get("decision_reason"),
         "actor": d.get("actor"),
         "trust_level": d.get("trust_level"),
         "cause": d.get("cause"),
@@ -368,7 +405,8 @@ def get(db, approval_id: str, user_id: str) -> dict | None:
     return _project(approval_id, d)
 
 
-def decide(db, approval_id: str, user_id: str, decision: str,
+def decide(db, approval_id: str, user_id: str, decision: str, *,
+           reason: str | None = None,
            executors: dict[str, Executor] | None = None, now_fn=_now) -> dict:
     """Bir onayı karara bağlar ve onaysa eylemi ÇALIŞTIRIR.
 
@@ -380,6 +418,17 @@ def decide(db, approval_id: str, user_id: str, decision: str,
     defterine SESSİZCE düşmez: testlerin izolasyonu buna bağlıdır (None ile {}
     ayrımı bilinçlidir).
 
+    `reason` (Onay Kartı 2.0, Task 3, P2a): MANDATORY when `decision ==
+    STATUS_REJECTED` -- a bare rejection is a dead end for the model, it
+    learns nothing and just retries the same call. Enforced HERE, at this
+    function's own boundary, not only in main.py's route: a future caller
+    (a job, a CLI, another route) cannot reject without leaving a reason
+    behind. Checked immediately, beside the `decision not in DECISIONS`
+    guard -- i.e. BEFORE the Firestore read, let alone the claim create()
+    below -- so a malformed call fails before it can consume the claim's
+    idempotency slot for a real rejection later. Blank-after-strip counts as
+    missing, same rule as config.operand_of's own blank check.
+
     Sıra sözleşmedir, gevşetilemez:
     oku → sahiplik → status pending mi → SÜRE → claim create() → status yaz →
     onaysa yürüt. Süre kontrolü claim'den önce gelir ki süresi geçmiş bir onay
@@ -388,6 +437,10 @@ def decide(db, approval_id: str, user_id: str, decision: str,
     """
     if decision not in DECISIONS:
         raise ValueError(f"geçersiz karar: {decision!r} (beklenen: {DECISIONS})")
+    if decision == STATUS_REJECTED:
+        reason = reason.strip() if isinstance(reason, str) else reason
+        if not reason:
+            raise ValueError("ret için gerekçe zorunlu (reason boş/eksik olamaz)")
     if executors is None:
         executors = EXECUTORS
 
@@ -414,9 +467,17 @@ def decide(db, approval_id: str, user_id: str, decision: str,
         logging.info("approvals: decide süresi dolmuş id=%s (yürütme yok)", approval_id)
         return _result(STATUS_EXPIRED, EXPIRED_OUTCOME, True)
 
+    claim = {"decision": decision, "by": user_id, "at": now}
+    doc_update = {"status": decision, "decided_at": now, "decided_by": user_id}
+    if decision == STATUS_REJECTED:
+        # Stored on BOTH records (brief's explicit requirement): the claim is
+        # the decision's primary record (module docstring, invariant 2), the
+        # approval doc is what _project()/GET routes read back.
+        claim["decision_reason"] = reason
+        doc_update["decision_reason"] = reason
+
     try:
-        db.collection(CLAIMS_COLLECTION).document(approval_id).create(
-            {"decision": decision, "by": user_id, "at": now})
+        db.collection(CLAIMS_COLLECTION).document(approval_id).create(claim)
     except AlreadyExists:
         # Yarışı kaybettik: kararı başka bir dokunuş verdi. Tek gerçek kaynak
         # onay dokümanıdır — yeniden okunur (kazanan status'ü henüz yazmamış
@@ -425,10 +486,10 @@ def decide(db, approval_id: str, user_id: str, decision: str,
         logging.info("approvals: decide claim yarışı kaybedildi id=%s", approval_id)
         return _result(current.get("status"), current.get("outcome"), True)
 
-    ref.set({"status": decision, "decided_at": now, "decided_by": user_id}, merge=True)
+    ref.set(doc_update, merge=True)
 
     if decision == STATUS_REJECTED:
-        logging.info("approvals: reddedildi id=%s by=%s", approval_id, user_id)
+        logging.info("approvals: reddedildi id=%s by=%s reason=%r", approval_id, user_id, reason)
         return _result(STATUS_REJECTED, None, False)
 
     if d.get("kind") not in EXECUTABLE_KINDS:

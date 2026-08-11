@@ -144,7 +144,8 @@ def test_list_pending_skips_decided_ones():
     db = FakeDB()
     kalan = _request(db)
     karara_baglanan = _request(db)
-    approvals.decide(db, karara_baglanan, USER, "rejected", {}, now_fn=_now)
+    approvals.decide(db, karara_baglanan, USER, "rejected", reason="deneme",
+                     executors={}, now_fn=_now)
 
     assert [i["id"] for i in approvals.list_pending(db, USER, now_fn=_now)] == [kalan]
 
@@ -273,7 +274,7 @@ def test_decide_approve_runs_executor_and_records_decision():
     ex = CountingExecutor(result="Hatırlatma iptal edildi.")
 
     out = approvals.decide(db, approval_id, USER, "approved",
-                           {"cancel_reminder": ex}, now_fn=_now)
+                           executors={"cancel_reminder": ex}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_APPROVED
     assert out["already"] is False
@@ -296,8 +297,8 @@ def test_decide_twice_calls_executor_only_once():
     ex = CountingExecutor()
     executors = {"cancel_reminder": ex}
 
-    first = approvals.decide(db, approval_id, USER, "approved", executors, now_fn=_now)
-    second = approvals.decide(db, approval_id, USER, "approved", executors, now_fn=_now)
+    first = approvals.decide(db, approval_id, USER, "approved", executors=executors, now_fn=_now)
+    second = approvals.decide(db, approval_id, USER, "approved", executors=executors, now_fn=_now)
 
     assert first["already"] is False
     assert second["already"] is True
@@ -314,7 +315,7 @@ def test_decide_stops_at_existing_claim_even_when_status_still_pending():
     ex = CountingExecutor()
 
     out = approvals.decide(db, approval_id, USER, "approved",
-                           {"cancel_reminder": ex}, now_fn=_now)
+                           executors={"cancel_reminder": ex}, now_fn=_now)
 
     assert out["already"] is True
     assert ex.calls == []
@@ -325,8 +326,8 @@ def test_decide_reject_never_runs_executor():
     approval_id = _request(db)
     ex = CountingExecutor()
 
-    out = approvals.decide(db, approval_id, USER, "rejected",
-                           {"cancel_reminder": ex}, now_fn=_now)
+    out = approvals.decide(db, approval_id, USER, "rejected", reason="Yanlış kişi",
+                           executors={"cancel_reminder": ex}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_REJECTED and out["already"] is False
     assert ex.calls == []
@@ -339,8 +340,66 @@ def test_decide_rejects_unknown_decision():
     db = FakeDB()
     approval_id = _request(db)
     with pytest.raises(ValueError):
-        approvals.decide(db, approval_id, USER, "belki", {}, now_fn=_now)
+        approvals.decide(db, approval_id, USER, "belki", executors={}, now_fn=_now)
     assert _doc(db, approval_id)["status"] == approvals.STATUS_PENDING
+
+
+# ---------------------------------------------------------------------------
+# decide() — mandatory rejection reason (Onay Kartı 2.0, Task 3, P2a)
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_without_a_reason_is_refused_at_the_boundary():
+    db = FakeDB()
+    approval_id = _request(db)
+    with pytest.raises(ValueError):
+        approvals.decide(db, approval_id, USER, "rejected")
+    assert _doc(db, approval_id)["status"] == approvals.STATUS_PENDING
+
+
+def test_rejection_with_a_whitespace_only_reason_is_refused():
+    db = FakeDB()
+    approval_id = _request(db)
+    with pytest.raises(ValueError):
+        approvals.decide(db, approval_id, USER, "rejected", reason="   ")
+
+
+def test_a_rejection_without_reason_never_consumes_the_claim_slot():
+    """The mandatory-reason check must run BEFORE claim create() -- a
+    malformed rejection must not burn the idempotency slot, so a later,
+    properly-reasoned rejection for the SAME approval still goes through."""
+    db = FakeDB()
+    approval_id = _request(db)
+    with pytest.raises(ValueError):
+        approvals.decide(db, approval_id, USER, "rejected")
+    assert not db.collection(approvals.CLAIMS_COLLECTION).document(approval_id).get().exists
+
+    out = approvals.decide(db, approval_id, USER, "rejected", reason="Yanlış kişi", now_fn=_now)
+    assert out["status"] == approvals.STATUS_REJECTED and out["already"] is False
+
+
+def test_rejection_stores_and_projects_the_reason():
+    db = FakeDB()
+    approval_id = _request(db)
+    approvals.decide(db, approval_id, USER, "rejected", reason="Yanlış kişi", now_fn=_now)
+    assert approvals.get(db, approval_id, USER)["decision_reason"] == "Yanlış kişi"
+
+
+def test_rejection_stores_the_reason_on_the_claim_too():
+    db = FakeDB()
+    approval_id = _request(db)
+    approvals.decide(db, approval_id, USER, "rejected", reason="Yanlış kişi", now_fn=_now)
+    claim = db.collection(approvals.CLAIMS_COLLECTION).document(approval_id).get().to_dict()
+    assert claim["decision_reason"] == "Yanlış kişi"
+
+
+def test_approval_needs_no_reason():
+    db = FakeDB()
+    approval_id = _request(db)
+    out = approvals.decide(db, approval_id, USER, "approved",
+                           executors={"cancel_reminder": CountingExecutor()}, now_fn=_now)
+    assert out["status"] == approvals.STATUS_APPROVED
+    assert "decision_reason" not in _doc(db, approval_id)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +414,7 @@ def test_decide_on_expired_pending_never_executes():
     ex = CountingExecutor()
 
     out = approvals.decide(db, approval_id, USER, "approved",
-                           {"cancel_reminder": ex}, now_fn=_now_fn_at(30))
+                           executors={"cancel_reminder": ex}, now_fn=_now_fn_at(30))
 
     assert out["status"] == approvals.STATUS_EXPIRED
     assert out["already"] is True
@@ -375,7 +434,7 @@ def test_decide_on_corrupt_expiry_never_executes():
     ex = CountingExecutor()
 
     out = approvals.decide(db, approval_id, USER, "approved",
-                           {"cancel_reminder": ex}, now_fn=_now)
+                           executors={"cancel_reminder": ex}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_EXPIRED and ex.calls == []
 
@@ -386,14 +445,14 @@ def test_decide_on_someone_elses_approval_is_not_found():
     ex = CountingExecutor()
 
     out = approvals.decide(db, approval_id, OTHER, "approved",
-                           {"cancel_reminder": ex}, now_fn=_now)
+                           executors={"cancel_reminder": ex}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_NOT_FOUND
     assert ex.calls == []
     assert _doc(db, approval_id)["status"] == approvals.STATUS_PENDING
     # Var olmayan onayla BİREBİR aynı cevap: varlık sızmaz (spec §4.4).
     assert out == approvals.decide(db, "yok-boyle-bir-id", OTHER, "approved",
-                                   {"cancel_reminder": ex}, now_fn=_now)
+                                   executors={"cancel_reminder": ex}, now_fn=_now)
 
 
 def test_decide_marks_failed_when_executor_raises_and_does_not_retry():
@@ -402,7 +461,7 @@ def test_decide_marks_failed_when_executor_raises_and_does_not_retry():
     ex = CountingExecutor(raises=RuntimeError("firestore öldü"))
     executors = {"cancel_reminder": ex}
 
-    out = approvals.decide(db, approval_id, USER, "approved", executors, now_fn=_now)
+    out = approvals.decide(db, approval_id, USER, "approved", executors=executors, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_FAILED
     assert "firestore öldü" in out["outcome"]
@@ -410,7 +469,7 @@ def test_decide_marks_failed_when_executor_raises_and_does_not_retry():
     assert d["status"] == approvals.STATUS_FAILED and "firestore öldü" in d["outcome"]
     assert d["decided_by"] == USER  # karar VERİLDİ; hata bir gözlemdir
 
-    again = approvals.decide(db, approval_id, USER, "approved", executors, now_fn=_now)
+    again = approvals.decide(db, approval_id, USER, "approved", executors=executors, now_fn=_now)
     assert again["already"] is True and len(ex.calls) == 1
 
 
@@ -419,7 +478,7 @@ def test_decide_refuses_tool_without_registered_executor():
     approval_id = _request(db, tool_name="rm_rf_everything")
 
     out = approvals.decide(db, approval_id, USER, "approved",
-                           {"cancel_reminder": CountingExecutor()}, now_fn=_now)
+                           executors={"cancel_reminder": CountingExecutor()}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_FAILED
     assert "yürütücü kayıtlı değil" in out["outcome"]
@@ -438,7 +497,7 @@ def test_decide_approves_non_executable_kind_without_executing_anything():
     ex = CountingExecutor()
 
     out = approvals.decide(db, approval_id, USER, "approved",
-                           {"cancel_reminder": ex}, now_fn=_now)
+                           executors={"cancel_reminder": ex}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_APPROVED and ex.calls == []
 
@@ -463,7 +522,8 @@ def test_expire_due_expires_only_due_pendings():
 def test_expire_due_leaves_decided_approvals_alone():
     db = FakeDB()
     approval_id = _request(db, ttl_minutes=5)
-    approvals.decide(db, approval_id, USER, "rejected", {}, now_fn=_now)
+    approvals.decide(db, approval_id, USER, "rejected", reason="deneme",
+                     executors={}, now_fn=_now)
 
     out = approvals.expire_due(db, now_fn=_now_fn_at(30))
 
@@ -521,7 +581,7 @@ def test_explicit_empty_executors_still_means_empty_not_the_registry():
     db = FakeDB()
     approval_id = _request(db)
 
-    out = approvals.decide(db, approval_id, USER, "approved", {}, now_fn=_now)
+    out = approvals.decide(db, approval_id, USER, "approved", executors={}, now_fn=_now)
 
     assert out["status"] == approvals.STATUS_FAILED
     assert "yürütücü kayıtlı değil" in out["outcome"]

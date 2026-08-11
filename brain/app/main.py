@@ -874,6 +874,19 @@ async def list_approvals(email: str = Depends(require_user)):
     return {"approvals": items}
 
 
+@app.get("/api/approvals/reasons")
+async def list_reject_reasons(email: str = Depends(require_user)):
+    """Preset rejection reasons for the client's reject picker (Onay Kartı
+    2.0, Task 3, P2c). Registered BEFORE /api/approvals/{approval_id} on
+    purpose: route matching is by registration order, and a later
+    registration here would let that path-param route swallow "reasons" as
+    an approval id."""
+    return {"reasons": [
+        {"id": r.id, "title": r.title, "prompt_fill": r.prompt_fill}
+        for r in approvals.REJECT_REASONS
+    ]}
+
+
 @app.get("/api/approvals/{approval_id}")
 async def get_approval(approval_id: str, email: str = Depends(require_user)):
     """Tek onayın GÜNCEL durumu: kart rozetini transcript'e gömmüyoruz, tek
@@ -889,14 +902,39 @@ async def get_approval(approval_id: str, email: str = Depends(require_user)):
     return item
 
 
-async def _decide_approval(approval_id: str, email: str, decision: str) -> dict:
+# Sentence handed back to the model as the rejected tool call's result (Onay
+# Kartı 2.0, Task 3, P2b). See _decide_approval's docstring for WHERE this
+# actually reaches the model -- it is not the tool call's own synchronous
+# return value, because that value was already produced (and consumed) at
+# approval-REQUEST time, long before a decision exists.
+REJECTION_MODEL_NOTICE = "Kullanıcı {tool} çağrısını reddetti: {reason}"
+
+
+async def _decide_approval(approval_id: str, email: str, decision: str,
+                           reason: str | None = None) -> dict:
     """approve/reject uçlarının ortak gövdesi. approvals.decide sahiplik
     ihlalini ve olmayan onayı BİREBİR aynı `status="not_found"` ile döner; uç
-    ikisini de aynı 404'e çevirir."""
+    ikisini de aynı 404'e çevirir.
+
+    FINDING (Onay Kartı 2.0, Task 3, P2b -- see task-3-report.md for the
+    full trace): decide() itself has NO channel back into a live model turn.
+    The tool call that raised this approval already returned its own result
+    -- APPROVAL_PENDING_REPLY, "onay kartı gönderildi, bekle" -- at REQUEST
+    time (_approval_sink, above). By the time a decision lands here, minutes
+    or hours later over a completely separate HTTP request, that ADK turn is
+    long over; there is no open function-call waiting on this response. The
+    only path back into the model's context AT ALL is the same one the
+    pending card itself already relies on: _messages -> _ensure_session's
+    transcript replay on the session's next cold start (main.py, above,
+    "rehydrate"). So on an ACTUAL new rejection (not a stale/duplicate
+    `already` touch), this appends the same kind of row the sink itself
+    writes -- best effort, exactly like the sink's card/push writes: the
+    decision is already durably recorded above regardless of whether this
+    write succeeds."""
     try:
         _init()
         out = await asyncio.to_thread(
-            lambda: approvals.decide(_memory.db, approval_id, email, decision)
+            lambda: approvals.decide(_memory.db, approval_id, email, decision, reason=reason)
         )
     except Exception:
         logging.exception("approvals: decide failed id=%s user_id=%s decision=%s",
@@ -904,6 +942,24 @@ async def _decide_approval(approval_id: str, email: str, decision: str) -> dict:
         raise HTTPException(status_code=502, detail=APPROVAL_DECISION_UNAVAILABLE)
     if out["status"] == approvals.STATUS_NOT_FOUND:
         raise HTTPException(status_code=404, detail=APPROVAL_NOT_FOUND)
+
+    if (decision == approvals.STATUS_REJECTED
+            and out["status"] == approvals.STATUS_REJECTED
+            and not out["already"]):
+        try:
+            approval = await asyncio.to_thread(
+                lambda: approvals.get(_memory.db, approval_id, email))
+            if approval is not None:
+                tool = approval.get("tool_name") or approval.get("kind") or "işlem"
+                text = REJECTION_MODEL_NOTICE.format(tool=tool, reason=reason)
+                _messages.append(email, approval["session_id"], "model", text,
+                                 kind="approval_decision",
+                                 meta={"approval_id": approval_id})
+        except Exception:
+            logging.exception(
+                "approvals: ret gerekçesi transcript'e yazılamadı id=%s -- karar "
+                "kayıtlı ama model bir sonraki soğuk başlangıca kadar görmeyecek",
+                approval_id)
     return out
 
 
@@ -914,10 +970,35 @@ async def approve_approval(approval_id: str, email: str = Depends(require_user))
     return await _decide_approval(approval_id, email, approvals.STATUS_APPROVED)
 
 
+class RejectRequest(BaseModel):
+    """Body for POST /api/approvals/{id}/reject (Onay Kartı 2.0, Task 3,
+    P2a): a reason is mandatory at the HTTP boundary too, not only inside
+    approvals.decide(). `default="", validate_default=True` routes an
+    ENTIRELY MISSING field through the SAME strip-and-reject validator as a
+    whitespace-only one -- without `validate_default`, pydantic v2 only runs
+    field validators on values actually present in the body, so a missing
+    field would surface its own generic English "Field required" error
+    instead of this constraint's Turkish detail. Free text or a
+    REJECT_REASONS preset's `prompt_fill` are both accepted; this model does
+    not care which."""
+    reason: str = Field(default="", validate_default=True)
+
+    @field_validator("reason")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("reddetme gerekçesi boş olamaz")
+        return v
+
+
 @app.post("/api/approvals/{approval_id}/reject")
-async def reject_approval(approval_id: str, email: str = Depends(require_user)):
-    """Reddet: yürütme YOK."""
-    return await _decide_approval(approval_id, email, approvals.STATUS_REJECTED)
+async def reject_approval(approval_id: str, req: RejectRequest,
+                          email: str = Depends(require_user)):
+    """Reddet: yürütme YOK. Gerekçe zorunlu (Onay Kartı 2.0, Task 3, P2a) --
+    bare bir ret modele hiçbir şey öğretmez ve aynı çağrıyı tekrarlatır."""
+    return await _decide_approval(approval_id, email, approvals.STATUS_REJECTED,
+                                  reason=req.reason)
 
 
 @app.post("/api/jobs/approvals-tick")

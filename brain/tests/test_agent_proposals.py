@@ -153,7 +153,8 @@ def test_rejected_agent_grant_writes_nothing():
     db = _db()
     _propose()
     (aid, _), = _approvals(db)
-    approvals.decide(db, aid, USER, "rejected", executors=approvals.EXECUTORS)
+    approvals.decide(db, aid, USER, "rejected", reason="test",
+                     executors=approvals.EXECUTORS)
     assert _registry(db) == {}
 
 

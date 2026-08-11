@@ -107,6 +107,22 @@ def test_operand_of_is_none_for_an_undeclared_tool():
     assert config.operand_of("some_tool_nobody_declared", {"reminder_id": "r1"}) is None
 
 
+def test_operand_of_treats_a_blank_value_as_absent():
+    """A declared key holding "" (or whitespace-only) is the same
+    "permanently empty row" problem as a missing key -- both must resolve to
+    None, not to an empty/whitespace operand string (Task 3 review carry-forward)."""
+    assert config.operand_of("cancel_reminder", {"reminder_id": ""}) is None
+    assert config.operand_of("cancel_reminder", {"reminder_id": "   "}) is None
+
+
+def test_operand_of_never_stringifies_a_non_scalar_value():
+    """A dict/list value must fail closed to None, not stringify into repr
+    noise (`str({...})`) that would masquerade as a real operand on the
+    approval card (Task 3 review carry-forward)."""
+    assert config.operand_of("cancel_reminder", {"reminder_id": {"a": 1}}) is None
+    assert config.operand_of("cancel_reminder", {"reminder_id": ["r1", "r2"]}) is None
+
+
 def test_operand_of_is_none_when_the_declared_key_is_absent_from_args():
     assert config.operand_of("cancel_reminder", {}) is None
     assert config.operand_of("cancel_reminder", None) is None

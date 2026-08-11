@@ -279,7 +279,7 @@ def test_reject_records_the_decision_without_executing(client, db, monkeypatch):
     monkeypatch.setitem(approvals.EXECUTORS, "cancel_reminder", ex)
     approval_id = _request(db)
 
-    r = client.post(f"/api/approvals/{approval_id}/reject")
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
 
     assert r.status_code == 200 and r.json()["status"] == approvals.STATUS_REJECTED
     assert ex.calls == []
@@ -288,7 +288,91 @@ def test_reject_records_the_decision_without_executing(client, db, monkeypatch):
 
 def test_reject_someone_elses_approval_returns_404(client, db):
     approval_id = _request(db, user_id=OTHER)
-    assert client.post(f"/api/approvals/{approval_id}/reject").status_code == 404
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST reject — mandatory reason (Onay Kartı 2.0, Task 3, P2a/P2b)
+# ---------------------------------------------------------------------------
+
+
+def test_reject_route_rejects_a_missing_reason(client, db):
+    approval_id = _request(db)
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={})
+    assert r.status_code == 422
+    # `validate_default=True` (main.RejectRequest) routes an entirely absent
+    # field through the SAME Turkish validator message as a blank one --
+    # without it pydantic's own generic English "Field required" would leak
+    # through here instead.
+    assert "boş olamaz" in r.json()["detail"][0]["msg"]
+
+
+def test_reject_route_rejects_a_whitespace_only_reason(client, db):
+    approval_id = _request(db)
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "   "})
+    assert r.status_code == 422
+
+
+def test_reject_route_passes_the_reason_through(client, db):
+    approval_id = _request(db)
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Şimdi olmaz"})
+    assert r.status_code == 200
+    assert approvals.get(db, approval_id, USER)["decision_reason"] == "Şimdi olmaz"
+
+
+def test_reject_appends_the_reason_as_a_model_facing_transcript_row(client, db):
+    """P2b: decide() has no live channel back to the model (see
+    main._decide_approval's docstring for the trace) -- the smallest correct
+    wiring is a transcript row the session replays on its next cold start.
+    Pin its exact shape: role, kind, meta, and the required sentence."""
+    approval_id = _request(db)
+
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
+
+    assert r.status_code == 200
+    rows = [m for m in _chat_rows(db) if m.get("kind") == "approval_decision"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["role"] == "model"
+    assert row["meta"] == {"approval_id": approval_id}
+    assert row["user_id"] == USER and row["session_id"] == SESSION
+    assert row["text"] == "Kullanıcı cancel_reminder çağrısını reddetti: Yanlış kişi"
+
+
+def test_rejecting_twice_appends_the_transcript_row_only_once(client, db):
+    """already=True touches must NOT re-notify the model (they didn't
+    decide anything -- see _decide_approval's `not out["already"]` guard)."""
+    approval_id = _request(db)
+
+    first = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
+    second = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Başka gerekçe"})
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert second.json()["already"] is True
+    rows = [m for m in _chat_rows(db) if m.get("kind") == "approval_decision"]
+    assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# GET /api/approvals/reasons (Onay Kartı 2.0, Task 3, P2c)
+# ---------------------------------------------------------------------------
+
+
+def test_reasons_route_returns_the_preset_list(client):
+    r = client.get("/api/approvals/reasons")
+    assert r.status_code == 200
+    reasons = r.json()["reasons"]
+    assert len(reasons) == len(approvals.REJECT_REASONS)
+    for item in reasons:
+        assert set(item) == {"id", "title", "prompt_fill"}
+    ids = {item["id"] for item in reasons}
+    assert ids == {r.id for r in approvals.REJECT_REASONS}
+
+
+def test_reasons_route_requires_auth():
+    with TestClient(main_mod.app) as c:
+        assert c.get("/api/approvals/reasons").status_code in (401, 403)
 
 
 def test_approve_returns_502_on_infrastructure_failure(client, monkeypatch):

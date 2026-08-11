@@ -298,12 +298,26 @@ def operand_of(tool_name: str, args: dict | None) -> str | None:
     NEVER falls back to "the first string argument" or `str(args)` -- the
     brief's own warning against that heuristic. A wrong operand is worse
     than a missing one: it makes an approval card look bound to something
-    it is not, exactly when Kadir is relying on that row to decide."""
+    it is not, exactly when Kadir is relying on that row to decide.
+
+    This function's contract is "a binding identifier or silence" -- two more
+    cases fail closed to that same silence (Onay Kartı 2.0, Task 3 review
+    carry-forward):
+
+    - a declared key present but blank/whitespace-only after strip -> None,
+      the same "permanently empty row" problem as an absent key, just
+      spelled with an empty string instead of a missing one
+    - a declared key holding a non-scalar (dict/list/...) -> None, never
+      stringified: `str({...})`/`str([...])` produces Python repr noise, not
+      an identifier, and unconditional stringification would silently pass
+      that noise through as if it were one"""
     key = TOOL_OPERAND_ARG.get(tool_name)
     if key is None:
         return None
     value = (args or {}).get(key)
-    return str(value) if value is not None else None
+    if value is None or not isinstance(value, (str, int, float, bool)):
+        return None
+    return str(value).strip() or None
 
 
 TOOL_TIERS = {

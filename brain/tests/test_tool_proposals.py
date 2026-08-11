@@ -258,7 +258,7 @@ def test_rejected_grant_writes_nothing():
     db = _db()
     _propose(db)
     aid, _ = _only_approval(db)
-    out = approvals.decide(db, aid, USER, approvals.STATUS_REJECTED)
+    out = approvals.decide(db, aid, USER, approvals.STATUS_REJECTED, reason="test")
     assert out["status"] == approvals.STATUS_REJECTED
     assert _registry(db) == {}
 
