@@ -22,6 +22,20 @@ import java.util.concurrent.atomic.AtomicLong
  * Real on-device STT: `SpeechRecognizer` configured for tr-TR free-form dictation,
  * preferring the offline (on-device) recognizer when the platform offers one.
  *
+ * On-device availability ([SpeechRecognizer.isOnDeviceRecognitionAvailable]) is a
+ * GENERIC capability flag -- it says nothing about whether the requested language
+ * (tr-TR) is actually installed. If the on-device recognizer reports
+ * `ERROR_LANGUAGE_UNAVAILABLE` (its language pack is missing, e.g. evicted under
+ * storage pressure), [fallbackToNetworkRecognizer] transparently tears down the
+ * on-device recognizer, rebuilds on `SpeechRecognizer.createSpeechRecognizer` (the
+ * network one), and re-arms listening for the SAME turn instead of surfacing
+ * [SpeechToTextListener.onFatalError] -- see [sttErrorAction] for the full decision
+ * table. The flip is one-way and sticky for the rest of this instance's life
+ * (mirroring [PfdFeedPolicy]'s own "permanent for this instance" shape): once
+ * [usingOnDeviceRecognizer] is false, it never goes back to true. If the network
+ * recognizer then reports the SAME code, that IS fatal -- there is nowhere left to
+ * fall back to.
+ *
  * PFD feed (Task 3 of docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md): when
  * [tapSource] is non-null, each recognizer cycle is fed from the session's own
  * `AudioRecord` via a piped [ParcelFileDescriptor] instead of letting the recognizer
@@ -66,9 +80,11 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * This class cannot be unit-tested on the JVM (it needs a real recognizer service);
  * [VoiceSession]'s restart/barge-in logic is tested against a fake [SpeechToText]
- * instead (VoiceSessionTest). Only [isRecoverableSttError], a pure function over the
- * platform's error-code constants, is JVM-tested (SttErrorMappingTest). The PFD path is
- * proven by an instrumented test instead (PfdSpeechToTextTest, Task 4 of the same plan).
+ * instead (VoiceSessionTest). Only [isRecoverableSttError] and [sttErrorAction], pure
+ * functions over the platform's error-code constants, are JVM-tested
+ * (SttErrorMappingTest); [fallbackToNetworkRecognizer] itself, like the rest of this
+ * class, is not. The PFD path is proven by an instrumented test instead
+ * (PfdSpeechToTextTest, Task 4 of the same plan).
  *
  * This class's own `tl ev=` lines (Task 11) intentionally omit the `t=`/`gen=` fields
  * [VoiceSession]'s carry -- there is no session-relative clock or generation counter at
@@ -111,6 +127,13 @@ class AndroidSpeechToText(
     // line of its own rather than staying permanently silent.
     private var loggedFallback = false
 
+    // Main-thread only. Which recognizer [recognizer] currently is -- set whenever it
+    // is (re)built, in start() and in fallbackToNetworkRecognizer(). Read by onError
+    // to decide sttErrorAction()'s FallbackToNetwork branch. Distinct from the PFD
+    // [policy]'s legacy-mode flip: this is about which SpeechRecognizer implementation
+    // is in use, not which audio feed path it gets.
+    private var usingOnDeviceRecognizer = false
+
     // Written by start()/destroy() (any thread), read from main-thread callbacks.
     @Volatile
     private var listener: SpeechToTextListener? = null
@@ -145,10 +168,13 @@ class AndroidSpeechToText(
         override fun onError(error: Int) {
             Log.i(TAG, "tl ev=onError code=$error")
             endCurrentPfdCycle()
-            if (isRecoverableSttError(error)) listener?.onRecoverableError()
-            else {
-                Log.w(TAG, "SpeechRecognizer fatal error: $error")
-                listener?.onFatalError()
+            when (sttErrorAction(error, usingOnDeviceRecognizer)) {
+                SttErrorAction.Retry -> listener?.onRecoverableError()
+                SttErrorAction.FallbackToNetwork -> fallbackToNetworkRecognizer()
+                SttErrorAction.Fatal -> {
+                    Log.w(TAG, "SpeechRecognizer fatal error: $error")
+                    listener?.onFatalError()
+                }
             }
         }
 
@@ -179,6 +205,7 @@ class AndroidSpeechToText(
             }
             // One policy instance per start() call (see class doc).
             policy = tapSource?.let { PfdFeedPolicy() }
+            usingOnDeviceRecognizer = isOnDeviceRecognizerAvailable(context)
             recognizer = createRecognizer(context).apply {
                 setRecognitionListener(recognitionListener)
             }
@@ -215,6 +242,35 @@ class AndroidSpeechToText(
         }
     }
 
+    /**
+     * One-way flip triggered from [onError] when [sttErrorAction] returns
+     * [SttErrorAction.FallbackToNetwork] -- see the class doc. By the time this runs,
+     * [onError] has already called [endCurrentPfdCycle] unconditionally (it runs before
+     * the `when` that dispatches here), so there is no PFD cycle left to tear down; the
+     * re-armed [listen] call below builds a fresh one exactly as any other listen() call
+     * would. [usingOnDeviceRecognizer] flips to false immediately -- the SAME instant
+     * [onError] observed it fail -- but destroying the old recognizer and building the
+     * new one is deferred one more turn through [main] even though [onError] already
+     * runs on the main thread: everything else that mutates [recognizer] in this class
+     * goes through `main.post`, and doing the same here means `recognizer.destroy()`
+     * never runs from inside that SAME recognizer's own callback stack.
+     */
+    private fun fallbackToNetworkRecognizer() {
+        Log.i(TAG, "tl ev=stt.recognizerFallback from=onDevice to=network reason=languageUnavailable")
+        usingOnDeviceRecognizer = false
+        main.post {
+            recognizer?.destroy()
+            // SpeechRecognizer.createSpeechRecognizer directly, NOT the createRecognizer()
+            // factory below -- that one re-checks on-device availability and would just
+            // rebuild the SAME on-device recognizer that just failed, defeating the
+            // one-way flip.
+            recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                setRecognitionListener(recognitionListener)
+            }
+            listen()
+        }
+    }
+
     override fun destroy() {
         listener = null
         main.post {
@@ -223,6 +279,7 @@ class AndroidSpeechToText(
             recognizer = null
             policy = null
             loggedFallback = false
+            usingOnDeviceRecognizer = false
         }
     }
 
@@ -542,10 +599,15 @@ class AndroidSpeechToText(
             )
         }
 
-        fun createRecognizer(context: Context): SpeechRecognizer =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        // Shared by createRecognizer() and start()'s usingOnDeviceRecognizer bookkeeping
+        // so the two never drift apart into disagreeing about which recognizer a given
+        // start() actually built.
+        fun isOnDeviceRecognizerAvailable(context: Context): Boolean =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
-            ) {
+
+        fun createRecognizer(context: Context): SpeechRecognizer =
+            if (isOnDeviceRecognizerAvailable(context)) {
                 SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
             } else {
                 SpeechRecognizer.createSpeechRecognizer(context)
@@ -589,4 +651,55 @@ fun isRecoverableSttError(error: Int): Boolean = when (error) {
     SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
     -> true
     else -> false
+}
+
+/** What [AndroidSpeechToText.onError] does with a given verdict from [sttErrorAction]. */
+enum class SttErrorAction {
+    /** Re-arm listening on the SAME recognizer -- the existing recoverable set. */
+    Retry,
+
+    /** Tear down the on-device recognizer and rebuild on the network one, then re-arm
+     *  listening for the same turn -- see [AndroidSpeechToText]'s class doc. */
+    FallbackToNetwork,
+
+    /** End the call with a user-visible error -- everything else. */
+    Fatal,
+}
+
+/**
+ * Superset of [isRecoverableSttError] that also knows which recognizer just failed.
+ * `SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE` (13) means the recognizer's language
+ * pack -- here, tr-TR -- is supported but not currently installed. Measured on
+ * emulator-5556 (API 36): the on-device SODA pack is absent, so the on-device
+ * recognizer fails EVERY call with this code, and code 13 is not in
+ * [isRecoverableSttError]'s recoverable set, so without this function it always
+ * reached [SttErrorAction.Fatal].
+ *
+ * The fallback is deliberately narrow: only ERROR_LANGUAGE_UNAVAILABLE, and only while
+ * [usingOnDeviceRecognizer] is true. The network recognizer downloads its language model
+ * server-side rather than depending on an on-device pack, so it is a genuinely different
+ * failure surface worth trying once. If the SAME code then arrives from the network
+ * recognizer, there is nowhere left to fall back to -- that IS fatal, which is exactly
+ * what falls out of this `when` once [AndroidSpeechToText.usingOnDeviceRecognizer] has
+ * been flipped to false by the first fallback (see [AndroidSpeechToText.fallbackToNetworkRecognizer]).
+ * Every other code keeps [isRecoverableSttError]'s existing recoverable/fatal split
+ * unchanged by BOTH values of [usingOnDeviceRecognizer] -- this function must not change
+ * behaviour for any code besides 13.
+ *
+ * Deliberately NOT included: ERROR_SERVER_DISCONNECTED (11) -- that is a network-recognizer
+ * failure (the streaming connection dropped), which on-device never raises and which a
+ * network-to-network "fallback" cannot fix; ERROR_LANGUAGE_NOT_SUPPORTED (12) -- per the
+ * platform docs this means the recognizer does not support the language AT ALL (not "not
+ * installed"), a stronger claim than 13, and Android's own doc for it does not carry 13's
+ * "supported, but not available currently (e.g. not downloaded)" language, so treating it
+ * the same would be an unverified guess rather than the narrowly-scoped fix asked for.
+ *
+ * Pure Kotlin over compile-time-constant error codes on purpose, so the mapping itself is
+ * unit-testable on the JVM (SttErrorMappingTest), exactly like [isRecoverableSttError].
+ */
+fun sttErrorAction(errorCode: Int, usingOnDeviceRecognizer: Boolean): SttErrorAction = when {
+    isRecoverableSttError(errorCode) -> SttErrorAction.Retry
+    errorCode == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE && usingOnDeviceRecognizer ->
+        SttErrorAction.FallbackToNetwork
+    else -> SttErrorAction.Fatal
 }
