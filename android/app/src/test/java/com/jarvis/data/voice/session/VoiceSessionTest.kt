@@ -1490,4 +1490,38 @@ class VoiceSessionTest {
         assertTrue(gateLines[0], gateLines[0].contains("send=false"))
         assertTrue(gateLines[0], gateLines[0].contains("why=tail"))
     }
+
+    /**
+     * Fix round 1 (task review, Important #2): [VoiceSession] is a long-lived instance --
+     * [VoiceCallViewModel] constructs it once and calls start()/stop() repeatedly across
+     * many calls. A call that ends MID-UTTERANCE (stop() here, but any of endSession's six
+     * paths applies equally) must not leave `firstPartialLogged` stuck true: the next
+     * call's real first partial is the exact datum this whole slice exists to capture, and
+     * silently skipping it would defeat the instrumentation for every call after the first.
+     */
+    @Test
+    fun timeline_firstPartial_resetsAcrossGenerations_soTheNextCallsFirstPartialIsLoggedToo() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.stt.listener!!.onPartialResult("ilk") // this generation's first partial -- logged
+
+        f.session.stop() // ends mid-utterance, before any final/relisten() ever ran
+
+        f.session.start() // a LATER generation (endSession's own compareAndSet also bumps
+        // the counter once on teardown, so this is not simply "+1" -- the point pinned
+        // here is only that it differs from the first, not the exact number).
+        f.transport.listener!!.onOpen()
+        f.stt.listener!!.onPartialResult("ikinci") // must ALSO log, not be silently skipped
+
+        val firstPartialLines = f.lines.filter { eventName(it) == "stt.first_partial" }
+        assertEquals(2, firstPartialLines.size)
+        val firstGen = firstPartialLines[0].substringAfter("gen=").substringBefore(' ').toInt()
+        val secondGen = firstPartialLines[1].substringAfter("gen=").substringBefore(' ').toInt()
+        assertTrue(
+            "expected the second call's generation to be later than the first's " +
+                "(first=$firstGen second=$secondGen)",
+            secondGen > firstGen,
+        )
+    }
 }

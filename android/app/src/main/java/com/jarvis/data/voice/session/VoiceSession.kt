@@ -237,8 +237,24 @@ class VoiceSession(
         }
 
         val gen = generation.incrementAndGet()
-        genStartMs = nowMs()
-        logEvent(gen, "start")
+        synchronized(lock) {
+            // Fix round 1 (task review, Important #1): genStartMs must be written and
+            // read for logging under the SAME lock every event's logEvent() uses --
+            // otherwise a racing start() on another thread can overwrite genStartMs for
+            // gen N+1 in the gap between another call's lock release and its (formerly
+            // unsynchronized) logger call, mislabeling that line's `t=` against the
+            // wrong generation's clock. The brief also mandates every VoiceSession
+            // emission sit inside a synchronized(lock) body; this is the one call site
+            // that did not.
+            genStartMs = nowMs()
+            // Fix round 1 (task review, Important #2): VoiceSession is a long-lived,
+            // reused instance -- a call that ends mid-utterance (any of endSession's six
+            // paths) must not leak this generation's "already logged a first partial"
+            // state into the NEXT call. Reset here, not just in relisten(), because a
+            // call can end before relisten() ever runs (e.g. stop() mid-partial).
+            firstPartialLogged = false
+            logEvent(gen, "start")
+        }
         _state.update { VoiceUiState(phase = VoicePhase.CONNECTING) }
 
         transport.connect(
@@ -643,14 +659,21 @@ class VoiceSession(
                 // DROPPED rather than sent: the server's speaker-ID buffer must never
                 // contain Jarvis's own voice. This is the structural half of the fix --
                 // it holds no matter what the recognizer decides about the text.
-                val (send, why) = synchronized(lock) {
+                // Fix round 1 (task review, Important #1): the log call must run under
+                // the SAME synchronized(lock) block that reads the gate state, not
+                // after it exits -- otherwise a racing stop()+start() between lock
+                // release and an unsynchronized logEvent() call could overwrite
+                // genStartMs for the NEXT generation first, mislabeling this line's
+                // `t=` against the wrong generation's clock.
+                val send = synchronized(lock) {
                     val gated = echoGuardActive()
-                    val reason = if (!gated) "clear" else if (jarvisSpeakingNow()) "speaking" else "tail"
-                    (!gated) to reason
-                }
-                if (send != lastGateSend) {
-                    lastGateSend = send
-                    logEvent(gen, "mic.gate", "send=$send why=$why")
+                    val why = if (!gated) "clear" else if (jarvisSpeakingNow()) "speaking" else "tail"
+                    val s = !gated
+                    if (s != lastGateSend) {
+                        lastGateSend = s
+                        logEvent(gen, "mic.gate", "send=$s why=$why")
+                    }
+                    s
                 }
                 if (send) transport.sendBinary(frame)
             }
