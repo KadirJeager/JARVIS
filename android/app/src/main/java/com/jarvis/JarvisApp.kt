@@ -94,7 +94,10 @@ class AppContainer(
         // Single AudioRecord (Task 2/3 of docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md):
         // one AndroidMicSource instance feeds BOTH the server's speaker-ID stream (via
         // MicSource, below) AND the on-device recognizer (via PcmTapSource, passed to
-        // AndroidSpeechToText) -- no second AudioRecord ever opens on this device.
+        // AndroidSpeechToText) -- not a second AudioRecord for STT during a call.
+        // (AndroidClipRecorder still opens its own separate AudioRecord for the
+        // device-enrollment flow, deliberately concurrent with a live call's mic --
+        // see its class doc. That is a distinct, documented flow, not this one.)
         val micSource = AndroidMicSource(context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
         VoiceSession(
             transport = OkHttpVoiceTransport(),

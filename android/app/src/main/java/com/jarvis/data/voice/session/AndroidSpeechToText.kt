@@ -12,6 +12,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import com.jarvis.data.voice.protocol.AUDIO_IN_RATE_HZ
 import java.io.IOException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicLong
@@ -27,7 +28,9 @@ import java.util.concurrent.atomic.AtomicLong
  * signal (see the long comment on [recognizeIntent] for why the earlier
  * EXTRA_AUDIO_SOURCE attempt never worked). [PfdFeedPolicy] decides, per [start] call,
  * whether to keep using the pipe: two consecutive dead cycles (no partial, no result,
- * < 1s consumed) flip it to legacy mode PERMANENTLY for that instance. A null
+ * AND either the writer was still stuck at cycle end or too few bytes were actually
+ * consumed -- see [PfdFeedPolicy.onCycleEnd]'s doc for why bytes written alone is not
+ * proof of consumption) flip it to legacy mode PERMANENTLY for that instance. A null
  * [tapSource] is the same legacy mode from the very first call -- the safety hatch if
  * PFD needs to be disabled entirely.
  *
@@ -39,7 +42,10 @@ import java.util.concurrent.atomic.AtomicLong
  * callback has not fired yet, so two back-to-back [listen] calls never leak a pipe or a
  * writer thread. [activeCycle] is nulled out FIRST inside [endCurrentPfdCycle], before
  * any teardown work runs -- that ordering is what makes cleanup idempotent, not a
- * separate flag.
+ * separate flag. Within that teardown, our own `readFd` copy is closed BEFORE the
+ * writer thread is joined (not after): see the inline comment at that call site for
+ * why the reverse order silently guaranteed the join's full timeout in exactly the
+ * `writerStuck` case it exists to detect.
  *
  * Threading: every `SpeechRecognizer` call is marshalled onto the main thread, because
  * [VoiceSession] invokes this class from the transport's reader thread while the platform
@@ -92,8 +98,11 @@ class AndroidSpeechToText(
     private var hadPartial = false
     private var hadResult = false
 
-    // Main-thread only. Logged once -- the first time this instance falls back to
-    // (or never attempts) the PFD feed -- so repeated legacy cycles do not spam logcat.
+    // Main-thread only. Logged once per start()/destroy() cycle -- the first time
+    // this instance falls back to (or never attempts) the PFD feed after a given
+    // start() -- so repeated legacy cycles do not spam logcat. destroy() resets it,
+    // so a restarted instance (a fresh start() after destroy()) gets one fresh log
+    // line of its own rather than staying permanently silent.
     private var loggedFallback = false
 
     // Written by start()/destroy() (any thread), read from main-thread callbacks.
@@ -191,7 +200,7 @@ class AndroidSpeechToText(
                     recognizeIntent
                 }
             } else {
-                logFallbackOnce(tap)
+                logFallbackOnce(tap, activePolicy)
                 recognizeIntent
             }
             // null when start() has not completed or declared a fatal error -- the
@@ -252,7 +261,11 @@ class AndroidSpeechToText(
         // readFd is closed only in endCurrentPfdCycle().
         return Intent(recognizeIntent).apply {
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
-            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, 16000)
+            // AUDIO_IN_RATE_HZ, not a separate 16000 literal: this must always match
+            // the rate AndroidMicSource was actually started at (VoiceSession.kt calls
+            // mic.start(AUDIO_IN_RATE_HZ)) -- one concept, one spelling. A drifted
+            // literal here would silently lie to the recognizer about the feed's rate.
+            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, AUDIO_IN_RATE_HZ)
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
         }
@@ -312,43 +325,88 @@ class AndroidSpeechToText(
         // reads from again; harmless, since a fresh queue is created per cycle.
         cycle.queue.clear()
         cycle.queue.offer(POISON_PILL)
-        try {
-            cycle.writerThread.join(WRITER_JOIN_TIMEOUT_MS)
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-        if (cycle.writerThread.isAlive) {
-            // Writer is blocked inside a blocking write() to the pipe (the recognizer
-            // never drained it) -- plain java.io writes are not interruptible, so the
-            // poison pill cannot preempt this. The thread is a daemon, so it cannot
-            // outlive the process, and its own `.use` block still closes writeFd
-            // whenever the write unblocks or the pipe breaks: a documented, bounded
-            // risk, not a hang in this call.
-            Log.w(TAG, "tl ev=pfd.writerJoinTimeout gen=${cycle.gen}")
-        }
+
+        // Close OUR copy of the read end BEFORE joining the writer -- order matters.
+        // As long as we hold readFd open, the pipe's read-end refcount can never
+        // reach zero, so a writer blocked inside write() can never receive EPIPE no
+        // matter what the recognizer process does with ITS copy; joining first (the
+        // original order) meant the join below was guaranteed to burn its full
+        // timeout in exactly the PFD_IGNORED case it exists to detect. Closing here,
+        // not right after startListening(), is deliberate: the Binder hand-off race
+        // that forces a LATE close (RecognizerPipeProbeTest's ERROR:5 lesson) only
+        // applies to closing immediately after startListening() returns, while that
+        // hand-off is still in flight -- by cycle end (a terminal callback already
+        // fired, or destroy() was called) it is long since complete.
         try {
             cycle.readFd.close()
         } catch (io: IOException) {
             Log.w(TAG, "tl ev=pfd.readFdCloseFailed msg=${io.message}")
         }
 
-        policy?.onCycleEnd(hadPartial, hadResult, cycle.bytesWritten.get())
+        try {
+            cycle.writerThread.join(WRITER_JOIN_TIMEOUT_MS)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        // The authoritative "nobody was reading" signal for PfdFeedPolicy: with
+        // readFd already closed above, a writer that is STILL alive after the join
+        // can only mean a genuine second reader (the recognizer's own Binder-duplicated
+        // fd) is still holding the pipe open without draining it -- our own reference
+        // is gone, so this is not an artifact of our own cleanup ordering. A stuck
+        // writer means the cycle is dead regardless of how many bytes the kernel pipe
+        // buffer silently absorbed (see PfdFeedPolicy.MIN_CONSUMED_BYTES's doc).
+        val writerStuck = cycle.writerThread.isAlive
+        if (writerStuck) {
+            // Kept at a low bound (see WRITER_JOIN_TIMEOUT_MS) rather than moved off
+            // the main thread: PfdFeedPolicy and this class's own cycle bookkeeping
+            // are deliberately main-thread-only (see class doc), and calling
+            // policy.onCycleEnd() from a background thread would race the main
+            // thread's own policy.shouldUsePfd() reads on the very next listen().
+            // The thread is a daemon, so it cannot outlive the process, and its own
+            // `.use` block still closes writeFd whenever the write unblocks or the
+            // pipe breaks -- a documented, bounded risk, not a hang in this call.
+            Log.w(TAG, "tl ev=pfd.writerJoinTimeout gen=${cycle.gen}")
+        }
+
+        policy?.onCycleEnd(hadPartial, hadResult, cycle.bytesWritten.get(), writerStuck)
         Log.i(TAG, "tl ev=pfd.cycle ${policy?.cycleSummary()} drops=${cycle.drops.get()}")
     }
 
-    private fun logFallbackOnce(tap: PcmTapSource?) {
+    private fun logFallbackOnce(tap: PcmTapSource?, activePolicy: PfdFeedPolicy?) {
         if (loggedFallback) return
         loggedFallback = true
-        val reason = if (tap == null) "no_tap_source" else "policy_flipped"
+        // Three distinct reasons this call takes the legacy-intent branch -- only
+        // the last one is an actual policy flip; the middle one (tap present but no
+        // policy yet) is listen() racing ahead of start()'s main.post{} completing,
+        // or landing after destroy() cleared policy -- not a PfdFeedPolicy decision
+        // at all, so it must not be reported as "policy_flipped".
+        val reason = when {
+            tap == null -> "no_tap_source"
+            activePolicy == null -> "policy_not_ready"
+            else -> "policy_flipped"
+        }
         Log.i(TAG, "tl ev=pfd.fallback reason=$reason")
     }
 
     private companion object {
         const val TAG = "AndroidSpeechToText"
 
-        // Matches PfdFeedPolicy's own writer queue sizing from the design doc.
+        // Frames buffered between the tap (mic capture thread) and the writer
+        // (pipe I/O thread) before offer() starts rejecting and counting drops.
         const val PFD_QUEUE_CAPACITY = 32
-        const val WRITER_JOIN_TIMEOUT_MS = 500L
+
+        // Bounds how long endCurrentPfdCycle() can stall the MAIN thread waiting
+        // for the writer to finish (it runs inside onResults()/onError(), both
+        // main-thread callbacks -- see the class doc on why cycle teardown stays
+        // on the main thread rather than moving to a background executor). Kept
+        // low rather than the original 500ms: after the readFd-before-join fix
+        // above, the writer finishes in low single-digit milliseconds in the
+        // common case (queue drains fast; a healthy recognizer either already
+        // drained everything or our readFd close unblocks a stalled write via
+        // EPIPE), so 100ms is generous headroom for that path while still
+        // bounding the rare truly-wedged-write case (see the writerStuck comment
+        // below) instead of reproducing the original 500ms-per-turn stall.
+        const val WRITER_JOIN_TIMEOUT_MS = 100L
 
         // Sentinel compared by reference (===), never by content -- a real captured
         // frame is never this exact array instance, so there is no collision risk
