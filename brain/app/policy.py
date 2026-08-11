@@ -159,7 +159,11 @@ def _decide_voice(zone: str, trust_level: str, tier: str, signals: VoiceSignals)
 
 TrustProvider = Callable[[Any], VoiceSignals | None]
 
-# (tool_name, args, tool_context) -> modele gidecek Türkçe metin.
+# (tool_name, args, tool_context, *, actor, trust_level) -> modele gidecek
+# Türkçe metin. `actor`/`trust_level` Görev 2 (Onay Kartı 2.0) ile eklendi:
+# sink'in kendisi (main._approval_sink) bunları göremez -- yalnızca policy
+# callback'in zaten hesapladığı değerlerdir, buradan aynen taşınır (Callable
+# tipi kwonly parametreleri ifade edemediği için burada belgelenir).
 ApprovalSink = Callable[[str, dict, Any], str]
 
 
@@ -203,7 +207,8 @@ RED_BLOCK_TEMPLATE = (
 
 
 def _red_block_text(tool_name: str, args: dict[str, Any],
-                    tool_context, approval_sink: "ApprovalSink | None") -> str:
+                    tool_context, approval_sink: "ApprovalSink | None",
+                    *, actor: str, trust_level: str | None) -> str:
     """Kırmızı bölge engelinin modele dönecek metni (spec §5, Faz Y3).
 
     `approval_sink` YOKSA metin Y3 öncesiyle BİREBİR aynıdır — guest_gate ve
@@ -212,10 +217,17 @@ def _red_block_text(tool_name: str, args: dict[str, Any],
     Sink varsa bir onay kaydı kurar ve "kart gönderildi" metnini döndürür. Sink
     FIRLARSA eski metne düşülür: onayın kurulamaması bir aracın çalışmasına ASLA
     yol açmaz (fail-closed). Her iki dalda da bu fonksiyonun dönüşü bir METİNDİR,
-    yani callback None DEĞİL bir sonuç döndürür ve ADK aracı çalıştırmaz."""
+    yani callback None DEĞİL bir sonuç döndürür ve ADK aracı çalıştırmaz.
+
+    `actor`/`trust_level` (Görev 2) buraya `policy_callback`'ten TAŞINIR, yeniden
+    HESAPLANMAZ: sink'in kendi başına bir tool_context'ten trust_level'ı
+    yeniden okuması sesli çağrılarda YANLIŞ olurdu -- voice_trust'ın sinyalleri
+    ADK session state'ine yazılmaz (bkz. voice_trust.py), bu yüzden
+    policy_callback'in zaten hesapladığı değer tek doğru kaynaktır."""
     if approval_sink is not None:
         try:
-            return approval_sink(tool_name, args, tool_context)
+            return approval_sink(tool_name, args, tool_context,
+                                 actor=actor, trust_level=trust_level)
         except Exception:
             logging.exception(
                 "policy: onay kartı oluşturulamadı tool=%s -- kırmızı engel metnine "
@@ -288,7 +300,8 @@ def make_policy_callback(audit: AuditWriter, trust_provider: TrustProvider | Non
             # Sayaç yazımı da asla aracın önünü kesmez — logla, geç.
             _count_tool_call(audit)
         if decision == "block":
-            return {"result": _red_block_text(tool.name, args, tool_context, approval_sink)}
+            return {"result": _red_block_text(tool.name, args, tool_context, approval_sink,
+                                              actor=actor, trust_level=trust_level)}
         if decision == "confirm":
             if signals and signals.cm_ok is False:
                 confirm_msg = (

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from app import config, trust
-from app.policy import check_zone, make_policy_callback
+from app.policy import ACTOR_ORCHESTRATOR, check_zone, make_policy_callback
 
 
 class FakeAudit:
@@ -242,16 +242,18 @@ SINK_TEXT = "ONAY KARTI GÖNDERİLDİ: Kadir'in kararını bekliyorum."
 
 
 class RecordingSink:
-    """`(tool_name, args, tool_context) -> str` imzalı sahte sink; çağrıları
-    sayar (sarı/yeşil dallarda "hiç çağrılmadı" ancak sayılırsa kanıtlanır)."""
+    """`(tool_name, args, tool_context, *, actor, trust_level) -> str` imzalı
+    sahte sink; çağrıları sayar (sarı/yeşil dallarda "hiç çağrılmadı" ancak
+    sayılırsa kanıtlanır). `actor`/`trust_level` Görev 2 (Onay Kartı 2.0) ile
+    eklendi: policy_callback bunları artık sink'e taşıyor."""
 
     def __init__(self, text=SINK_TEXT, raises=None):
         self.calls = []
         self._text = text
         self._raises = raises
 
-    def __call__(self, tool_name, args, tool_context):
-        self.calls.append((tool_name, args, tool_context))
+    def __call__(self, tool_name, args, tool_context, *, actor=None, trust_level=None):
+        self.calls.append((tool_name, args, tool_context, actor, trust_level))
         if self._raises is not None:
             raise self._raises
         return self._text
@@ -286,7 +288,23 @@ def test_sink_receives_the_tool_name_args_and_tool_context():
 
     cb(_tool("unknown_danger"), {"reminder_id": "r1"}, ctx)
 
-    assert sink.calls == [("unknown_danger", {"reminder_id": "r1"}, ctx)]
+    assert sink.calls == [("unknown_danger", {"reminder_id": "r1"}, ctx,
+                           ACTOR_ORCHESTRATOR, trust.HIGH)]
+
+
+def test_sink_receives_actor_and_trust_level_from_the_callback():
+    """Görev 2: sink kendi başına trust_level'ı YENİDEN OKUMAZ (bu, sesli
+    çağrılarda yanlış olurdu -- voice_trust sinyalleri tool_context.state'e
+    yazılmaz); policy_callback'in zaten hesapladığı değer aynen taşınır."""
+    audit = FakeAudit()
+    sink = RecordingSink()
+    cb = make_policy_callback(audit, approval_sink=sink, actor="factory:tpl#i1")
+
+    cb(_tool("unknown_danger"), {}, _ctx(trust.LOW))
+
+    [(_tool_name, _args, _ctx_arg, actor, trust_level)] = sink.calls
+    assert actor == "factory:tpl#i1"
+    assert trust_level == trust.LOW
 
 
 def test_sink_failure_falls_back_to_the_block_text_and_the_tool_still_does_not_run(caplog):

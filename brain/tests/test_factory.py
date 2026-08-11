@@ -127,7 +127,7 @@ def test_a_red_tool_is_plainly_blocked_and_no_approval_card_is_created():
     hiç uğramadığındandır."""
     db = FakeDB()
 
-    def real_sink(tool_name, args, tool_context):
+    def real_sink(tool_name, args, tool_context, *, actor=None, trust_level=None):
         approvals.request(db, user_id=USER, kind=approvals.KIND_TOOL_CALL,
                           title=f"'{tool_name}' çalıştırılsın mı?", detail="detay",
                           tool_name=tool_name, tool_args=args, zone=config.ZONE_RED,

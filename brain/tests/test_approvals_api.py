@@ -23,7 +23,7 @@ from google.adk.sessions import InMemorySessionService
 
 import app.auth as auth_mod
 import app.main as main_mod
-from app import approvals, config, fcm, messages
+from app import approvals, config, fcm, messages, policy, trust
 from app.agent import build_agent
 from app.auth import require_user
 from app.memory import Memory
@@ -75,6 +75,15 @@ class CountingExecutor:
     def __call__(self, tool_args, user_id):
         self.calls.append((tool_args, user_id))
         return self._result
+
+
+class _NullAudit:
+    """`policy.make_policy_callback`'in gerektirdiği AuditWriter'ın en ufak
+    hâli -- Görev 2'nin sink testi audit_log'un İÇERİĞİYLE değil, o içeriğin
+    onay kaydına da ULAŞMASIYLA ilgileniyor."""
+
+    def write(self, entry):
+        pass
 
 
 @pytest.fixture()
@@ -442,6 +451,32 @@ def test_sink_writes_exactly_one_chat_row_when_there_are_no_fcm_tokens(monkeypat
     rows = _chat_rows(db)
     assert len(rows) == 1, f"onay sohbete {len(rows)} satır düşürdü, 1 olmalı"
     assert rows[0]["kind"] == "approval"
+
+
+def test_sink_populates_context_from_the_policy_callback(wired):
+    """Görev 2 (Onay Kartı 2.0), UÇTAN UCA nokta: bir kırmızı bölge engeli --
+    sink'i DOĞRUDAN değil, GERÇEK policy.make_policy_callback üzerinden
+    tetiklenerek -- kimin istediğini, neden istendiğini ve geri alınıp
+    alınamayacağını ZATEN bilen bir onay üretmeli. Bu bağlam bugüne kadar
+    policy.write_audit içinde hesaplanıp audit_log'a yazılıyor, sink'e hiç
+    ulaşmadan düşüyordu (app/policy.py:59-97, app/main.py:186-220)."""
+    sink, db, _sent = wired
+    cb = policy.make_policy_callback(_NullAudit(), approval_sink=sink)
+    tool_context = SimpleNamespace(
+        session=SimpleNamespace(user_id=USER, id=SESSION),
+        state={config.TRUST_STATE_KEY: trust.MEDIUM})
+
+    # "send_message" config.TOOL_ZONES/TOOL_REVERSIBILITY'de yok -> zone
+    # fail-closed RED'e düşer (decision="block") ve reversible fail-closed
+    # False'a düşer -- tam olarak Task 1'in raporundaki senaryo.
+    cb(SimpleNamespace(name="send_message"), {"to": "Ayşe"}, tool_context)
+
+    approval_id = list(db.collection(approvals.COLLECTION).docs)[0]
+    doc = approvals.get(db, approval_id, USER)
+    assert doc["actor"]  # non-empty (policy.ACTOR_ORCHESTRATOR varsayılanı)
+    assert doc["trust_level"] == trust.MEDIUM
+    assert doc["cause"] == "red_zone"
+    assert doc["reversible"] is False  # send_message
 
 
 # ---------------------------------------------------------------------------

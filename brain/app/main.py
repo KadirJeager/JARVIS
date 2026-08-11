@@ -143,6 +143,12 @@ APPROVAL_PENDING_REPLY = (
     "kartı tekrar oluşturma."
 )
 
+# `_approval_sink` (Görev 2, Onay Kartı 2.0) YALNIZCA decision == "block"
+# dalında çağrılır ve `_decide`/`_decide_voice` "block" döndüren TEK dal
+# `zone == config.ZONE_RED`'dir (app/policy.py) -- yani bu sink'in kurduğu her
+# onay kaydının nedeni sabittir, ayrıca taşınmaya gerek yoktur.
+CAUSE_RED_ZONE = "red_zone"
+
 
 def _approval_card_texts(tool_name: str, args: dict) -> tuple[str, str, str]:
     """Onay kartının üç Türkçe metni: başlık, detay, sohbete düşecek kart.
@@ -181,9 +187,25 @@ def _approval_sink():
        hıçkırığı yüzünden çoktan kurulmuş bir onayı çöpe atmak daha kötüdür.
        (run_turn'deki conversations.touch sarmalayıcısıyla aynı sözleşme.)
     3. push — BEST EFFORT, aynı gerekçe. Kart zaten sohbette (§7).
+
+    `actor`/`trust_level` (Görev 2) `policy.policy_callback`'ten TAŞINIR --
+    sink'in kendisi tool_context'ten yeniden hesaplamaz, çünkü sesli
+    çağrılarda tool_context.state trust_level'ı taşımaz (voice_trust.py) ve
+    yeniden okumak policy'nin zaten bildiği değeri sessizce yanlışlardı.
+    `cause` sabittir (CAUSE_RED_ZONE): bu sink'e ulaşan HER çağrı zaten kırmızı
+    bölge engelidir. `operand` -- "onaylanan TEK somut şey" -- burada
+    KASITLI OLARAK None bırakılır: bu sink jenerik her `tool_call` için
+    çalışır ve hangi argümanın "şey" hangisinin "ayar" olduğunu yalnızca o
+    aracın kendi çağrı yeri bilir (spec'in kendi gerekçesi -- "request()
+    inventing 'the first string argument' would be a heuristic that is wrong
+    exactly when it matters"). `reversible` ise `tool_name`'in KENDİSİNDEN
+    (bu sink'in bloke ettiği asıl araç) `config.is_reversible` ile
+    hesaplanır -- `tool_grant`/`agent_grant` onaylarının tuzağı burada
+    YOKTUR çünkü bu sink SADECE kind=tool_call kurar.
     """
 
-    def sink(tool_name: str, args: dict, tool_context) -> str:
+    def sink(tool_name: str, args: dict, tool_context, *,
+            actor: str | None = None, trust_level: str | None = None) -> str:
         # ADK'nın public yüzeyi: ReadonlyContext.session -> Session.user_id/.id
         # (kaynaktan doğrulaması app/voice_trust.py'de; tools.get_speaker_status
         # da aynısını kullanır). Beklenmedik bir şekil AttributeError fırlatır
@@ -217,6 +239,10 @@ def _approval_sink():
             tool_args=args,
             zone=config.ZONE_RED,
             session_id=session_id,
+            actor=actor,
+            trust_level=trust_level,
+            cause=CAUSE_RED_ZONE,
+            reversible=config.is_reversible(tool_name),
         )
 
         try:

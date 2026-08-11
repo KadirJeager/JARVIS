@@ -185,6 +185,84 @@ def test_get_returns_own_approval_and_none_for_others():
 
 
 # ---------------------------------------------------------------------------
+# karar bağlamı (Görev 2, Onay Kartı 2.0): actor/trust_level/cause/operand/
+# reversible request()'e taşınır, _project() geri okur.
+# ---------------------------------------------------------------------------
+
+
+def test_request_stores_the_decision_context():
+    db = FakeDB()
+    approval_id = approvals.request(
+        db, user_id=USER, kind=approvals.KIND_TOOL_CALL, title="t",
+        detail="'send_message' kırmızı bölgede — onay gerekiyor.",
+        tool_name="send_message", tool_args={"to": "Ayşe", "text": "selam"},
+        zone=config.ZONE_RED, session_id="s1",
+        actor="orchestrator", trust_level="MEDIUM",
+        cause="red_zone", operand="Ayşe", reversible=False,
+    )
+    doc = approvals.get(db, approval_id, USER)
+    assert doc["actor"] == "orchestrator"
+    assert doc["trust_level"] == "MEDIUM"
+    assert doc["cause"] == "red_zone"
+    assert doc["operand"] == "Ayşe"
+    assert doc["reversible"] is False
+
+
+def test_documents_written_before_this_change_still_project():
+    """Old docs lack the new keys entirely; reading one must not raise and
+    must report the fields as unknown rather than inventing a default."""
+    db = FakeDB()
+    raw = {"user_id": USER, "kind": "tool_call", "title": "eski",
+           "status": approvals.STATUS_PENDING, "created_at": _now(),
+           "expires_at": _at(60)}
+    db.collection(approvals.COLLECTION).document("legacy-1").set(raw)
+    doc = approvals.get(db, "legacy-1", USER)
+    assert doc["operand"] is None
+    assert doc["reversible"] is None
+    assert doc["actor"] is None
+    assert doc["trust_level"] is None
+    assert doc["cause"] is None
+
+
+def test_request_omits_unprovided_context_keys_entirely():
+    """§ constraint: absence, not a sentinel None -- a caller that supplies
+    none of the five new kwargs (every pre-Task-2 caller) must produce a doc
+    with NO actor/trust_level/cause/operand/reversible key at all, exactly
+    like a legacy document, not a doc full of explicit `None`s."""
+    db = FakeDB()
+    approval_id = _request(db)
+    raw = _doc(db, approval_id)
+    for key in ("actor", "trust_level", "cause", "operand", "reversible"):
+        assert key not in raw
+
+
+def test_tool_grant_reversible_is_derived_from_the_proposed_capabilitys_own_name():
+    """Carry-forward from Task 1's review: `tool_grant`/`agent_grant` approval
+    docs store the PROPOSED capability's own name in `tool_name`
+    (tools.py:355, :472), NOT "propose_tool"/"propose_agent". A correct caller
+    derives `reversible` from THAT name -- an unknown proposed capability
+    correctly comes out False (fail-closed default in config.TOOL_REVERSIBILITY).
+
+    The trap this pins: `propose_tool`/`propose_agent` are THEMSELVES declared
+    reversible=True in config.TOOL_REVERSIBILITY (proposing only writes a
+    pending record) -- calling is_reversible("propose_tool") for a tool_grant
+    approval, instead of is_reversible(<proposed capability name>), would
+    wrongly badge an MCP-server-granting card as reversible and (after Task 4)
+    give it the softer reversible-expiry treatment."""
+    db = FakeDB()
+    proposed_name = "github_mcp_list_prs"  # unknown to TOOL_REVERSIBILITY
+    approval_id = approvals.request(
+        db, user_id=USER, kind=approvals.KIND_TOOL_GRANT, title="t", detail="d",
+        tool_name=proposed_name, tool_args={}, zone=config.ZONE_GREEN,
+        session_id="s1", reversible=config.is_reversible(proposed_name),
+    )
+    assert approvals.get(db, approval_id, USER)["reversible"] is False
+    # The two facts that make this a real trap, not a vacuous one:
+    assert config.is_reversible("propose_tool") is True
+    assert config.is_reversible("propose_agent") is True
+
+
+# ---------------------------------------------------------------------------
 # decide() — onay / ret
 # ---------------------------------------------------------------------------
 

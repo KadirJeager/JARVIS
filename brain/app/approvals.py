@@ -138,7 +138,12 @@ def _is_expired(doc: dict, parsed_now: datetime) -> bool:
 
 
 def _project(approval_id: str, d: dict) -> dict:
-    """Onay dokümanının okuyucuya (uç, kart, test) verilen biçimi."""
+    """Onay dokümanının okuyucuya (uç, kart, test) verilen biçimi.
+
+    Karar bağlamı (actor/trust_level/cause/operand/reversible, Görev 2)
+    `.get()` ile okunur: bu değişiklikten ÖNCE yazılmış dokümanlarda anahtarlar
+    hiç yok -- `.get()` yoklukta None döner, bir varsayılan İCAT ETMEZ (eski
+    kayıtlar hâlâ okunabilir kalsın diye bilinçli)."""
     return {
         "id": approval_id,
         "user_id": d.get("user_id"),
@@ -155,6 +160,11 @@ def _project(approval_id: str, d: dict) -> dict:
         "decided_at": d.get("decided_at"),
         "decided_by": d.get("decided_by"),
         "outcome": d.get("outcome"),
+        "actor": d.get("actor"),
+        "trust_level": d.get("trust_level"),
+        "cause": d.get("cause"),
+        "operand": d.get("operand"),
+        "reversible": d.get("reversible"),
     }
 
 
@@ -200,7 +210,10 @@ def _normalize_args(tool_args: dict | None) -> dict:
 def request(db, *, user_id: str, kind: str, title: str, detail: str,
             tool_name: str | None = None, tool_args: dict | None = None,
             zone: str, session_id: str, now_fn=_now,
-            ttl_minutes: int | None = None, doc_id: str | None = None) -> str:
+            ttl_minutes: int | None = None, doc_id: str | None = None,
+            actor: str | None = None, trust_level: str | None = None,
+            cause: str | None = None, operand: str | None = None,
+            reversible: bool | None = None) -> str:
     """Bekleyen bir onay kaydı kurar, onay id'sini döner.
 
     `tool_args` değerleri stringify edilip 500 karakterde kesilir —
@@ -215,7 +228,16 @@ def request(db, *, user_id: str, kind: str, title: str, detail: str,
     yürütücü sözleşmesi `(tool_args, user_id)` — yürütücü onay id'sini başka
     hiçbir yerden göremez. Alternatif (id öğrenildikten sonra dokümana geri
     yazmak) ikinci bir yazma ve yarış penceresi demekti.
-    """
+
+    `actor`/`trust_level`/`cause`/`operand`/`reversible` (Görev 2, Onay Kartı
+    2.0) kararı DOĞURAN bağlamdır -- bu fonksiyon onları HESAPLAMAZ, yalnızca
+    çağıranın (policy callback'in veya bir öneri yolunun) zaten hesapladığı
+    değerleri taşır. Hepsi None varsayılanlıdır ki her mevcut çağıran (Y3/Y4
+    dönemi) değişmeden çalışsın. Yalnızca GERÇEKTEN verilen (None olmayan)
+    alanlar dokümana yazılır -- eksik alan bir sentinel `None` değeri DEĞİL,
+    anahtarın kendisinin YOKLUĞUdur; böylece bu değişiklikten önce yazılmış
+    dokümanlarla yeni dokümanlar yokluk ile ayrışır, sahte bir varsayılanla
+    değil (`_project` bunu `.get()` ile okur)."""
     if not user_id or not isinstance(user_id, str):
         raise ValueError("onay için user_id gerekli")
     if not title or not isinstance(title, str):
@@ -246,6 +268,13 @@ def request(db, *, user_id: str, kind: str, title: str, detail: str,
         "decided_by": None,
         "outcome": None,
     }
+    # Karar bağlamı: yalnızca GERÇEKTEN verilen (None olmayan) alanlar yazılır
+    # -- bkz. docstring. Sabit bir `None` sentinel'i her mevcut çağıranın
+    # dokümanına da düşerdi ve eski/yeni dokümanları ayrıştıran yokluk sinyalini
+    # yok ederdi.
+    context = {"actor": actor, "trust_level": trust_level, "cause": cause,
+               "operand": operand, "reversible": reversible}
+    doc.update({k: v for k, v in context.items() if v is not None})
     if doc_id:
         ref = db.collection(COLLECTION).document(doc_id)
         ref.create(doc)          # AlreadyExists çağırana taşınır: aynı id iki kez yazılamaz
