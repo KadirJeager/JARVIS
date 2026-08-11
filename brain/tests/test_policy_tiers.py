@@ -69,6 +69,25 @@ def test_every_zoned_tool_declares_reversibility():
     assert missing == [], f"reversibility undeclared for: {missing}"
 
 
+def test_reversibility_pin_snapshot():
+    """Class guardian test for the False half of TOOL_REVERSIBILITY: unlike
+    the True entries (mostly exercised by other tests), nothing else in the
+    suite fails if one of these security-carrying tools silently flips to
+    True. Pin them individually so that flip is caught here."""
+    # Deletions: internal storage, but the deleted record's identity/history
+    # cannot be recovered by any other call.
+    assert config.TOOL_REVERSIBILITY["cancel_reminder"] is False
+    assert config.TOOL_REVERSIBILITY["unwatch_repo"] is False
+    # Destructive overwrite: merge=True replaces prior field values with no
+    # call anywhere that remembers or restores the old value.
+    assert config.TOOL_REVERSIBILITY["update_user_profile"] is False
+    # Third-party data egress: cannot be recalled once sent, regardless of zone.
+    assert config.TOOL_REVERSIBILITY["consult_gemini"] is False
+    # Executes a real agent run whose granted tools can include consult_gemini;
+    # the composite's irreversibility is represented only here.
+    assert config.TOOL_REVERSIBILITY["spawn_specialist"] is False
+
+
 def test_decide_voice_red_zone_always_blocks():
     """RED zone tools must always block regardless of trust, tier, or cm_ok."""
     sig = VoiceSignals(trust_level=trust.HIGH, voice_score=0.95, cm_ok=True)

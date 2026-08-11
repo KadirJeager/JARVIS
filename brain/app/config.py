@@ -179,21 +179,36 @@ DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 TOOL_REVERSIBILITY = {
     "get_user_profile": True,        # read-only
     "search_memory": True,           # read-only
-    "remember_fact": True,           # additive memory write (facts collection)
-    "add_lesson": True,              # additive memory write (lessons collection)
-    "update_user_profile": True,     # in-place merge write, internal only
+    "remember_fact": True,           # additive memory write (facts collection):
+                                      # .add() only appends, nothing is overwritten
+    "add_lesson": True,              # additive memory write (lessons collection):
+                                      # .add() only appends, nothing is overwritten
+    # update_user_profile does profile.set(patch, merge=True) (memory.py:117).
+    # merge is TOP-LEVEL: every key in patch overwrites its previous value and
+    # the old value is stored nowhere -- no call can restore it because JARVIS
+    # never remembered it. That is the same argument that makes unwatch_repo
+    # False: an internal-only effect that destroys prior state with no
+    # recovery path is irreversible, contrast with remember_fact/add_lesson
+    # above, whose .add() only appends and never overwrites.
+    "update_user_profile": False,
     "get_speaker_status": True,      # read-only
     "watch_repo": True,              # creates a watch record, internal only
     # unwatch_repo deletes the Firestore watch doc outright (ref.delete()).
-    # watch_repo could re-add a similarly-configured watch, but the deleted
-    # record's identity/history (last_check, etags) is gone -- deletions are
-    # conservatively irreversible per the rule above.
+    # watch_repo can re-add a watch, but only with an EMPTY baseline (last_check,
+    # etags all None per app/tools.py:117-128) -- so any release/commit that
+    # landed during the gap is never surfaced. That is real information loss,
+    # not just a discarded identity: irreversible.
     "unwatch_repo": False,
     "list_watched_repos": True,      # read-only
-    "get_repo_updates": True,        # read-only aside from an internal "surfaced" flag flip
+    # get_repo_updates flips each returned event's "surfaced" flag to True
+    # (tools.py:192) so it isn't returned again. That flip is ONE-WAY -- no
+    # tool un-surfaces an event -- but nothing is destroyed or sent outside
+    # JARVIS, so the tool as a whole stays reversible.
+    "get_repo_updates": True,
     # consult_gemini sends the question/context OUT to a third-party model.
-    # It writes nothing locally, but the data egress itself cannot be
-    # recalled -- irreversible even though the zone is only YELLOW.
+    # Zone != reversibility: it writes nothing locally and its zone is only
+    # YELLOW (no card required to run), but the content egress itself cannot
+    # be recalled once it has left JARVIS -- irreversible regardless of zone.
     "consult_gemini": False,
     "check_my_vitals": True,         # read-only self-report
     "set_reminder": True,            # creates a reminder record, internal only
@@ -207,19 +222,31 @@ TOOL_REVERSIBILITY = {
     # Kadir's decision or TTL expiry, so the record itself is undoable.
     "propose_tool": True,
     "propose_agent": True,
-    # spawn_specialist actually EXECUTES a bounded specialist run (its own
-    # tool calls, cost, possible side effects). Each nested tool call is
-    # separately gated by its own zone/reversibility, but the spawn+run
-    # action itself is a completed execution, not a storage record -- it
-    # cannot be undone as a unit. Irreversible even though the zone is only
-    # YELLOW.
+    # spawn_specialist EXECUTES a bounded agent run, and that agent's tool
+    # set is not confined to the safe stuff: agent_registry.validate_definition
+    # hands a persistent agent every GREEN/YELLOW builtin, including
+    # consult_gemini (agent_registry.py:120-136) -- and once running, those
+    # inner calls fall to plain "allow" at HIGH trust (no separate approval
+    # card per call). So this entry is the ONLY place the composite action's
+    # reversibility is represented: a spawned agent can leak content to a
+    # third party with nothing else in the system flagging it. Irreversible
+    # even though the zone is only YELLOW.
     "spawn_specialist": False,
 }
 DEFAULT_REVERSIBILITY = False  # unknown tool = irreversible (fail-closed)
 
 
 def is_reversible(tool_name: str) -> bool:
-    """Resolve a tool's reversibility. Unknown tool fails closed to False."""
+    """Resolve a tool's reversibility. Unknown tool fails closed to False.
+
+    Unlike check_zone (policy.py), there is no zone_resolver here: a
+    registry/MCP tool name (e.g. "github_mcp_list_prs") is not in
+    TOOL_REVERSIBILITY and has no prefix-based resolver, so it silently
+    falls to DEFAULT_REVERSIBILITY (False). Fail-closed and safe today, but
+    after Task 4 it means every MCP tool's approval denies outright on
+    timeout rather than getting the softer reversible-expiry treatment --
+    a product decision, written down here rather than left to be discovered.
+    """
     return TOOL_REVERSIBILITY.get(tool_name, DEFAULT_REVERSIBILITY)
 
 
