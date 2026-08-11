@@ -35,6 +35,9 @@ interface PcmTapSource {
      * suspending tap body directly delays the next PCM frame reaching the
      * primary consumer. Tap bodies must be a non-blocking operation (e.g. a
      * queue offer that drops on a full queue), never a suspend point.
+     *
+     * A throwing tap is caught by the implementation, logged once, and cleared --
+     * it is never allowed to propagate out of the capture read path.
      */
     fun setTap(tap: ((ByteArray) -> Unit)?)
 }

@@ -139,8 +139,25 @@ class AndroidMicSource(private val audioManager: AudioManager) : MicSource, PcmT
         // gating -- parity with a recognizer that owns its own microphone. Invoked here
         // (not in VoiceSession) so the tap is upstream of ALL session-level decisions,
         // not just the ones VoiceSession happens to apply after reading.
+        //
+        // Guarded: this call site is where PcmTapSource's "without disturbing the
+        // primary read path" promise is actually enforced. VoiceSession.startMicLoop()
+        // has no try/catch around readFrame() and its scope has no
+        // CoroutineExceptionHandler, so a throwing tap would otherwise propagate out of
+        // this coroutine and crash the process mid-call. A single volatile read into
+        // [t] avoids a TOCTOU null-check against the field. On throw: log once and drop
+        // the tap -- the optional secondary consumer dies, the primary capture path
+        // (and the live call) keeps running.
         if (frame != null) {
-            tap?.invoke(frame)
+            val t = tap
+            if (t != null) {
+                try {
+                    t(frame)
+                } catch (thrown: Throwable) {
+                    Log.e(TAG, "tap threw; clearing it so the capture path stays alive", thrown)
+                    tap = null
+                }
+            }
         }
         frame
     }
