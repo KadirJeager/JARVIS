@@ -75,6 +75,23 @@ RUN python -c "import huggingface_hub, shutil, os; path = huggingface_hub.snapsh
     && rm -rf /tmp/cm-cache \
     && chown -R appuser:appuser /opt/antispoof
 
+# Node.js + the GitHub MCP server, preinstalled globally. The tool registry
+# carries a GRANTED `github_mcp` toolset whose transport is
+# `npx -y @modelcontextprotocol/server-github` (stdio); without node the spawn
+# failed on EVERY turn and burned a few hundred ms retrying (2026-08-11 devir
+# §11). Preinstalling the package means npx resolves it locally -- no npm
+# registry fetch (network + latency + nondeterminism) inside a live request.
+# Placed after the model layers so editing this never invalidates their
+# multi-minute caches. NOTE: without a GITHUB_PERSONAL_ACCESS_TOKEN env the
+# server runs against GitHub's anonymous rate limits -- wiring a PAT is a
+# Kadir decision (secret mint), recorded in the handover.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @modelcontextprotocol/server-github \
+    && npm ls -g @modelcontextprotocol/server-github \
+    && node --version
+
 # Re-point HF_HOME for RUNTIME -- at the e5 cache baked above, NOT the
 # build-time-deleted /tmp fallback the ECAPA-only image used. speechbrain
 # never touches HF at runtime (SPEAKER_MODEL_DIR is self-contained), and
