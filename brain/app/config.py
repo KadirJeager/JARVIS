@@ -162,6 +162,67 @@ TOOL_ZONES = {
 }
 DEFAULT_ZONE = ZONE_RED  # unknown tool = red (safe default, §9)
 
+# Reversibility (Onay Kartı 2.0, Task 1) — tool name -> can-it-be-undone.
+#
+# Rule applied per tool:
+#   reversible = True  when the effect lives ONLY inside JARVIS's own storage
+#                       and another call can undo it (memory writes, task
+#                       state, reminders, notes).
+#   reversible = False when the effect leaves the system or cannot be
+#                       recalled: messages, e-mail, orders, payments,
+#                       deletions, anything involving a third party -- and
+#                       anything ambiguous (fail-closed: when unsure, False).
+#
+# This is a fact about the tool, not a per-call inference -- it sits beside
+# TOOL_ZONES so a new tool's zone and reversibility are declared together.
+# The "every zoned tool" test below keeps the two tables from drifting apart.
+TOOL_REVERSIBILITY = {
+    "get_user_profile": True,        # read-only
+    "search_memory": True,           # read-only
+    "remember_fact": True,           # additive memory write (facts collection)
+    "add_lesson": True,              # additive memory write (lessons collection)
+    "update_user_profile": True,     # in-place merge write, internal only
+    "get_speaker_status": True,      # read-only
+    "watch_repo": True,              # creates a watch record, internal only
+    # unwatch_repo deletes the Firestore watch doc outright (ref.delete()).
+    # watch_repo could re-add a similarly-configured watch, but the deleted
+    # record's identity/history (last_check, etags) is gone -- deletions are
+    # conservatively irreversible per the rule above.
+    "unwatch_repo": False,
+    "list_watched_repos": True,      # read-only
+    "get_repo_updates": True,        # read-only aside from an internal "surfaced" flag flip
+    # consult_gemini sends the question/context OUT to a third-party model.
+    # It writes nothing locally, but the data egress itself cannot be
+    # recalled -- irreversible even though the zone is only YELLOW.
+    "consult_gemini": False,
+    "check_my_vitals": True,         # read-only self-report
+    "set_reminder": True,            # creates a reminder record, internal only
+    "list_reminders": True,          # read-only
+    # cancel_reminder deletes a reminder record -- explicitly the smallest
+    # example of "deleting something" (see TOOL_ZONES comment above); RED
+    # zone and irreversible agree here.
+    "cancel_reminder": False,
+    # propose_tool/propose_agent only write a pending approval request
+    # (task state) -- they grant nothing by themselves and resolve via
+    # Kadir's decision or TTL expiry, so the record itself is undoable.
+    "propose_tool": True,
+    "propose_agent": True,
+    # spawn_specialist actually EXECUTES a bounded specialist run (its own
+    # tool calls, cost, possible side effects). Each nested tool call is
+    # separately gated by its own zone/reversibility, but the spawn+run
+    # action itself is a completed execution, not a storage record -- it
+    # cannot be undone as a unit. Irreversible even though the zone is only
+    # YELLOW.
+    "spawn_specialist": False,
+}
+DEFAULT_REVERSIBILITY = False  # unknown tool = irreversible (fail-closed)
+
+
+def is_reversible(tool_name: str) -> bool:
+    """Resolve a tool's reversibility. Unknown tool fails closed to False."""
+    return TOOL_REVERSIBILITY.get(tool_name, DEFAULT_REVERSIBILITY)
+
+
 TOOL_TIERS = {
     # T0 (kanıt gerekmez: salt okuma / durum bilgisi)
     "list_watched_repos": TIER_T0,

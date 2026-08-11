@@ -49,6 +49,26 @@ def test_tool_tiers_pin_snapshot():
     assert policy.check_tier("unknown_future_tool") == config.TIER_T2
 
 
+def test_unknown_tool_is_treated_as_irreversible():
+    """Fail-closed: an unlisted tool must never be assumed undoable."""
+    assert config.is_reversible("some_tool_nobody_declared") is False
+
+
+def test_reversible_tools_are_declared_reversible():
+    assert config.is_reversible("search_memory") is True
+
+
+def test_destructive_tools_are_declared_irreversible():
+    assert config.is_reversible("send_message") is False
+
+
+def test_every_zoned_tool_declares_reversibility():
+    """A tool with a zone but no reversibility entry silently becomes
+    'irreversible' -- correct but accidental. Force the declaration."""
+    missing = sorted(set(config.TOOL_ZONES) - set(config.TOOL_REVERSIBILITY))
+    assert missing == [], f"reversibility undeclared for: {missing}"
+
+
 def test_decide_voice_red_zone_always_blocks():
     """RED zone tools must always block regardless of trust, tier, or cm_ok."""
     sig = VoiceSignals(trust_level=trust.HIGH, voice_score=0.95, cm_ok=True)
