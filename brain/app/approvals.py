@@ -71,6 +71,15 @@ STATUS_NOT_FOUND = "not_found"
 DECISIONS = (STATUS_APPROVED, STATUS_REJECTED)
 MAX_PENDING = 50
 
+# `cause` slugs (Onay Kartı 2.0, Task 2): short machine-readable reasons an
+# approval was demanded, stored on the record's `cause` field (see
+# `request()` below) -- never a Turkish sentence, that stays in `detail`.
+# Declared here, beside KIND_*/STATUS_*, rather than split across the modules
+# that produce them (main.py, tools.py): Task 4's decision ledger and Task 6's
+# slug -> Turkish-phrase map both need this vocabulary in one place.
+CAUSE_RED_ZONE = "red_zone"              # policy._decide[_voice] returned "block"
+CAUSE_CAPABILITY_REQUEST = "capability_request"  # tool_grant/agent_grant proposal
+
 EXPIRED_OUTCOME = "Onay süresi doldu; eylem çalıştırılmadı."
 NO_EXECUTOR_OUTCOME = "bu araç onaydan sonra çalıştırılamıyor (yürütücü kayıtlı değil)"
 
@@ -140,10 +149,10 @@ def _is_expired(doc: dict, parsed_now: datetime) -> bool:
 def _project(approval_id: str, d: dict) -> dict:
     """Onay dokümanının okuyucuya (uç, kart, test) verilen biçimi.
 
-    Karar bağlamı (actor/trust_level/cause/operand/reversible, Görev 2)
-    `.get()` ile okunur: bu değişiklikten ÖNCE yazılmış dokümanlarda anahtarlar
-    hiç yok -- `.get()` yoklukta None döner, bir varsayılan İCAT ETMEZ (eski
-    kayıtlar hâlâ okunabilir kalsın diye bilinçli)."""
+    The decision context (actor/trust_level/cause/operand/reversible, Task 2)
+    is read with `.get()`: documents written BEFORE this change have none of
+    these keys at all -- `.get()` returns None on absence, it does not
+    invent a default (deliberate, so old records keep reading)."""
     return {
         "id": approval_id,
         "user_id": d.get("user_id"),
@@ -229,15 +238,16 @@ def request(db, *, user_id: str, kind: str, title: str, detail: str,
     hiçbir yerden göremez. Alternatif (id öğrenildikten sonra dokümana geri
     yazmak) ikinci bir yazma ve yarış penceresi demekti.
 
-    `actor`/`trust_level`/`cause`/`operand`/`reversible` (Görev 2, Onay Kartı
-    2.0) kararı DOĞURAN bağlamdır -- bu fonksiyon onları HESAPLAMAZ, yalnızca
-    çağıranın (policy callback'in veya bir öneri yolunun) zaten hesapladığı
-    değerleri taşır. Hepsi None varsayılanlıdır ki her mevcut çağıran (Y3/Y4
-    dönemi) değişmeden çalışsın. Yalnızca GERÇEKTEN verilen (None olmayan)
-    alanlar dokümana yazılır -- eksik alan bir sentinel `None` değeri DEĞİL,
-    anahtarın kendisinin YOKLUĞUdur; böylece bu değişiklikten önce yazılmış
-    dokümanlarla yeni dokümanlar yokluk ile ayrışır, sahte bir varsayılanla
-    değil (`_project` bunu `.get()` ile okur)."""
+    `actor`/`trust_level`/`cause`/`operand`/`reversible` (Task 2, Onay Kartı
+    2.0) are the context that PRODUCED the decision -- this function does not
+    COMPUTE them, it only carries what the caller (the policy callback, or a
+    capability-proposal path) already computed. All default to None so every
+    caller predating this change keeps working unchanged. Only the fields
+    ACTUALLY given (not None) are written to the document -- a missing field
+    is the ABSENCE of the key, not a `None` sentinel value; that is what lets
+    documents written before this change be told apart from new ones by
+    absence rather than a fabricated default (`_project` reads it back with
+    `.get()`)."""
     if not user_id or not isinstance(user_id, str):
         raise ValueError("onay için user_id gerekli")
     if not title or not isinstance(title, str):
@@ -268,10 +278,10 @@ def request(db, *, user_id: str, kind: str, title: str, detail: str,
         "decided_by": None,
         "outcome": None,
     }
-    # Karar bağlamı: yalnızca GERÇEKTEN verilen (None olmayan) alanlar yazılır
-    # -- bkz. docstring. Sabit bir `None` sentinel'i her mevcut çağıranın
-    # dokümanına da düşerdi ve eski/yeni dokümanları ayrıştıran yokluk sinyalini
-    # yok ederdi.
+    # Decision context: only fields ACTUALLY given (not None) get written --
+    # see docstring. A fixed `None` sentinel would land on every caller's
+    # document too and destroy the absence signal that tells old and new
+    # documents apart.
     context = {"actor": actor, "trust_level": trust_level, "cause": cause,
                "operand": operand, "reversible": reversible}
     doc.update({k: v for k, v in context.items() if v is not None})

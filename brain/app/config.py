@@ -250,6 +250,62 @@ def is_reversible(tool_name: str) -> bool:
     return TOOL_REVERSIBILITY.get(tool_name, DEFAULT_REVERSIBILITY)
 
 
+# Operand argument (Onay Kartı 2.0, Task 2 fix round) -- tool name -> the
+# ARGUMENT NAME (not the value) that carries Ç1's "the ONE concrete thing
+# being acted on": the recipient, the file, the account. Explicit None for
+# tools that act on nothing nameable (a search query, a free-text fact, a
+# patch dict) -- there is no single identity to point at, and declaring None
+# says so on purpose instead of leaving the entry to be guessed at a call
+# site. Same shape as TOOL_REVERSIBILITY: a fact about the tool, declared
+# once, beside its zone -- not a per-call inference. The "every zoned tool"
+# test below (test_policy_tiers.py) keeps this table from drifting away from
+# TOOL_ZONES the way TOOL_REVERSIBILITY's twin test does.
+TOOL_OPERAND_ARG: dict[str, str | None] = {
+    "get_user_profile": None,        # no arguments
+    "search_memory": None,           # a broad query, not a single named target
+    "remember_fact": None,           # free-text content, not a named target
+    "add_lesson": None,              # free-text content, not a named target
+    "update_user_profile": None,     # a patch dict, no single named target
+    "get_speaker_status": None,      # no meaningful arguments
+    "watch_repo": "repo",
+    "unwatch_repo": "repo",
+    "list_watched_repos": None,      # no arguments
+    "get_repo_updates": None,        # no arguments
+    "consult_gemini": None,          # a question, not a named target
+    "check_my_vitals": None,         # no arguments
+    "set_reminder": None,            # creates a new record; no existing target
+    "list_reminders": None,          # no arguments
+    "cancel_reminder": "reminder_id",
+    # propose_tool/propose_agent: the proposed capability's own name is the
+    # target. In practice these two are wired at their own call site
+    # (tools.py propose_tool/propose_agent pass operand=name directly,
+    # since they build a tool_grant/agent_grant record, not a tool_call);
+    # this entry keeps the table complete and correct if a tool_call for
+    # either name were ever routed through operand_of().
+    "propose_tool": "name",
+    "propose_agent": "name",
+    "spawn_specialist": "template",
+}
+
+
+def operand_of(tool_name: str, args: dict | None) -> str | None:
+    """Resolve Ç1's operand for a tool call: the ONE concrete thing an
+    approval is bound to. Fail-closed to SILENCE, not a guess:
+
+    - an undeclared tool (not in TOOL_OPERAND_ARG) -> None
+    - a declared tool whose operand key is absent from `args` -> None
+
+    NEVER falls back to "the first string argument" or `str(args)` -- the
+    brief's own warning against that heuristic. A wrong operand is worse
+    than a missing one: it makes an approval card look bound to something
+    it is not, exactly when Kadir is relying on that row to decide."""
+    key = TOOL_OPERAND_ARG.get(tool_name)
+    if key is None:
+        return None
+    value = (args or {}).get(key)
+    return str(value) if value is not None else None
+
+
 TOOL_TIERS = {
     # T0 (kanıt gerekmez: salt okuma / durum bilgisi)
     "list_watched_repos": TIER_T0,

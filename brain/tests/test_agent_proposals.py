@@ -58,6 +58,19 @@ def test_propose_agent_writes_nothing_to_the_registry():
     assert "ozel_arastirmaci" in msg
 
 
+def test_propose_agent_document_carries_operand_cause_and_reversibility():
+    """propose_agent twin of test_tool_proposals'
+    test_propose_tool_document_carries_operand_cause_and_reversibility:
+    reversible must come from the new agent's OWN name ("ozel_arastirmaci"),
+    never from "propose_agent" (also declared True in TOOL_REVERSIBILITY)."""
+    db = _db()
+    _propose(name="ozel_arastirmaci")
+    (_aid, doc), = _approvals(db)
+    assert doc["operand"] == "ozel_arastirmaci"
+    assert doc["cause"] == approvals.CAUSE_CAPABILITY_REQUEST
+    assert doc["reversible"] is False
+
+
 def test_the_card_shows_the_full_instruction_and_evidence():
     """Kart onayı fiilen kod incelemesidir (spec §4): talimat ve kanıt detayda."""
     db = _db()

@@ -88,6 +88,37 @@ def test_reversibility_pin_snapshot():
     assert config.TOOL_REVERSIBILITY["spawn_specialist"] is False
 
 
+def test_every_zoned_tool_declares_its_operand_argument():
+    """A tool with a zone but no operand-argument entry would resolve
+    operand=None forever without ever being a deliberate decision. Force the
+    declaration, explicit None included -- same guard shape as
+    test_every_zoned_tool_declares_reversibility."""
+    missing = sorted(set(config.TOOL_ZONES) - set(config.TOOL_OPERAND_ARG))
+    assert missing == [], f"operand argument undeclared for: {missing}"
+
+
+def test_operand_of_resolves_the_declared_argument():
+    assert config.operand_of("cancel_reminder", {"reminder_id": "r1"}) == "r1"
+    assert config.operand_of("watch_repo", {"repo": "anthropics/claude-code"}) == \
+        "anthropics/claude-code"
+
+
+def test_operand_of_is_none_for_an_undeclared_tool():
+    assert config.operand_of("some_tool_nobody_declared", {"reminder_id": "r1"}) is None
+
+
+def test_operand_of_is_none_when_the_declared_key_is_absent_from_args():
+    assert config.operand_of("cancel_reminder", {}) is None
+    assert config.operand_of("cancel_reminder", None) is None
+
+
+def test_operand_of_never_guesses_from_the_first_string_argument():
+    """The exact heuristic the brief forbids: a tool with an explicit None
+    entry must stay silent even when its args obviously contain a nameable
+    string -- fail-closed means silence, not a guess."""
+    assert config.operand_of("search_memory", {"query": "Ayşe'nin numarası"}) is None
+
+
 def test_decide_voice_red_zone_always_blocks():
     """RED zone tools must always block regardless of trust, tier, or cm_ok."""
     sig = VoiceSignals(trust_level=trust.HIGH, voice_score=0.95, cm_ok=True)

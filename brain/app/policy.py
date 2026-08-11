@@ -159,12 +159,21 @@ def _decide_voice(zone: str, trust_level: str, tier: str, signals: VoiceSignals)
 
 TrustProvider = Callable[[Any], VoiceSignals | None]
 
-# (tool_name, args, tool_context, *, actor, trust_level) -> modele gidecek
-# Türkçe metin. `actor`/`trust_level` Görev 2 (Onay Kartı 2.0) ile eklendi:
-# sink'in kendisi (main._approval_sink) bunları göremez -- yalnızca policy
-# callback'in zaten hesapladığı değerlerdir, buradan aynen taşınır (Callable
-# tipi kwonly parametreleri ifade edemediği için burada belgelenir).
-ApprovalSink = Callable[[str, dict, Any], str]
+
+class ApprovalSink(Protocol):
+    """Turns a red-zone block into a queued approval, returns the Turkish
+    text that goes back to the model instead of running the tool.
+
+    `actor`/`trust_level` (Task 2, Onay Kartı 2.0) are keyword-only and
+    supplied by the caller (`_red_block_text`), not computed by the sink
+    itself: the sink (main._approval_sink) cannot see them on its own -- they
+    are the policy callback's already-computed values, carried through
+    unchanged. A plain `Callable[...]` cannot express keyword-only
+    parameters, which is why this is a `Protocol` (same pattern as
+    `AuditWriter` above) rather than a type alias."""
+
+    def __call__(self, tool_name: str, args: dict, tool_context, *,
+                 actor: str, trust_level: str | None) -> str: ...
 
 
 def _count_tool_call(audit: AuditWriter) -> None:
@@ -219,11 +228,11 @@ def _red_block_text(tool_name: str, args: dict[str, Any],
     yol açmaz (fail-closed). Her iki dalda da bu fonksiyonun dönüşü bir METİNDİR,
     yani callback None DEĞİL bir sonuç döndürür ve ADK aracı çalıştırmaz.
 
-    `actor`/`trust_level` (Görev 2) buraya `policy_callback`'ten TAŞINIR, yeniden
-    HESAPLANMAZ: sink'in kendi başına bir tool_context'ten trust_level'ı
-    yeniden okuması sesli çağrılarda YANLIŞ olurdu -- voice_trust'ın sinyalleri
-    ADK session state'ine yazılmaz (bkz. voice_trust.py), bu yüzden
-    policy_callback'in zaten hesapladığı değer tek doğru kaynaktır."""
+    `actor`/`trust_level` (Task 2) are THREADED here from `policy_callback`,
+    not recomputed: the sink reading trust_level back off a tool_context on
+    its own would be WRONG for voice calls -- voice_trust's signals are never
+    written to ADK session state (see voice_trust.py), so the value
+    `policy_callback` already computed is the only correct source."""
     if approval_sink is not None:
         try:
             return approval_sink(tool_name, args, tool_context,

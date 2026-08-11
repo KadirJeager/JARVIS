@@ -10,7 +10,7 @@ import uuid
 from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from . import (agent_registry, approvals, consult, factory, policy, reminders,
+from . import (agent_registry, approvals, config, consult, factory, policy, reminders,
                repo_watch, speaker_history, speaker_store, tool_registry, vitals,
                voice_trust)
 from .memory import FirestoreAudit, Memory
@@ -359,6 +359,15 @@ def propose_tool(name: str, kind: str, zone: str, why: str, tool_context,
             zone=zone,
             session_id=session_id,
             doc_id=approval_id,
+            # The operand is unambiguous here: the proposed capability's own
+            # name (not "propose_tool" -- that verb only ever writes this
+            # pending record, it never grants anything). Same reasoning for
+            # `reversible`: Task 1's carry-forward trap is exactly deriving
+            # this from "propose_tool" instead of `name` -- is_reversible on
+            # the wrong string would badge an MCP-server grant as reversible.
+            operand=name,
+            cause=approvals.CAUSE_CAPABILITY_REQUEST,
+            reversible=config.is_reversible(name),
         )
         logging.info("propose_tool: öneri onaya düştü name=%s kind=%s zone=%s id=%s",
                      name, kind, zone, approval_id)
@@ -477,6 +486,12 @@ def propose_agent(name: str, purpose: str, instruction: str, tools: str, why: st
             zone=zone,
             session_id=session_id,
             doc_id=approval_id,
+            # Same reasoning as propose_tool: operand/reversible are derived
+            # from the new agent's OWN name, never from "propose_agent" (the
+            # carry-forward trap from Task 1's review).
+            operand=name,
+            cause=approvals.CAUSE_CAPABILITY_REQUEST,
+            reversible=config.is_reversible(name),
         )
         logging.info("propose_agent: öneri onaya düştü name=%s araclar=%s id=%s",
                      name, ",".join(tool_names), approval_id)

@@ -143,12 +143,6 @@ APPROVAL_PENDING_REPLY = (
     "kartı tekrar oluşturma."
 )
 
-# `_approval_sink` (Görev 2, Onay Kartı 2.0) YALNIZCA decision == "block"
-# dalında çağrılır ve `_decide`/`_decide_voice` "block" döndüren TEK dal
-# `zone == config.ZONE_RED`'dir (app/policy.py) -- yani bu sink'in kurduğu her
-# onay kaydının nedeni sabittir, ayrıca taşınmaya gerek yoktur.
-CAUSE_RED_ZONE = "red_zone"
-
 
 def _approval_card_texts(tool_name: str, args: dict) -> tuple[str, str, str]:
     """Onay kartının üç Türkçe metni: başlık, detay, sohbete düşecek kart.
@@ -188,20 +182,21 @@ def _approval_sink():
        (run_turn'deki conversations.touch sarmalayıcısıyla aynı sözleşme.)
     3. push — BEST EFFORT, aynı gerekçe. Kart zaten sohbette (§7).
 
-    `actor`/`trust_level` (Görev 2) `policy.policy_callback`'ten TAŞINIR --
-    sink'in kendisi tool_context'ten yeniden hesaplamaz, çünkü sesli
-    çağrılarda tool_context.state trust_level'ı taşımaz (voice_trust.py) ve
-    yeniden okumak policy'nin zaten bildiği değeri sessizce yanlışlardı.
-    `cause` sabittir (CAUSE_RED_ZONE): bu sink'e ulaşan HER çağrı zaten kırmızı
-    bölge engelidir. `operand` -- "onaylanan TEK somut şey" -- burada
-    KASITLI OLARAK None bırakılır: bu sink jenerik her `tool_call` için
-    çalışır ve hangi argümanın "şey" hangisinin "ayar" olduğunu yalnızca o
-    aracın kendi çağrı yeri bilir (spec'in kendi gerekçesi -- "request()
-    inventing 'the first string argument' would be a heuristic that is wrong
-    exactly when it matters"). `reversible` ise `tool_name`'in KENDİSİNDEN
-    (bu sink'in bloke ettiği asıl araç) `config.is_reversible` ile
-    hesaplanır -- `tool_grant`/`agent_grant` onaylarının tuzağı burada
-    YOKTUR çünkü bu sink SADECE kind=tool_call kurar.
+    `actor`/`trust_level` (Task 2) are THREADED from `policy.policy_callback`,
+    not recomputed here: the sink reading trust_level back off tool_context
+    would be wrong for voice calls, because tool_context.state never carries
+    it there (voice_trust.py) -- the callback's already-computed value is the
+    only correct source. `cause` is the fixed `approvals.CAUSE_RED_ZONE`:
+    every call that reaches this sink is already a red-zone block, by this
+    function's own contract above. `operand` -- Ç1's "the ONE concrete thing
+    being approved" -- is resolved from a declared table
+    (`config.operand_of`, Task 1's TOOL_REVERSIBILITY pattern): undeclared
+    tool or an absent argument key both resolve to None rather than a guess.
+    `reversible` comes from `tool_name` itself (the actual tool this sink is
+    blocking) via `config.is_reversible` -- the tool_grant/agent_grant trap
+    (deriving it from "propose_tool" instead of the proposed capability's own
+    name) does not apply here, because this sink only ever builds
+    kind=tool_call records.
     """
 
     def sink(tool_name: str, args: dict, tool_context, *,
@@ -241,7 +236,8 @@ def _approval_sink():
             session_id=session_id,
             actor=actor,
             trust_level=trust_level,
-            cause=CAUSE_RED_ZONE,
+            cause=approvals.CAUSE_RED_ZONE,
+            operand=config.operand_of(tool_name, args),
             reversible=config.is_reversible(tool_name),
         )
 

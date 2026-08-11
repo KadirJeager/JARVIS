@@ -105,6 +105,23 @@ def test_propose_tool_writes_nothing_to_the_registry():
     assert "onay" in out.lower()
 
 
+def test_propose_tool_document_carries_operand_cause_and_reversibility():
+    """Görev 2 fix round (carry-forward from Task 1's review): reversible
+    MUST be derived from the proposed capability's OWN name ("github_mcp"),
+    never from the "propose_tool" verb -- config.TOOL_REVERSIBILITY declares
+    "propose_tool" itself True (proposing only writes a pending record), so
+    deriving from the wrong string would badge this MCP-granting card as
+    reversible. Asserts on the document propose_tool ACTUALLY writes (not a
+    hand-built approvals.request() call) so a future regression in tools.py
+    is what makes this fail."""
+    db = _db()
+    _propose(db, name="github_mcp")   # not in TOOL_REVERSIBILITY -> fail-closed False
+    _aid, doc = _only_approval(db)
+    assert doc["operand"] == "github_mcp"
+    assert doc["cause"] == approvals.CAUSE_CAPABILITY_REQUEST
+    assert doc["reversible"] is False
+
+
 def test_propose_tool_rejects_red_zone():
     """TAŞIYICI PİM (spec §4.3): kırmızı istenemez — kart bile oluşmaz."""
     db = _db()
