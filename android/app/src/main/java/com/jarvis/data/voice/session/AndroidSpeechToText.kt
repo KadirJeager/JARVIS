@@ -2,40 +2,99 @@ package com.jarvis.data.voice.session
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioFormat
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import java.io.IOException
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Real on-device STT: `SpeechRecognizer` configured for tr-TR free-form dictation,
  * preferring the offline (on-device) recognizer when the platform offers one.
  *
+ * PFD feed (Task 3 of docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md): when
+ * [tapSource] is non-null, each recognizer cycle is fed from the session's own
+ * `AudioRecord` via a piped [ParcelFileDescriptor] instead of letting the recognizer
+ * open its own microphone -- this is what actually puts STT inside the AEC-processed
+ * signal (see the long comment on [recognizeIntent] for why the earlier
+ * EXTRA_AUDIO_SOURCE attempt never worked). [PfdFeedPolicy] decides, per [start] call,
+ * whether to keep using the pipe: two consecutive dead cycles (no partial, no result,
+ * < 1s consumed) flip it to legacy mode PERMANENTLY for that instance. A null
+ * [tapSource] is the same legacy mode from the very first call -- the safety hatch if
+ * PFD needs to be disabled entirely.
+ *
+ * Per-cycle pipe/writer lifecycle: [buildPfdCycleIntent] creates a fresh
+ * `ParcelFileDescriptor` pipe, a bounded queue, and a daemon writer thread that drains
+ * the queue into the pipe's write end; [endCurrentPfdCycle] tears all three down
+ * exactly once -- on every terminal recognizer callback (`onResults`, `onError`) and on
+ * [destroy]. It also runs at the top of [listen], in case a previous cycle's terminal
+ * callback has not fired yet, so two back-to-back [listen] calls never leak a pipe or a
+ * writer thread. [activeCycle] is nulled out FIRST inside [endCurrentPfdCycle], before
+ * any teardown work runs -- that ordering is what makes cleanup idempotent, not a
+ * separate flag.
+ *
  * Threading: every `SpeechRecognizer` call is marshalled onto the main thread, because
  * [VoiceSession] invokes this class from the transport's reader thread while the platform
  * recognizer is main-thread-bound. Recognition callbacks arrive on the main thread and
  * are forwarded to the session's listener directly -- the session synchronizes itself.
+ * All PFD cycle bookkeeping ([activeCycle], [policy], [hadPartial]/[hadResult]) is
+ * main-thread-only for the same reason. The one exception is the tap installed on
+ * [tapSource]: it runs on the mic's own capture thread (`Dispatchers.IO` inside
+ * `AndroidMicSource.readFrame()`), and its body touches only the cycle's
+ * `ArrayBlockingQueue` and `AtomicLong` counters -- both thread-safe on their own, so
+ * nothing PFD-related needs a lock shared with the main thread.
  *
  * This class cannot be unit-tested on the JVM (it needs a real recognizer service);
  * [VoiceSession]'s restart/barge-in logic is tested against a fake [SpeechToText]
  * instead (VoiceSessionTest). Only [isRecoverableSttError], a pure function over the
- * platform's error-code constants, is JVM-tested (SttErrorMappingTest).
+ * platform's error-code constants, is JVM-tested (SttErrorMappingTest). The PFD path is
+ * proven by an instrumented test instead (PfdSpeechToTextTest, Task 4 of the same plan).
  *
  * This class's own `tl ev=` lines (Task 11) intentionally omit the `t=`/`gen=` fields
  * [VoiceSession]'s carry -- there is no session-relative clock or generation counter at
  * this layer to attach -- and rely on logcat's own per-line timestamp for correlation
  * against [VoiceSession]'s lines instead.
  */
-class AndroidSpeechToText(private val context: Context) : SpeechToText {
+class AndroidSpeechToText(
+    private val context: Context,
+    private val tapSource: PcmTapSource? = null,
+) : SpeechToText {
 
     private val main = Handler(Looper.getMainLooper())
 
     // Only ever touched on the main thread.
     private var recognizer: SpeechRecognizer? = null
+
+    // Main-thread only. One instance per successful start() call, matching
+    // PfdFeedPolicy's "permanent for this instance" fallback semantics. Left null
+    // when tapSource == null: that instance is legacy-mode forever and has no
+    // decision to make.
+    private var policy: PfdFeedPolicy? = null
+
+    // Main-thread only. Non-null exactly while a PFD cycle's pipe/writer/tap are
+    // live; null between cycles and in legacy mode. See the class doc for why
+    // nulling this FIRST inside endCurrentPfdCycle() is the cleanup-once guard.
+    private var activeCycle: PfdCycle? = null
+
+    // Main-thread only; monotonic. Used only to correlate a cycle's teardown log
+    // line with its setup -- not itself a concurrency guard.
+    private var cycleGen = 0
+
+    // Main-thread only, cycle-scoped: reset in listen(), read by endCurrentPfdCycle().
+    private var hadPartial = false
+    private var hadResult = false
+
+    // Main-thread only. Logged once -- the first time this instance falls back to
+    // (or never attempts) the PFD feed -- so repeated legacy cycles do not spam logcat.
+    private var loggedFallback = false
 
     // Written by start()/destroy() (any thread), read from main-thread callbacks.
     @Volatile
@@ -51,15 +110,18 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
                 ?: return
+            hadPartial = true
             listener?.onPartialResult(text)
         }
 
         override fun onResults(results: Bundle?) {
+            hadResult = true
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
             // Lengths only, never transcript content (existing convention).
             Log.i(TAG, "tl ev=onResults len=${text?.length ?: 0}")
+            endCurrentPfdCycle()
             // An empty final result is a no-match in disguise: treat it as recoverable
             // so the session re-arms listening instead of stalling with no callback.
             if (text.isNullOrBlank()) listener?.onRecoverableError() else listener?.onResult(text)
@@ -67,6 +129,7 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
 
         override fun onError(error: Int) {
             Log.i(TAG, "tl ev=onError code=$error")
+            endCurrentPfdCycle()
             if (isRecoverableSttError(error)) listener?.onRecoverableError()
             else {
                 Log.w(TAG, "SpeechRecognizer fatal error: $error")
@@ -99,6 +162,8 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
                 listener.onFatalError()
                 return@post
             }
+            // One policy instance per start() call (see class doc).
+            policy = tapSource?.let { PfdFeedPolicy() }
             recognizer = createRecognizer(context).apply {
                 setRecognitionListener(recognitionListener)
             }
@@ -108,22 +173,187 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
     override fun listen() {
         main.post {
             Log.i(TAG, "tl ev=startListening")
+            // A previous cycle's pipe/writer/tap may still be live if listen() is
+            // called again before its terminal callback fired; tear it down before
+            // building a fresh one so back-to-back calls never leak a pipe or a thread.
+            endCurrentPfdCycle()
+            hadPartial = false
+            hadResult = false
+
+            val tap = tapSource
+            val activePolicy = policy
+            val intent = if (tap != null && activePolicy != null && activePolicy.shouldUsePfd()) {
+                buildPfdCycleIntent(tap) ?: run {
+                    // Pipe setup itself failed before any recognizer session started --
+                    // fall back for just this call. No cycle was attempted, so the
+                    // policy's streak is untouched; the next listen() retries PFD.
+                    Log.w(TAG, "tl ev=pfd.setupFailed")
+                    recognizeIntent
+                }
+            } else {
+                logFallbackOnce(tap)
+                recognizeIntent
+            }
             // null when start() has not completed or declared a fatal error -- the
             // session is already tearing down in that case, so dropping is correct.
-            recognizer?.startListening(recognizeIntent)
+            recognizer?.startListening(intent)
         }
     }
 
     override fun destroy() {
         listener = null
         main.post {
+            endCurrentPfdCycle()
             recognizer?.destroy()
             recognizer = null
+            policy = null
+            loggedFallback = false
         }
+    }
+
+    /**
+     * Builds a fresh pipe + writer + tap for one recognizer cycle and returns the
+     * intent carrying the four PFD extras, or null if the pipe itself could not be
+     * created ([ParcelFileDescriptor.createPipe] threw, e.g. the process is out of
+     * file descriptors) -- in which case no cycle state is installed at all.
+     */
+    private fun buildPfdCycleIntent(tap: PcmTapSource): Intent? {
+        val pipe = try {
+            ParcelFileDescriptor.createPipe()
+        } catch (io: IOException) {
+            Log.w(TAG, "tl ev=pfd.pipeCreateFailed msg=${io.message}")
+            return null
+        }
+        val readFd = pipe[0]
+        val writeFd = pipe[1]
+        val queue = ArrayBlockingQueue<ByteArray>(PFD_QUEUE_CAPACITY)
+        val bytesWritten = AtomicLong(0)
+        val drops = AtomicLong(0)
+
+        val writer = startPfdWriter(queue, writeFd, bytesWritten)
+        // Tap body: pure, non-blocking, never throws -- runs on the mic's capture
+        // read path (Dispatchers.IO in AndroidMicSource.readFrame()), never on main.
+        tap.setTap { frame -> if (!queue.offer(frame)) drops.incrementAndGet() }
+
+        activeCycle = PfdCycle(
+            gen = ++cycleGen,
+            readFd = readFd,
+            queue = queue,
+            writerThread = writer,
+            bytesWritten = bytesWritten,
+            drops = drops,
+        )
+
+        // Copy of the base intent (same extras as today) plus the PFD-only ones.
+        // Do NOT close readFd here -- SpeechRecognizer.startListening() queues the
+        // actual Binder hand-off through its own internal Handler rather than
+        // performing it synchronously, so closing our copy immediately can race that
+        // hand-off (observed as a spurious ERROR:5 -- see RecognizerPipeProbeTest).
+        // readFd is closed only in endCurrentPfdCycle().
+        return Intent(recognizeIntent).apply {
+            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
+            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, 16000)
+            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+            putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+        }
+    }
+
+    /** Daemon thread: drains [queue] into [writeFd] until [POISON_PILL] arrives. */
+    private fun startPfdWriter(
+        queue: ArrayBlockingQueue<ByteArray>,
+        writeFd: ParcelFileDescriptor,
+        bytesWritten: AtomicLong,
+    ): Thread {
+        val writer = Thread({
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { out ->
+                    while (true) {
+                        val frame = queue.take()
+                        if (frame === POISON_PILL) break
+                        out.write(frame)
+                        bytesWritten.addAndGet(frame.size.toLong())
+                    }
+                }
+            } catch (io: IOException) {
+                // Pipe broken (recognizer stopped reading, or the read side tore down
+                // first) -- not a bug, the feed just ended before EOF. `.use` above
+                // still closes writeFd on the way out.
+                Log.w(TAG, "tl ev=pfd.writerIoError msg=${io.message}")
+            } catch (interrupted: InterruptedException) {
+                // Not triggered by our own cleanup (a poison pill, not
+                // Thread.interrupt()); handled defensively. `.use` still closes
+                // writeFd on the way out.
+                Log.w(TAG, "tl ev=pfd.writerInterrupted")
+            }
+        }, "AndroidSpeechToText-pfd-writer")
+        writer.isDaemon = true
+        writer.start()
+        return writer
+    }
+
+    /**
+     * Tears down the currently active PFD cycle, if any, exactly once. Safe to call
+     * from any terminal recognizer callback, from [listen] (to close out a cycle a new
+     * call is superseding), and from [destroy]. [activeCycle] is nulled out FIRST, so a
+     * second call arriving before this one returns -- or one that races in after -- sees
+     * nothing left to tear down instead of double-closing fds or double-counting the
+     * cycle in [policy].
+     */
+    private fun endCurrentPfdCycle() {
+        val cycle = activeCycle ?: return
+        activeCycle = null
+
+        tapSource?.setTap(null)
+
+        // Deliver the "stop" signal even if the queue is currently full: clear it
+        // first so there is always room, then offer -- offer() on a freshly-cleared
+        // bounded queue cannot fail for lack of capacity. Any frame a still-in-flight
+        // tap invocation offers after this point lands in an abandoned queue nobody
+        // reads from again; harmless, since a fresh queue is created per cycle.
+        cycle.queue.clear()
+        cycle.queue.offer(POISON_PILL)
+        try {
+            cycle.writerThread.join(WRITER_JOIN_TIMEOUT_MS)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        if (cycle.writerThread.isAlive) {
+            // Writer is blocked inside a blocking write() to the pipe (the recognizer
+            // never drained it) -- plain java.io writes are not interruptible, so the
+            // poison pill cannot preempt this. The thread is a daemon, so it cannot
+            // outlive the process, and its own `.use` block still closes writeFd
+            // whenever the write unblocks or the pipe breaks: a documented, bounded
+            // risk, not a hang in this call.
+            Log.w(TAG, "tl ev=pfd.writerJoinTimeout gen=${cycle.gen}")
+        }
+        try {
+            cycle.readFd.close()
+        } catch (io: IOException) {
+            Log.w(TAG, "tl ev=pfd.readFdCloseFailed msg=${io.message}")
+        }
+
+        policy?.onCycleEnd(hadPartial, hadResult, cycle.bytesWritten.get())
+        Log.i(TAG, "tl ev=pfd.cycle ${policy?.cycleSummary()} drops=${cycle.drops.get()}")
+    }
+
+    private fun logFallbackOnce(tap: PcmTapSource?) {
+        if (loggedFallback) return
+        loggedFallback = true
+        val reason = if (tap == null) "no_tap_source" else "policy_flipped"
+        Log.i(TAG, "tl ev=pfd.fallback reason=$reason")
     }
 
     private companion object {
         const val TAG = "AndroidSpeechToText"
+
+        // Matches PfdFeedPolicy's own writer queue sizing from the design doc.
+        const val PFD_QUEUE_CAPACITY = 32
+        const val WRITER_JOIN_TIMEOUT_MS = 500L
+
+        // Sentinel compared by reference (===), never by content -- a real captured
+        // frame is never this exact array instance, so there is no collision risk
+        // even though both are plain ByteArrays.
+        val POISON_PILL = ByteArray(0)
 
         // Endpointing tuning (prod complaint 2026-07-31: "birkaç kelime sonra
         // cümle yarıda kesiliyor"). The platform defaults finalize an utterance
@@ -145,20 +375,27 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             // to the network recognizer, which is still better than failing the call.
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            // NOT setting RecognizerIntent.EXTRA_AUDIO_SOURCE here is deliberate.
-            // That extra takes a ParcelFileDescriptor pointing at an already-open
-            // audio source; we were passing MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            // NOT setting RecognizerIntent.EXTRA_AUDIO_SOURCE here is deliberate -- this
+            // is the BASE intent shared by both the legacy fallback path and, via
+            // Intent(recognizeIntent) copies in buildPfdCycleIntent(), the PFD path.
+            // That extra takes a ParcelFileDescriptor pointing at an already-open audio
+            // source; we were once passing MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             // an Int, which the framework silently ignores. The sibling constants
             // (EXTRA_AUDIO_SOURCE_CHANNEL_COUNT / _ENCODING / _SAMPLING_RATE) confirm
             // the shape -- a bare AudioSource int would need none of them.
             //
-            // So the recognizer has always opened its own microphone with its own
+            // So the recognizer used to always open its own microphone with its own
             // default source, and the STT leg of the AEC chain was never established.
-            // The comment removed here claimed the opposite and is why the 5 Aug
+            // The comment removed here once claimed the opposite and is why the 5 Aug
             // review recorded this as done. Feeding the recognizer from our single
-            // AudioRecord via ParcelFileDescriptor.createPipe() is the real fix; it
-            // is gated on confirming Google's tr-TR recognizer accepts a PFD feed
-            // (docs/superpowers/plans/2026-08-11-ses-kimligi-pixel-dogrulugu.md, Task 7).
+            // AudioRecord via ParcelFileDescriptor.createPipe() is the real fix,
+            // confirmed working by RecognizerPipeProbeTest (Task 7 of
+            // docs/superpowers/plans/2026-08-11-ses-kimligi-pixel-dogrulugu.md) and
+            // implemented for real recognizer cycles by buildPfdCycleIntent() above
+            // (Task 3 of docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md).
+            // This base intent stays PFD-extra-free on purpose: it is also exactly what
+            // a flipped-to-legacy or tapSource == null instance sends, verbatim.
+            //
             // Bias the recognizer towards the words it keeps getting wrong. Kadir said
             // "selam Jarvis nasılsın" and the transcript read "selam CEVİZ nasılsın"
             // (S23, 2026-08-03) -- a Turkish recognizer has no reason to expect an
@@ -200,6 +437,23 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             }
     }
 }
+
+/**
+ * Bookkeeping for one PFD feed cycle -- torn down exactly once by
+ * [AndroidSpeechToText.endCurrentPfdCycle]. [readFd] is this class's own copy of the
+ * pipe's read end (a separate copy is duplicated across Binder for the recognizer
+ * itself when the intent carrying it is delivered); [writeFd] is owned entirely by
+ * [writerThread] and is not held here -- it is closed by the writer's own `.use` block,
+ * never from the main thread.
+ */
+private class PfdCycle(
+    val gen: Int,
+    val readFd: ParcelFileDescriptor,
+    val queue: ArrayBlockingQueue<ByteArray>,
+    val writerThread: Thread,
+    val bytesWritten: AtomicLong,
+    val drops: AtomicLong,
+)
 
 /**
  * Maps a `SpeechRecognizer.onError` code to the session's restart policy. Timeout and

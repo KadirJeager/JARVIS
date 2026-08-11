@@ -91,13 +91,18 @@ class AppContainer(
     // Swappable so the wiring test can drive a live call without a real socket or mic —
     // and so no instrumented test ever opens a WebSocket to the deployed voice gateway.
     val voiceSessionFactory: (CoroutineScope) -> VoiceSession = { scope ->
+        // Single AudioRecord (Task 2/3 of docs/superpowers/plans/2026-08-11-tek-audiorecord-pfd.md):
+        // one AndroidMicSource instance feeds BOTH the server's speaker-ID stream (via
+        // MicSource, below) AND the on-device recognizer (via PcmTapSource, passed to
+        // AndroidSpeechToText) -- no second AudioRecord ever opens on this device.
+        val micSource = AndroidMicSource(context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
         VoiceSession(
             transport = OkHttpVoiceTransport(),
             // Mic PCM keeps flowing for server-side speaker-ID; the conversation itself
             // is text: on-device SpeechRecognizer up (user_text), on-device TTS down
             // (jarvis_text). No server audio is played back anymore (protocol v2).
-            mic = AndroidMicSource(context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager),
-            stt = AndroidSpeechToText(context.applicationContext),
+            mic = micSource,
+            stt = AndroidSpeechToText(context.applicationContext, tapSource = micSource),
             tts = AndroidTextToSpeech(context.applicationContext),
             tokenProvider = { authManager.currentToken() },
             // Feeds the server's channel-adaptive speaker gallery (spec §6): the tablet
