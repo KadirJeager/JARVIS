@@ -107,3 +107,22 @@ data class RejectResponse(
     val removed_sample_id: String? = null,
     val already: Boolean = false,
 )
+
+/**
+ * Response to `POST /api/voice/challenge` (brain/app/voice.py). `code_spoken` tells the
+ * caller whether the 4-digit code was actually spoken over an open live voice bridge for
+ * this user, versus minted with nowhere to say it -- see [VoiceApi.challenge].
+ */
+@Serializable
+data class ChallengeResponse(val status: String, val code_spoken: Boolean = false)
+
+/**
+ * Request body for `POST /api/voice/enroll` (brain/app/main.py). `clips` are base64 audio
+ * clips; `device_hint` matches the `device_hint` convention already used elsewhere in this
+ * file (see [VoiceSampleDto]).
+ */
+@Serializable
+data class EnrollRequest(val clips: List<String>, val device_hint: String)
+
+@Serializable
+data class EnrollResponse(val anchors: Int)

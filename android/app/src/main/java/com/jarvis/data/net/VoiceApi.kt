@@ -39,4 +39,19 @@ interface VoiceApi {
 
     @DELETE("api/voice/profile")
     suspend fun deleteProfile(): ProfileDeletedResponse
+
+    /**
+     * Asks the server to mint a 4-digit liveness code. When a live voice bridge is
+     * open for this user the server speaks it over that bridge, which is why the
+     * enrollment flow has to run inside a voice call (see C2).
+     */
+    @POST("api/voice/challenge")
+    suspend fun challenge(): ChallengeResponse
+
+    /**
+     * Writes anchors. Requires a liveness grant minted by [challenge] within the
+     * last 5 minutes (409 otherwise) and clips the CM clears (422 otherwise).
+     */
+    @POST("api/voice/enroll")
+    suspend fun enroll(@Body req: EnrollRequest): EnrollResponse
 }
