@@ -82,6 +82,10 @@ class AppContainer(
             deviceHint = "android-" + Build.MODEL,
             scope = scope,
             voiceUrl = VOICE_WS_URL,
+            // DATA-level timeline instrumentation (Task 11): a greppable one-line event
+            // stream in logcat so a report like "the first words were lost" can be
+            // localized instead of guessed at -- see VoiceSession's class doc.
+            logger = { line -> Log.i("VoiceSession", line) },
         )
     },
 ) {

@@ -53,12 +53,15 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
+            // Lengths only, never transcript content (existing convention).
+            Log.i(TAG, "tl ev=onResults len=${text?.length ?: 0}")
             // An empty final result is a no-match in disguise: treat it as recoverable
             // so the session re-arms listening instead of stalling with no callback.
             if (text.isNullOrBlank()) listener?.onRecoverableError() else listener?.onResult(text)
         }
 
         override fun onError(error: Int) {
+            Log.i(TAG, "tl ev=onError code=$error")
             if (isRecoverableSttError(error)) listener?.onRecoverableError()
             else {
                 Log.w(TAG, "SpeechRecognizer fatal error: $error")
@@ -66,10 +69,17 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
             }
         }
 
-        // Turn lifecycle events the session does not need: end-of-speech is followed
-        // by onResults/onError, and rms/ready/buffer events carry no protocol meaning.
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onEndOfSpeech() {}
+        // rms/buffer events carry no protocol meaning and stay silent (would otherwise
+        // spam the timeline at frame rate). onReadyForSpeech/onEndOfSpeech ARE logged
+        // below: onReadyForSpeech is THE datum for the first-words investigation -- the
+        // moment the recognizer is actually listening, closing the listen()->ready gap
+        // that is the primary deaf-window suspect.
+        override fun onReadyForSpeech(params: Bundle?) {
+            Log.i(TAG, "tl ev=onReadyForSpeech")
+        }
+        override fun onEndOfSpeech() {
+            Log.i(TAG, "tl ev=onEndOfSpeech")
+        }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -92,6 +102,7 @@ class AndroidSpeechToText(private val context: Context) : SpeechToText {
 
     override fun listen() {
         main.post {
+            Log.i(TAG, "tl ev=startListening")
             // null when start() has not completed or declared a fatal error -- the
             // session is already tearing down in that case, so dropping is correct.
             recognizer?.startListening(recognizeIntent)

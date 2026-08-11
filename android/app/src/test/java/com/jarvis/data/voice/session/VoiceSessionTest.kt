@@ -168,6 +168,11 @@ class VoiceSessionTest {
         val transport = FakeVoiceTransport()
         val stt = FakeSpeechToText()
         val tts = FakeSpeechSynthesis()
+
+        /** Collecting logger for the timeline-instrumentation tests: every line the
+         *  session would hand to `Log.i` in production lands here instead, in order. */
+        val lines = mutableListOf<String>()
+
         val session = VoiceSession(
             transport = transport,
             mic = mic,
@@ -178,6 +183,7 @@ class VoiceSessionTest {
             scope = scope,
             voiceUrl = "wss://jarvis-voice.example/ws/voice",
             nowMs = clock,
+            logger = { line -> lines += line },
         )
 
         /** Most tests still use the null-terminating fake; this keeps them readable. */
@@ -1348,5 +1354,140 @@ class VoiceSessionTest {
 
         assertEquals(0, f.tts.stopCalls)
         assertEquals(VoicePhase.LISTENING, f.session.state.value.phase)
+    }
+
+    // -- timeline instrumentation (Task 11: the first-words report needs data, not
+    // hypotheses) -------------------------------------------------------------------------
+    // The client logged nothing about the session timeline, so a "my first words were
+    // lost" report could not be localized to mic-open vs recognizer-arm vs echo-guard.
+    // These tests pin the greppable event stream's ordering, its volume discipline
+    // (first-partial-only, transition-only mic gate), and that the three echo-guard drop
+    // reasons are distinguishable from a clean send -- instrumentation only, no assertion
+    // here may depend on a phase/frame/frame-count outcome changing.
+
+    private fun eventName(line: String): String = line.substringAfter("ev=").substringBefore(' ')
+
+    @Test
+    fun timeline_ordersStartOpenArmBeginFirstPartialFinal_correctly() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.stt.listener!!.onBeginningOfSpeech()
+        f.stt.listener!!.onPartialResult("merhaba")
+        f.stt.listener!!.onPartialResult("merhaba jarvis")
+        f.stt.listener!!.onResult("merhaba jarvis")
+
+        val names = f.lines.map(::eventName)
+        val start = names.indexOf("start")
+        val open = names.indexOf("open")
+        val arm = names.indexOf("stt.arm")
+        val begin = names.indexOf("stt.begin")
+        val firstPartial = names.indexOf("stt.first_partial")
+        val final = names.indexOf("stt.final")
+
+        assertTrue("start=$start open=$open arm=$arm begin=$begin firstPartial=$firstPartial final=$final in ${f.lines}", start >= 0)
+        assertTrue(open > start)
+        assertTrue(arm > open)
+        assertTrue(begin > arm)
+        assertTrue(firstPartial > begin)
+        assertTrue(final > firstPartial)
+    }
+
+    @Test
+    fun timeline_logsOnlyTheFirstPartial_perListenCycle() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.stt.listener!!.onPartialResult("m")
+        f.stt.listener!!.onPartialResult("me")
+        f.stt.listener!!.onPartialResult("mer")
+
+        val firstPartialLines = f.lines.filter { eventName(it) == "stt.first_partial" }
+        // ONE line for three partials -- the datum is time-to-first-partial, not every
+        // interim hypothesis (those tick many times a second).
+        assertEquals(1, firstPartialLines.size)
+        // And it must carry the FIRST call's data ("m", length 1), not the last.
+        assertTrue(firstPartialLines[0].contains("len=1 "))
+    }
+
+    @Test
+    fun timeline_final_logsOutSent_onACleanFinal() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+
+        f.stt.listener!!.onResult("merhaba jarvis")
+
+        val finalLine = f.lines.first { eventName(it) == "stt.final" }
+        assertTrue(finalLine, finalLine.contains("out=sent"))
+    }
+
+    /** Reuses the fake-clock echo-guard setup from
+     *  [sttFinalResult_whileTheGuardIsUp_isDropped_evenWithoutAnOnset]: a final arriving
+     *  while Jarvis's TTS is actively playing must log the SPEAKING drop reason, not just
+     *  drop silently. */
+    @Test
+    fun timeline_final_logsOutDropSpeaking_whileJarvisIsTalking() = runTest {
+        val f = Fixture(backgroundScope)
+        f.session.start()
+        f.transport.listener!!.onOpen()
+        f.transport.listener!!.onText(
+            """{"type":"jarvis_text","text":"Saat şu an gece iki buçuk, yatsan iyi olur."}"""
+        )
+        assertEquals(VoicePhase.SPEAKING, f.session.state.value.phase)
+
+        f.stt.listener!!.onResult("saat on gece buçuk yatsan")
+
+        val finalLine = f.lines.first { eventName(it) == "stt.final" }
+        assertTrue(finalLine, finalLine.contains("out=drop_speaking"))
+    }
+
+    @Test
+    fun timeline_micGate_logsOnlyOnTransitions_notPerFrame() = runTest {
+        val f = speakingFixture()
+        f.lines.clear() // only care about the gate lines from here on
+
+        f.serveTurn("Merhaba Kadir, bugün hava çok güzel.")
+        // Several frames while Jarvis is actively talking: the gate closes ONCE and
+        // stays closed -- must not log per frame (mic frames tick 50-100/s).
+        f.channelMic.emit(byteArrayOf(1))
+        f.channelMic.emit(byteArrayOf(2))
+        f.channelMic.emit(byteArrayOf(3))
+
+        val afterSpeaking = f.lines.filter { eventName(it) == "mic.gate" }
+        assertEquals(1, afterSpeaking.size)
+        assertTrue(afterSpeaking[0], afterSpeaking[0].contains("send=false"))
+        assertTrue(afterSpeaking[0], afterSpeaking[0].contains("why=speaking"))
+
+        // Jarvis stops and the tail expires: the gate reopens exactly once, however many
+        // frames arrive afterwards.
+        f.tts.listener!!.onUtteranceDone()
+        f.clock.now += VoiceSession.ECHO_TAIL_MS + 1
+        f.channelMic.emit(byteArrayOf(4))
+        f.channelMic.emit(byteArrayOf(5))
+
+        val afterReopen = f.lines.filter { eventName(it) == "mic.gate" }
+        assertEquals(2, afterReopen.size) // the original close + one reopen, nothing more
+        assertTrue(afterReopen[1], afterReopen[1].contains("send=true"))
+        assertTrue(afterReopen[1], afterReopen[1].contains("why=clear"))
+    }
+
+    /** The gate can close for the TAIL reason without ever having been observed closed
+     *  for "speaking" first -- e.g. a short reply where no mic frame happened to arrive
+     *  during the brief speaking window. `why` must still say `tail`, not `speaking`. */
+    @Test
+    fun timeline_micGate_reportsTailAsTheReason_whenTheGateFirstClosesDuringTheTail() = runTest {
+        val f = speakingFixture()
+        f.serveTurn("Kısa cevap.")
+        f.lines.clear()
+
+        f.tts.listener!!.onUtteranceDone() // Jarvis stops; no frame arrived while speaking
+        f.channelMic.emit(byteArrayOf(1)) // first frame the loop sees is inside the tail
+
+        val gateLines = f.lines.filter { eventName(it) == "mic.gate" }
+        assertEquals(1, gateLines.size)
+        assertTrue(gateLines[0], gateLines[0].contains("send=false"))
+        assertTrue(gateLines[0], gateLines[0].contains("why=tail"))
     }
 }

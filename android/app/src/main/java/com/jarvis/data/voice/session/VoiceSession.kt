@@ -60,6 +60,12 @@ class VoiceSession(
     // DEADLINE, and a deadline needs a clock the tests can move. Production passes
     // the real clock; VoiceSessionTest passes a fake it can advance.
     private val nowMs: () -> Long = System::currentTimeMillis,
+    // DATA-level timeline instrumentation (Task 11, 2026-08-11): a greppable one-line
+    // event per state-machine transition, so a report like "the first words were lost"
+    // can be localized to a specific gap (mic vs recognizer vs echo guard) instead of
+    // guessed at. Same seam pattern as [nowMs]: production wires this to
+    // `Log.i("VoiceSession", line)`, VoiceSessionTest collects the lines into a list.
+    private val logger: (String) -> Unit = {},
 ) {
     private val _state = MutableStateFlow(VoiceUiState())
     val state: StateFlow<VoiceUiState> = _state.asStateFlow()
@@ -78,6 +84,23 @@ class VoiceSession(
     // body and endSession run under this monitor, so check-then-act is atomic. Bodies
     // hold it only for ms-scale device calls; the mic READ loop stays outside.
     private val lock = Any()
+
+    // -- Timeline instrumentation (Task 11, 2026-08-11) -------------------------------
+    // Wall-clock stamp of THIS generation's start() call: every event's `t=+<ms>` field
+    // is measured from here, not from device boot, so it reads directly as "how long
+    // into the call". Written once per start() (before any callback can fire), read by
+    // every event after it -- a stale generation's callbacks already return before
+    // reaching a log call, so they never read a start stamp that isn't theirs.
+    @Volatile
+    private var genStartMs: Long = 0L
+
+    /** Emits one line: `tl ev=<event> t=+<ms> gen=<N> [fields]`. Greppable, one line per
+     *  event -- see the class doc for the volume-discipline rules callers must respect
+     *  (first-partial-only, transition-only mic gate) before adding a new call site. */
+    private fun logEvent(gen: Int, event: String, fields: String = "") {
+        val suffix = if (fields.isEmpty()) "" else " $fields"
+        logger("tl ev=$event t=+${nowMs() - genStartMs} gen=$gen$suffix")
+    }
 
     // Written only from inside a transport callback (onOpen) and read/cancelled from
     // endSession, which can itself run on either that thread or the UI thread (stop()).
@@ -135,6 +158,13 @@ class VoiceSession(
     // terminal recognizer callback goes through relisten(). Only touched under [lock].
     private var onsetDuringJarvisSpeech = false
 
+    // True once this listen() cycle's first partial has been logged. Volume discipline
+    // (Task 11): the recognizer can fire partials many times a second, but the datum the
+    // instrumentation exists for is time-to-FIRST-partial, so only that one line per
+    // cycle. Reset by relisten() -- same lifetime as onsetDuringJarvisSpeech, one cycle.
+    // Only touched under [lock].
+    private var firstPartialLogged = false
+
     /**
      * True while Jarvis's voice is coming out of the speaker RIGHT NOW (bounded by the
      * MAX ceiling). Split out of [echoGuardActive] because the two windows carry
@@ -155,8 +185,9 @@ class VoiceSession(
         jarvisSpeakingNow() || nowMs() < guardTailUntilMs
 
     /** Jarvis stopped talking: start the decay tail. */
-    private fun openGuardTail() {
+    private fun openGuardTail(gen: Int) {
         guardTailUntilMs = nowMs() + ECHO_TAIL_MS
+        logEvent(gen, "guard.tail")
     }
 
     // Bounded fallback for "the TTS engine never reported done". Removing the old
@@ -175,7 +206,7 @@ class VoiceSession(
             synchronized(lock) {
                 if (gen != generation.get() || ttsActive == 0) return@synchronized
                 ttsActive = 0
-                openGuardTail()
+                openGuardTail(gen)
                 _state.update { it.copy(phase = VoicePhase.LISTENING) }
             }
         }
@@ -206,6 +237,8 @@ class VoiceSession(
         }
 
         val gen = generation.incrementAndGet()
+        genStartMs = nowMs()
+        logEvent(gen, "start")
         _state.update { VoiceUiState(phase = VoicePhase.CONNECTING) }
 
         transport.connect(
@@ -213,6 +246,7 @@ class VoiceSession(
             object : VoiceTransportListener {
                 override fun onOpen(): Unit = synchronized(lock) {
                     if (gen != generation.get()) return
+                    logEvent(gen, "open")
                     transport.sendText(buildVoiceHello(token = token, deviceHint = deviceHint))
                     tts.start(ttsListener(gen))
                     stt.start(sttListener(gen))
@@ -221,11 +255,14 @@ class VoiceSession(
                         // — and this runs on OkHttp's reader thread, where an escape
                         // kills the process.
                         mic.start(AUDIO_IN_RATE_HZ)
+                        logEvent(gen, "mic.ok")
                     } catch (t: RuntimeException) {
-                        endSession(gen, "Mikrofon açılamadı. Aramayı yeniden başlatmayı dene.")
+                        logEvent(gen, "mic.fail")
+                        endSession(gen, "Mikrofon açılamadı. Aramayı yeniden başlatmayı dene.", reason = "error")
                         return
                     }
                     startMicLoop(gen)
+                    logEvent(gen, "stt.arm", "delay=0")
                     stt.listen()
                     _state.update { it.copy(phase = VoicePhase.LISTENING) }
                 }
@@ -241,11 +278,11 @@ class VoiceSession(
                 }
 
                 override fun onClosed() {
-                    endSession(gen, errorMessage = null)
+                    endSession(gen, errorMessage = null, reason = "closed")
                 }
 
                 override fun onFailure(message: String) {
-                    endSession(gen, errorMessage = "Bağlantı hatası: $message")
+                    endSession(gen, errorMessage = "Bağlantı hatası: $message", reason = "error")
                 }
             },
         )
@@ -254,7 +291,7 @@ class VoiceSession(
     /** Ends a call the user (or the host: lifecycle/navigation) initiated stopping. */
     fun stop() {
         if (_state.value.phase == VoicePhase.IDLE) return
-        endSession(generation.get(), errorMessage = null)
+        endSession(generation.get(), errorMessage = null, reason = "user")
     }
 
     /**
@@ -280,6 +317,7 @@ class VoiceSession(
      */
     fun interrupt(): Unit = synchronized(lock) {
         if (_state.value.phase != VoicePhase.SPEAKING && ttsActive == 0) return
+        logEvent(generation.get(), "interrupt")
         tts.stop()
         ttsActive = 0
         cancelSpeechWatchdog()
@@ -301,9 +339,11 @@ class VoiceSession(
                 // to the server, trimming the speaker-ID buffer to the echo's onset.
                 // Latch it so this utterance's final is dropped too, and otherwise do
                 // nothing: no tts.stop(), no frame, no phase change.
+                logEvent(gen, "stt.begin", "guarded=true")
                 onsetDuringJarvisSpeech = true
                 return
             }
+            logEvent(gen, "stt.begin", "guarded=false")
             // Barge-in: the user cutting in kills the assistant's voice immediately --
             // and one speech_start frame per utterance (the recognizer fires this at
             // most once per listen() turn, so no extra dedup is needed here).
@@ -328,40 +368,56 @@ class VoiceSession(
             // 2026-08-03: "selam kadir iyiyim teşekkürler sanırım ses tanıma" appeared
             // under Jarvis's own reply). Nothing was sent anywhere, but seeing your
             // assistant put words in your mouth reads as a much worse bug than it is.
-            if (onsetDuringJarvisSpeech || echoGuardActive()) return
+            val guarded = onsetDuringJarvisSpeech || echoGuardActive()
+            if (!firstPartialLogged) {
+                // Volume discipline: ONE line per listen cycle -- time-to-first-partial
+                // is the datum, the rest are just the recognizer refining its hypothesis.
+                firstPartialLogged = true
+                logEvent(gen, "stt.first_partial", "len=${text.length} guarded=$guarded")
+            }
+            if (guarded) return
             _state.update { it.copy(partialText = text) }
         }
 
         override fun onResult(text: String): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (text.isNotBlank()) {
-                if (jarvisSpeakingNow() ||
-                    (onsetDuringJarvisSpeech && echoGuardActive()) || isJarvisEcho(text)
-                ) {
-                    // Three drops, in decreasing certainty:
-                    //
-                    // 1. WHILE THE SPEAKER PLAYS, no latch needed: nothing the mic
-                    //    hears mid-speech is Kadir. The latch-only version of this was
-                    //    the 4 Ağu 02:28 hole — Android skips onBeginningOfSpeech
-                    //    often enough that a mangled echo's final arrived unlatched
-                    //    MID-SPEECH with only the text gate standing, and Jarvis
-                    //    answered himself off the loudspeaker.
-                    // 2. In the TAIL only with the latch (onset, or a mid-speech
-                    //    partial): the tail is a probability window and Jarvis's-gone-
-                    //    quiet is exactly when Kadir's real quick answer also lands —
-                    //    an UNLATCHED tail final passes (the two tests below pin it).
-                    // 3. The text gate, any time.
-                    //
-                    // Pass-back cases survive: a recognition turn spanning the echo AND
-                    // Kadir (echo trips the latch, Jarvis stops, Kadir answers inside
-                    // the recognizer's 1.5 s silence window) finalizes AFTER the tail
-                    // and passes — which is also what quietly gives voice barge-in back
-                    // for someone who talks over Jarvis and keeps going. The stated
-                    // cost is unchanged: a Kadir utterance begun AND finalized entirely
-                    // inside Jarvis's speech is dropped (half-duplex trade;
-                    // interrupt() is the deterministic cut).
+                // Three drop reasons, in decreasing certainty (also the "out=" value
+                // logged below -- distinguishing them is this instrumentation's whole
+                // point for the echo guard):
+                //
+                // 1. drop_speaking: WHILE THE SPEAKER PLAYS, no latch needed: nothing
+                //    the mic hears mid-speech is Kadir. The latch-only version of this
+                //    was the 4 Ağu 02:28 hole — Android skips onBeginningOfSpeech often
+                //    enough that a mangled echo's final arrived unlatched MID-SPEECH
+                //    with only the text gate standing, and Jarvis answered himself off
+                //    the loudspeaker.
+                // 2. drop_tail_latch: in the TAIL only with the latch (onset, or a
+                //    mid-speech partial) -- the tail is a probability window and
+                //    Jarvis's-gone-quiet is exactly when Kadir's real quick answer also
+                //    lands, so an UNLATCHED tail final passes (the two tests below pin
+                //    it).
+                // 3. drop_echo_text: the text gate, any time.
+                //
+                // Pass-back cases survive: a recognition turn spanning the echo AND
+                // Kadir (echo trips the latch, Jarvis stops, Kadir answers inside
+                // the recognizer's 1.5 s silence window) finalizes AFTER the tail
+                // and passes — which is also what quietly gives voice barge-in back
+                // for someone who talks over Jarvis and keeps going. The stated
+                // cost is unchanged: a Kadir utterance begun AND finalized entirely
+                // inside Jarvis's speech is dropped (half-duplex trade;
+                // interrupt() is the deterministic cut).
+                val dropReason = when {
+                    jarvisSpeakingNow() -> "drop_speaking"
+                    onsetDuringJarvisSpeech && echoGuardActive() -> "drop_tail_latch"
+                    isJarvisEcho(text) -> "drop_echo_text"
+                    else -> null
+                }
+                if (dropReason != null) {
+                    logEvent(gen, "stt.final", "len=${text.length} out=$dropReason")
                     _state.update { it.copy(partialText = null) }
                 } else {
+                    logEvent(gen, "stt.final", "len=${text.length} out=sent")
                     _state.update {
                         it.copy(partialText = null, transcript = appendLine(it, "user", text))
                     }
@@ -374,12 +430,13 @@ class VoiceSession(
 
         override fun onRecoverableError(): Unit = synchronized(lock) {
             if (gen != generation.get()) return
+            logEvent(gen, "stt.recoverable")
             _state.update { it.copy(partialText = null) }
             relisten(gen)
         }
 
         override fun onFatalError() {
-            endSession(gen, "Ses tanıma kullanılamıyor. Aramayı yeniden başlatmayı dene.")
+            endSession(gen, "Ses tanıma kullanılamıyor. Aramayı yeniden başlatmayı dene.", reason = "error")
         }
     }
 
@@ -387,9 +444,10 @@ class VoiceSession(
         override fun onUtteranceDone(): Unit = synchronized(lock) {
             if (gen != generation.get()) return
             if (ttsActive > 0) ttsActive--
+            logEvent(gen, "tts.done", "n=$ttsActive")
             if (ttsActive == 0) {
                 cancelSpeechWatchdog()
-                openGuardTail()
+                openGuardTail(gen)
                 if (_state.value.phase == VoicePhase.SPEAKING) {
                     _state.update { it.copy(phase = VoicePhase.LISTENING) }
                 }
@@ -449,11 +507,15 @@ class VoiceSession(
         // funnels through here, so the latch can never survive into a later utterance
         // -- the failure mode this file's history is full of.
         onsetDuringJarvisSpeech = false
+        firstPartialLogged = false
         sttRestartJob?.cancel()
         sttRestartJob = scope.launch {
             delay(STT_RESTART_DELAY_MS)
             synchronized(lock) {
-                if (gen == generation.get()) stt.listen()
+                if (gen == generation.get()) {
+                    logEvent(gen, "stt.arm", "delay=$STT_RESTART_DELAY_MS")
+                    stt.listen()
+                }
             }
         }
     }
@@ -496,6 +558,7 @@ class VoiceSession(
                 // MAX_SPEAK_GUARD_MS ceiling forward.
                 if (ttsActive == 0) guardStartedAtMs = nowMs()
                 ttsActive++
+                logEvent(gen, "tts.speak", "n=$ttsActive")
                 recordJarvisSpeech(event.text)
                 tts.speak(event.text)
                 val merged = appendLine(_state.value, "jarvis", event.text)
@@ -504,6 +567,7 @@ class VoiceSession(
             }
             is VoiceServerEvent.TurnComplete -> {
                 turnBoundary = true
+                logEvent(gen, "turn.complete")
                 // turn_complete means "no more jarvis_text is coming for this turn".
                 // It does NOT mean the loudspeaker went quiet. The server sends
                 // jarvis_text, transcript and turn_complete back to back, microseconds
@@ -520,14 +584,14 @@ class VoiceSession(
                     // Nothing to speak this turn (an empty reply), or every utterance
                     // already reported done. Settle now -- otherwise the call would wait
                     // for a callback that is never coming.
-                    openGuardTail()
+                    openGuardTail(gen)
                     _state.update { it.copy(phase = VoicePhase.LISTENING) }
                 } else {
                     armSpeechWatchdog(gen)
                 }
             }
             is VoiceServerEvent.Error ->
-                endSession(gen, errorMessage = "Hata: ${event.message}")
+                endSession(gen, errorMessage = "Hata: ${event.message}", reason = "error")
             is VoiceServerEvent.Speaker ->
                 _state.update { it.copy(lastSpeakerVerified = event.verified) }
             null -> Unit // unknown type or malformed frame -- ignore, do not crash the session
@@ -540,8 +604,9 @@ class VoiceSession(
      * this for the same live call, only the first actually stops the mic/STT/TTS/socket
      * and updates state -- the second sees `generation` already moved and no-ops.
      */
-    private fun endSession(gen: Int, errorMessage: String?): Unit = synchronized(lock) {
+    private fun endSession(gen: Int, errorMessage: String?, reason: String): Unit = synchronized(lock) {
         if (!generation.compareAndSet(gen, gen + 1)) return
+        logEvent(gen, "end", "reason=$reason")
         micJob?.cancel()
         micJob = null
         speechWatchdog?.cancel()
@@ -564,6 +629,12 @@ class VoiceSession(
 
     private fun startMicLoop(gen: Int) {
         micJob = scope.launch {
+            // Transition-only logging (Task 11): mic frames tick ~50-100/s, so logging
+            // every gate check would drown the timeline. Only the send<->drop flips are
+            // events; `lastGateSend` starts null so the FIRST check of the cycle always
+            // counts as one (there is no prior state to compare against). Local to this
+            // coroutine -- one mic loop per generation, no concurrent access.
+            var lastGateSend: Boolean? = null
             while (isActive && gen == generation.get()) {
                 val frame = mic.readFrame() ?: break
                 if (gen != generation.get()) break
@@ -572,7 +643,15 @@ class VoiceSession(
                 // DROPPED rather than sent: the server's speaker-ID buffer must never
                 // contain Jarvis's own voice. This is the structural half of the fix --
                 // it holds no matter what the recognizer decides about the text.
-                val send = synchronized(lock) { !echoGuardActive() }
+                val (send, why) = synchronized(lock) {
+                    val gated = echoGuardActive()
+                    val reason = if (!gated) "clear" else if (jarvisSpeakingNow()) "speaking" else "tail"
+                    (!gated) to reason
+                }
+                if (send != lastGateSend) {
+                    lastGateSend = send
+                    logEvent(gen, "mic.gate", "send=$send why=$why")
+                }
                 if (send) transport.sendBinary(frame)
             }
         }
