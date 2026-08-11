@@ -24,6 +24,11 @@ import android.util.Log
  * [VoiceSession]'s restart/barge-in logic is tested against a fake [SpeechToText]
  * instead (VoiceSessionTest). Only [isRecoverableSttError], a pure function over the
  * platform's error-code constants, is JVM-tested (SttErrorMappingTest).
+ *
+ * This class's own `tl ev=` lines (Task 11) intentionally omit the `t=`/`gen=` fields
+ * [VoiceSession]'s carry -- there is no session-relative clock or generation counter at
+ * this layer to attach -- and rely on logcat's own per-line timestamp for correlation
+ * against [VoiceSession]'s lines instead.
  */
 class AndroidSpeechToText(private val context: Context) : SpeechToText {
 

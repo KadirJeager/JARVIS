@@ -249,7 +249,14 @@ class RecognizerPipeProbeTest {
                 verdict in KNOWN_VERDICTS,
             )
         } finally {
-            instrumentation.runOnMainSync { recognizerRef[0]?.destroy() }
+            try {
+                instrumentation.runOnMainSync { recognizerRef[0]?.destroy() }
+            } catch (e: Exception) {
+                // Same reasoning as the fd closes below: a destroy() throw must not mask
+                // the try-block's own outcome (verdict already computed and logged above)
+                // or skip the fd closes that still need to run.
+                Log.w(TAG, "cleanup: recognizer destroy failed: ${e.message}")
+            }
             try {
                 readFd?.close()
             } catch (io: IOException) {

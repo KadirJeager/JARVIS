@@ -34,6 +34,7 @@ import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
+import okhttp3.OkHttpClient
 
 /**
  * Hand-rolled DI container (no Hilt — YAGNI for this slice). Wires the deployed backend
@@ -55,12 +56,23 @@ class AppContainer(
     val biometricGate: BiometricGate = AndroidBiometricGate(context.applicationContext),
     // A default expression may reference earlier parameters, so `authManager` is in scope
     // here and the real wiring stays the default rather than something callers assemble.
-    private val apis: ApiSet = NetworkModule.createApis(
+    //
+    // Shared by BOTH [apis] (jarvis-brain) and [voiceEnrollApi] (jarvis-voice) below: same
+    // Bearer/401-refresh interceptor chain either way, so building it once and passing it to
+    // both factories' `client` param avoids paying for a second connection pool + dispatcher
+    // (cleanup wave 2026-08-11). A test that overrides [apis] with a fake still gets this
+    // built (cheap, no I/O) since [voiceEnrollApi] is not always overridden alongside it.
+    private val httpClient: OkHttpClient = NetworkModule.buildHttpClient(
         tokenProvider = { authManager.currentToken() },
         // Runs on OkHttp's background thread, so blocking here is fine.
         // force=true: a 401 means the held token is bad no matter what its `exp`
         // claims, so this path must bypass the freshness reuse and actually mint.
         tokenRefresher = { runBlocking { authManager.silentSignIn(force = true).getOrNull() } },
+    ),
+    private val apis: ApiSet = NetworkModule.createApis(
+        tokenProvider = { authManager.currentToken() },
+        tokenRefresher = { runBlocking { authManager.silentSignIn(force = true).getOrNull() } },
+        client = httpClient,
     ),
     // A SEPARATE Retrofit instance pinned to jarvis-voice (see NetworkModule.VOICE_BASE_URL):
     // [com.jarvis.ui.voice.EnrollDeviceViewModel]'s challenge()/enroll() calls must never
@@ -70,6 +82,7 @@ class AppContainer(
     val voiceEnrollApi: VoiceEnrollApi = NetworkModule.createVoiceEnrollApi(
         tokenProvider = { authManager.currentToken() },
         tokenRefresher = { runBlocking { authManager.silentSignIn(force = true).getOrNull() } },
+        client = httpClient,
     ),
     // Swappable so a test can say "this device has signed in before" and assert the boot
     // path actually skips the splash — otherwise only the ViewModel would be pinned, and

@@ -59,7 +59,11 @@ class AndroidClipRecorder : ClipRecorder {
                 val bytesPerClip = (AUDIO_IN_RATE_HZ * seconds * BYTES_PER_SAMPLE).toInt()
                 (1..count).map { readClip(record, bytesPerClip, minBufferSize) }
             } finally {
-                record.stop()
+                // Guarded: a throw from startRecording() itself (state STOPPED, never
+                // started) would otherwise have its own exception masked by the
+                // IllegalStateException stop() raises when called on a non-recording
+                // AudioRecord -- release() must still run either way.
+                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop()
                 record.release()
             }
         }

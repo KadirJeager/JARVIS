@@ -611,6 +611,27 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
             detail="Ses klibi çözümlenemedi (geçersiz base64)",
         )
 
+    # M3 (cleanup wave 2026-08-11): N clips share ONE CM_TIMEOUT_S budget in the CM
+    # gate below (asyncio.wait_for wraps the whole batch) -- an unbounded request
+    # doesn't fail loudly, it just eventually 503s once that shared budget runs out.
+    # Checked AFTER the base64-decode 400 above (pinned by
+    # test_enroll_rejects_malformed_base64_clip) and BEFORE the CM gate, so an
+    # oversized/over-count batch never reaches inference.
+    if len(raw_clips) > config.ENROLL_MAX_CLIPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"En fazla {config.ENROLL_MAX_CLIPS} ses klibi gönderilebilir",
+        )
+    for idx, pcm in enumerate(raw_clips):
+        if len(pcm) > config.ENROLL_MAX_CLIP_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{idx + 1}. ses klibi çok büyük "
+                    f"(en fazla {config.ENROLL_MAX_CLIP_BYTES} bayt)"
+                ),
+            )
+
     # Anchors are immutable and un-evictable (config.CM_ENROLL_REQUIRED
     # docstring), so this gate fails CLOSED: no verdict is not a pass, unlike
     # the live verify path which fails open so Kadir is never locked out

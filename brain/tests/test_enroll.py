@@ -457,6 +457,55 @@ def test_enroll_proceeds_when_cm_probe_reports_loaded(enroll_client, monkeypatch
     assert r.json()["anchors"] >= 1
 
 
+def test_enroll_rejects_too_many_clips(enroll_client, monkeypatch):
+    """M3 (cleanup wave 2026-08-11): N clips share ONE CM_TIMEOUT_S budget below (the
+    CM gate's asyncio.wait_for wraps the whole batch) -- an unbounded batch must fail
+    with a clear 400 instead of silently eating into that shared budget."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(config, "ENROLL_MAX_CLIPS", 2)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip(), _clip(), _clip()]})
+    assert r.status_code == 400
+    assert "2" in r.json()["detail"]
+
+
+def test_enroll_accepts_clip_count_at_the_cap(enroll_client, monkeypatch):
+    """The cap is inclusive: exactly ENROLL_MAX_CLIPS clips must still succeed."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(config, "ENROLL_MAX_CLIPS", 2)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip(), _clip()]})
+    assert r.status_code == 200
+
+
+def test_enroll_rejects_oversized_clip(enroll_client, monkeypatch):
+    """Same shared-budget problem, per-clip axis: one oversized clip must not be able
+    to eat the whole batch's CM_TIMEOUT_S budget on its own."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(config, "ENROLL_MAX_CLIP_BYTES", 2)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})  # raw clip is 4 bytes
+    assert r.status_code == 400
+    assert "1." in r.json()["detail"]
+
+
+def test_enroll_decode_error_wins_over_the_batch_bounds(enroll_client, monkeypatch):
+    """Ordering contract: the base64-decode 400 (pinned by
+    test_enroll_rejects_malformed_base64_clip) must still fire even when the batch is
+    ALSO oversized -- decode is checked first, so its message, not the count/size
+    message, is what the caller sees."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(config, "ENROLL_MAX_CLIPS", 1)
+    r = c.post("/api/voice/enroll", json={"clips": ["not-valid-base64!!", _clip()]})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Ses klibi çözümlenemedi (geçersiz base64)"
+
+
 def test_enroll_returns_503_when_cm_exceeds_timeout(enroll_client, monkeypatch):
     """A stuck CM forward pass -- or a cold model load blocking on
     huggingface_hub.snapshot_download when CM_MODEL_DIR is unpopulated --

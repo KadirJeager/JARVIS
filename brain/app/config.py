@@ -275,6 +275,21 @@ SPEAKER_BARGE_IN_ONSET_BYTES = min(
     max(1, _utterance_bytes(0.5)), SPEAKER_UTTERANCE_MAX_BYTES
 )
 
+# Enroll batch bounds (M3, cleanup wave 2026-08-11): POST /api/voice/enroll's N clips
+# share ONE CM_TIMEOUT_S budget (main.py's `asyncio.wait_for(... [antispoof.is_bonafide(pcm)
+# for pcm in raw_clips] ...)` wraps the WHOLE batch), so an unbounded request doesn't fail
+# loudly -- it just eventually 503s once the shared budget runs out. These make the
+# contract explicit as two independent 400s instead.
+ENROLL_MAX_CLIPS = int(os.environ.get("JARVIS_ENROLL_MAX_CLIPS", "10"))
+# Per-clip byte cap: reuses SPEAKER_UTTERANCE_MAX_BYTES rather than inventing a second
+# number. EnrollRequest.clips are documented (main.py's EnrollRequest) as the same PCM16
+# mono 16kHz format SPEAKER_UTTERANCE_MAX_BYTES already bounds for the live utterance
+# buffer, so its ~10 s ceiling is already a realistic "no legitimate single utterance is
+# bigger than this" cap for one enroll clip too.
+ENROLL_MAX_CLIP_BYTES = int(
+    os.environ.get("JARVIS_ENROLL_MAX_CLIP_BYTES", str(SPEAKER_UTTERANCE_MAX_BYTES))
+)
+
 # Speaker identity MANAGEMENT (Katman 2b Dilim 3d). History cap bounds both
 # cost and privacy exposure (spec §4.2); the manual cap is an ACCIDENT guard,
 # not a security boundary -- the token holder can bypass voice entirely

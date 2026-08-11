@@ -64,8 +64,9 @@ object NetworkModule {
         tokenProvider: () -> String?,
         tokenRefresher: () -> String? = { null },
         baseUrl: String = BASE_URL,
+        client: OkHttpClient? = null,
     ): ApiSet {
-        val retrofit = buildRetrofit(tokenProvider, tokenRefresher, baseUrl)
+        val retrofit = buildRetrofit(tokenProvider, tokenRefresher, baseUrl, client)
         return ApiSet(
             chat = retrofit.create(JarvisApi::class.java),
             voice = retrofit.create(VoiceApi::class.java),
@@ -82,27 +83,48 @@ object NetworkModule {
      * [VOICE_BASE_URL]'s doc for why. A SEPARATE Retrofit instance, not another interface
      * on [createApis]'s single instance, because that instance is pinned to [baseUrl] and
      * this one must be pinned to [VOICE_BASE_URL] instead.
+     *
+     * [client] defaults to null (build a fresh OkHttpClient here, the original behaviour) so
+     * standalone callers -- [VoiceEnrollApiTest] included -- are unaffected. A caller that
+     * ALSO talks to [createApis]'s base (see [com.jarvis.AppContainer]) should instead pass
+     * that call's [buildHttpClient] instance here: same interceptor chain either way, but
+     * one connection pool + dispatcher shared between both bases instead of two.
      */
     fun createVoiceEnrollApi(
         tokenProvider: () -> String?,
         tokenRefresher: () -> String? = { null },
         baseUrl: String = VOICE_BASE_URL,
-    ): VoiceEnrollApi = buildRetrofit(tokenProvider, tokenRefresher, baseUrl).create(VoiceEnrollApi::class.java)
+        client: OkHttpClient? = null,
+    ): VoiceEnrollApi =
+        buildRetrofit(tokenProvider, tokenRefresher, baseUrl, client).create(VoiceEnrollApi::class.java)
+
+    /**
+     * The Bearer-attaching, 401-silent-retry OkHttp client both [createApis] and
+     * [createVoiceEnrollApi] build internally when not given one explicitly. Exposed so a
+     * caller that needs BOTH factories (jarvis-brain AND jarvis-voice, same auth) can build
+     * this ONCE and pass it to both `client` parameters instead of paying for a second
+     * connection pool + dispatcher for a client that would authenticate identically anyway.
+     */
+    fun buildHttpClient(
+        tokenProvider: () -> String?,
+        tokenRefresher: () -> String? = { null },
+    ): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(AuthInterceptor(tokenProvider))
+        .authenticator(TokenAuthenticator(tokenRefresher))
+        .build()
 
     private fun buildRetrofit(
         tokenProvider: () -> String?,
         tokenRefresher: () -> String?,
         baseUrl: String,
+        client: OkHttpClient? = null,
     ): Retrofit {
         val json = Json { ignoreUnknownKeys = true; explicitNulls = true }
-        val client = OkHttpClient.Builder()
-            .addInterceptor(AuthInterceptor(tokenProvider))
-            .authenticator(TokenAuthenticator(tokenRefresher))
-            .build()
+        val httpClient = client ?: buildHttpClient(tokenProvider, tokenRefresher)
         return Retrofit.Builder()
             // Retrofit demands the trailing slash; accept it either way from the caller.
             .baseUrl(baseUrl.trimEnd('/') + "/")
-            .client(client)
+            .client(httpClient)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
     }

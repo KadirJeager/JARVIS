@@ -251,7 +251,7 @@ async def test_challenge_grant_refuses_a_freshly_scored_spoof():
     assert voice_challenge.has_valid_grant(db, bridge._user_id) is False
     import json
     reply_text = json.loads(ws.sent[-3])["text"]
-    assert "canlılık" in reply_text.lower() or "doğrulanamadı" in reply_text.lower()
+    assert "canlılığı" in reply_text.lower() or "doğrulanamadı" in reply_text.lower()
 
 
 @pytest.mark.asyncio

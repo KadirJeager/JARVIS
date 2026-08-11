@@ -126,6 +126,35 @@ class EnrollDeviceViewModelTest {
         )
     }
 
+    /**
+     * Item 4 (cleanup wave 2026-08-11): before this fix, an unmapped challenge() failure
+     * fell through to mapEnrollError()'s enroll-phase default ("Kayıt tamamlanamadı (…)"),
+     * which reads wrong here -- no recording has happened yet at this point.
+     */
+    @Test
+    fun challengeFailureGetsItsOwnDefaultMessageNotTheEnrollPhaseOne() = runTest(dispatcher) {
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(challengeStatus = 500), FakeRecorder(), "x")
+        vm.start()
+        advanceUntilIdle()
+
+        val failed = vm.state.value as EnrollState.Failed
+        assertEquals("Kod istenemedi (HTTP 500).", failed.message)
+    }
+
+    /** The shared 409/422/503 mappings must still apply during the challenge() phase too. */
+    @Test
+    fun challengeFailureStillUsesTheSharedFourZeroNineMapping() = runTest(dispatcher) {
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(challengeStatus = 409), FakeRecorder(), "x")
+        vm.start()
+        advanceUntilIdle()
+
+        val failed = vm.state.value as EnrollState.Failed
+        assertEquals(
+            "Kod doğrulanamadı. 'Bu cihazı tanıt' ile yeni bir kod alıp tekrar dene.",
+            failed.message,
+        )
+    }
+
     @Test
     fun spoofRejectionSaysSoPlainly() = runTest(dispatcher) {
         // Retrying identically will not help, so the message must not read as a

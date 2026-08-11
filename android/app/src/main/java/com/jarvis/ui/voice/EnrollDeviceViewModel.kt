@@ -47,7 +47,10 @@ fun EnrollState.label(): String? = when (this) {
     // pause here is a client-side mitigation, not a fix for the guard itself.
     EnrollState.WaitingForSpokenCode ->
         "Jarvis'in söylediği kodu, konuşması bittikten kısa bir duraklamadan sonra tekrar et"
-    EnrollState.Recording -> "Konuş — örnek alınıyor (3/3)"
+    // M2 (cleanup wave 2026-08-11): clips record back-to-back with no per-clip progress
+    // signal reaching this label, so a "(3/3)" counter was always fake (always the same
+    // string, painted once, never advancing) -- dropped rather than left dishonest.
+    EnrollState.Recording -> "Konuş — üç kısa örnek alınıyor…"
     EnrollState.Uploading -> "Kaydediliyor…"
     is EnrollState.Done -> "Bu cihaz tanıtıldı ($anchors örnek)"
     is EnrollState.Failed -> message
@@ -103,7 +106,12 @@ class EnrollDeviceViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: HttpException) {
-                _state.value = EnrollState.Failed(mapEnrollError(e))
+                // No recording has happened yet at this point, so proceedToRecording()'s
+                // default ("Kayıt tamamlanamadı") would be misleading here -- an
+                // unmapped challenge() failure gets its own phase-appropriate default.
+                _state.value = EnrollState.Failed(
+                    mapEnrollError(e, default = "Kod istenemedi (HTTP ${e.code()})."),
+                )
             } catch (e: IOException) {
                 _state.value = EnrollState.Failed(NETWORK_MESSAGE)
             }
@@ -145,13 +153,22 @@ class EnrollDeviceViewModel(
         }
     }
 
-    private fun mapEnrollError(e: HttpException): String = when (e.code()) {
+    /**
+     * Shared 409/422/503 mapping for both [start]'s challenge() failures and
+     * [proceedToRecording]'s enroll() failures. [default] is what each phase falls back to
+     * for every OTHER status -- the two phases mean different things ("no code was ever
+     * requested" vs. "recording/upload failed"), so each caller supplies its own.
+     */
+    private fun mapEnrollError(
+        e: HttpException,
+        default: String = "Kayıt tamamlanamadı (${e.code()}).",
+    ): String = when (e.code()) {
         // M1 (final review, 2026-08-11): the grant behind this 409 already expired or was
         // never minted -- repeating the SAME (now-dead) code cannot recover it. The only
         // way forward is a NEW challenge, which only the button re-fires.
         409 -> "Kod doğrulanamadı. 'Bu cihazı tanıt' ile yeni bir kod alıp tekrar dene."
         422 -> "Alınan ses örneği sahte olarak işaretlendi, kayıt yapılmadı."
         503 -> "Ses doğrulaması şu anda yapılamıyor, birazdan tekrar dene."
-        else -> "Kayıt tamamlanamadı (${e.code()})."
+        else -> default
     }
 }
