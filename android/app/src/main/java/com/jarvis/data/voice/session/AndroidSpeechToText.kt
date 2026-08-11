@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -27,10 +28,15 @@ import java.util.concurrent.atomic.AtomicLong
  * open its own microphone -- this is what actually puts STT inside the AEC-processed
  * signal (see the long comment on [recognizeIntent] for why the earlier
  * EXTRA_AUDIO_SOURCE attempt never worked). [PfdFeedPolicy] decides, per [start] call,
- * whether to keep using the pipe: two consecutive dead cycles (no partial, no result,
- * AND either the writer was still stuck at cycle end or too few bytes were actually
- * consumed -- see [PfdFeedPolicy.onCycleEnd]'s doc for why bytes written alone is not
- * proof of consumption) flip it to legacy mode PERMANENTLY for that instance. A null
+ * whether to keep using the pipe: two consecutive DEAD cycles flip it to legacy mode
+ * PERMANENTLY for that instance. A cycle is only judged dead or alive once it has run
+ * long enough to mean anything (a short cycle with no partial and no result is normal
+ * idle behaviour -- ERROR_RECOGNIZER_BUSY/NO_MATCH/SPEECH_TIMEOUT can all fire quickly
+ * on an unattended call -- not evidence, so it counts as neither and leaves the streak
+ * untouched); once a cycle has run long enough, it is dead only if it produced no
+ * partial, no result, AND either the writer was still stuck at cycle end or too few
+ * bytes were actually consumed. See [PfdFeedPolicy.onCycleEnd]'s doc for the full
+ * three-state verdict and why bytes written alone is not proof of consumption. A null
  * [tapSource] is the same legacy mode from the very first call -- the safety hatch if
  * PFD needs to be disabled entirely.
  *
@@ -251,6 +257,11 @@ class AndroidSpeechToText(
             writerThread = writer,
             bytesWritten = bytesWritten,
             drops = drops,
+            // Stamped here, read back in endCurrentPfdCycle() to compute the
+            // cycle's wall-clock duration for PfdFeedPolicy's duration gate.
+            // elapsedRealtime (not currentTimeMillis): monotonic, unaffected by
+            // wall-clock adjustments, and this is a duration, not a timestamp.
+            startedAtElapsedMs = SystemClock.elapsedRealtime(),
         )
 
         // Copy of the base intent (same extras as today) plus the PFD-only ones.
@@ -332,11 +343,20 @@ class AndroidSpeechToText(
         // matter what the recognizer process does with ITS copy; joining first (the
         // original order) meant the join below was guaranteed to burn its full
         // timeout in exactly the PFD_IGNORED case it exists to detect. Closing here,
-        // not right after startListening(), is deliberate: the Binder hand-off race
-        // that forces a LATE close (RecognizerPipeProbeTest's ERROR:5 lesson) only
-        // applies to closing immediately after startListening() returns, while that
-        // hand-off is still in flight -- by cycle end (a terminal callback already
-        // fired, or destroy() was called) it is long since complete.
+        // not right after startListening(), is deliberate -- but the two call sites
+        // that reach this are not equally certain the Binder hand-off has completed:
+        // a terminal recognizer callback (onResults/onError) DOES prove it -- the
+        // recognizer already read from (or gave up on) this exact fd, so the
+        // hand-off is unquestionably done. destroy() and a second listen() racing
+        // ahead of the first cycle's terminal callback do NOT have that proof; they
+        // reach here via their own main.post{}, shortly after startListening() was
+        // posted on the same Handler/Looper -- we rely on SpeechRecognizer's queued
+        // dispatch being bound to that same main Looper (so our post, enqueued
+        // after startListening() returned, cannot run before the framework's own
+        // queued hand-off does), not on elapsed wall-clock time. This is the same
+        // ordering guarantee RecognizerPipeProbeTest's ERROR:5 lesson is about; it
+        // has held in practice for all three paths, but only the terminal-callback
+        // path is actually PROVEN rather than inferred from Looper ordering.
         try {
             cycle.readFd.close()
         } catch (io: IOException) {
@@ -354,21 +374,36 @@ class AndroidSpeechToText(
         // fd) is still holding the pipe open without draining it -- our own reference
         // is gone, so this is not an artifact of our own cleanup ordering. A stuck
         // writer means the cycle is dead regardless of how many bytes the kernel pipe
-        // buffer silently absorbed (see PfdFeedPolicy.MIN_CONSUMED_BYTES's doc).
+        // buffer silently absorbed (see PfdFeedPolicy.MIN_CONSUMED_BYTES's doc). Note
+        // WRITER_JOIN_TIMEOUT_MS therefore bounds two different things at once: how
+        // long this call can stall the main thread, AND how long we wait before
+        // calling the writer "stuck" -- a recognizer that is merely slow (> 100ms) to
+        // close its own dup, without ever having been broken, would be reported
+        // stuck here. The duration gate below is what keeps that cheap: this signal
+        // only feeds a verdict at all on cycles that already ran >= 3s with no
+        // partial/result, which a merely-slow-but-healthy recognizer is not.
         val writerStuck = cycle.writerThread.isAlive
         if (writerStuck) {
-            // Kept at a low bound (see WRITER_JOIN_TIMEOUT_MS) rather than moved off
-            // the main thread: PfdFeedPolicy and this class's own cycle bookkeeping
-            // are deliberately main-thread-only (see class doc), and calling
-            // policy.onCycleEnd() from a background thread would race the main
-            // thread's own policy.shouldUsePfd() reads on the very next listen().
             // The thread is a daemon, so it cannot outlive the process, and its own
             // `.use` block still closes writeFd whenever the write unblocks or the
             // pipe breaks -- a documented, bounded risk, not a hang in this call.
             Log.w(TAG, "tl ev=pfd.writerJoinTimeout gen=${cycle.gen}")
         }
 
-        policy?.onCycleEnd(hadPartial, hadResult, cycle.bytesWritten.get(), writerStuck)
+        // Teardown (this whole function) stays synchronous on the main thread
+        // rather than backgrounding the join + policy call. The stronger reason is
+        // ORDERING, not just PfdFeedPolicy's fields being non-atomic (a background
+        // join + main.post { policy.onCycleEnd(...) } would keep policy touched
+        // only from the main thread too, and so would not by itself be unsafe):
+        // endCurrentPfdCycle() runs at the very top of listen(), and
+        // activePolicy.shouldUsePfd() is read four lines later in the SAME
+        // function. If this cycle's onCycleEnd() were marshalled to run later via
+        // main.post{}, that shouldUsePfd() read could run BEFORE the marshalled
+        // onCycleEnd() -- listen() would silently decide PFD-vs-legacy for the new
+        // cycle against a stale policy state and skip a cycle's worth of fail-streak
+        // accounting, with no error or log to reveal it happened.
+        val elapsedMs = SystemClock.elapsedRealtime() - cycle.startedAtElapsedMs
+        policy?.onCycleEnd(hadPartial, hadResult, cycle.bytesWritten.get(), writerStuck, elapsedMs)
         Log.i(TAG, "tl ev=pfd.cycle ${policy?.cycleSummary()} drops=${cycle.drops.get()}")
     }
 
@@ -395,17 +430,19 @@ class AndroidSpeechToText(
         // (pipe I/O thread) before offer() starts rejecting and counting drops.
         const val PFD_QUEUE_CAPACITY = 32
 
-        // Bounds how long endCurrentPfdCycle() can stall the MAIN thread waiting
-        // for the writer to finish (it runs inside onResults()/onError(), both
-        // main-thread callbacks -- see the class doc on why cycle teardown stays
-        // on the main thread rather than moving to a background executor). Kept
-        // low rather than the original 500ms: after the readFd-before-join fix
-        // above, the writer finishes in low single-digit milliseconds in the
-        // common case (queue drains fast; a healthy recognizer either already
-        // drained everything or our readFd close unblocks a stalled write via
-        // EPIPE), so 100ms is generous headroom for that path while still
-        // bounding the rare truly-wedged-write case (see the writerStuck comment
-        // below) instead of reproducing the original 500ms-per-turn stall.
+        // Bounds TWO different things at once (see the writerStuck comment in
+        // endCurrentPfdCycle() for the second): how long endCurrentPfdCycle() can
+        // stall the MAIN thread waiting for the writer to finish (it runs inside
+        // onResults()/onError(), both main-thread callbacks -- see the class doc on
+        // why cycle teardown stays on the main thread rather than moving to a
+        // background executor), and how long we wait before reporting the writer as
+        // "stuck" to PfdFeedPolicy. Kept low rather than the original 500ms: after
+        // the readFd-before-join fix above, the writer finishes in low single-digit
+        // milliseconds in the common case (queue drains fast; a healthy recognizer
+        // either already drained everything or our readFd close unblocks a stalled
+        // write via EPIPE), so 100ms is generous headroom for that path while still
+        // bounding the rare truly-wedged-write case instead of reproducing the
+        // original 500ms-per-turn stall.
         const val WRITER_JOIN_TIMEOUT_MS = 100L
 
         // Sentinel compared by reference (===), never by content -- a real captured
@@ -502,7 +539,9 @@ class AndroidSpeechToText(
  * pipe's read end (a separate copy is duplicated across Binder for the recognizer
  * itself when the intent carrying it is delivered); [writeFd] is owned entirely by
  * [writerThread] and is not held here -- it is closed by the writer's own `.use` block,
- * never from the main thread.
+ * never from the main thread. [startedAtElapsedMs] is stamped at construction
+ * (`SystemClock.elapsedRealtime()`) so teardown can compute the cycle's wall-clock
+ * duration for [PfdFeedPolicy]'s duration gate.
  */
 private class PfdCycle(
     val gen: Int,
@@ -511,6 +550,7 @@ private class PfdCycle(
     val writerThread: Thread,
     val bytesWritten: AtomicLong,
     val drops: AtomicLong,
+    val startedAtElapsedMs: Long,
 )
 
 /**
