@@ -301,10 +301,23 @@ def test_reject_route_rejects_a_missing_reason(client, db):
     approval_id = _request(db)
     r = client.post(f"/api/approvals/{approval_id}/reject", json={})
     assert r.status_code == 422
-    # `validate_default=True` (main.RejectRequest) routes an entirely absent
-    # field through the SAME Turkish validator message as a blank one --
+    # `validate_default=True` (main.RejectRequest) routes a PRESENT-BUT-EMPTY
+    # body through the SAME Turkish validator message as a blank one --
     # without it pydantic's own generic English "Field required" would leak
     # through here instead.
+    assert "boş olamaz" in r.json()["detail"][0]["msg"]
+
+
+def test_reject_route_rejects_a_completely_empty_body(client, db):
+    """Distinct from `json={}` above: NO body at all (no Content-Type, zero
+    bytes). `RejectRequest` alone does not catch this -- FastAPI's own
+    required-body-PARAMETER check runs first and would surface its generic
+    English "Field required" for `loc: ["body"]` -- `_validate_reject_body`
+    (main.py) exists specifically to route this case through the same
+    Turkish message too (review fix, minor)."""
+    approval_id = _request(db)
+    r = client.post(f"/api/approvals/{approval_id}/reject")  # no json= kwarg
+    assert r.status_code == 422
     assert "boş olamaz" in r.json()["detail"][0]["msg"]
 
 
@@ -321,11 +334,27 @@ def test_reject_route_passes_the_reason_through(client, db):
     assert approvals.get(db, approval_id, USER)["decision_reason"] == "Şimdi olmaz"
 
 
-def test_reject_appends_the_reason_as_a_model_facing_transcript_row(client, db):
-    """P2b: decide() has no live channel back to the model (see
-    main._decide_approval's docstring for the trace) -- the smallest correct
-    wiring is a transcript row the session replays on its next cold start.
-    Pin its exact shape: role, kind, meta, and the required sentence."""
+def test_reject_route_resolves_a_preset_id_to_its_prompt_fill(client, db):
+    """Onay Kartı 2.0, Task 3 review fix (c): the brief's own
+    `"<slug-or-text>"` -- a client sending one of REJECT_REASONS' ids (a
+    picker shortcut) must not have that bare English slug land verbatim in
+    `decision_reason`; it resolves to the preset's Turkish `prompt_fill`."""
+    approval_id = _request(db)
+    preset = approvals.REJECT_REASONS[0]
+
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": preset.id})
+
+    assert r.status_code == 200
+    assert approvals.get(db, approval_id, USER)["decision_reason"] == preset.prompt_fill
+
+
+def test_reject_appends_a_chat_facing_transcript_row(client, db):
+    """The _messages half (review fix (b)): THIS row is what the Android
+    client renders as a Bubble (role="model", an unknown kind to the
+    shipped client -- UiMessage.kt/ChatScreen.kt), so it must read as Jarvis
+    addressing Kadir, NOT as Jarvis narrating Kadir's own action back at him
+    in the third person (that framing is reserved for the model-only live
+    event, pinned separately below)."""
     approval_id = _request(db)
 
     r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
@@ -337,7 +366,10 @@ def test_reject_appends_the_reason_as_a_model_facing_transcript_row(client, db):
     assert row["role"] == "model"
     assert row["meta"] == {"approval_id": approval_id}
     assert row["user_id"] == USER and row["session_id"] == SESSION
-    assert row["text"] == "Kullanıcı cancel_reminder çağrısını reddetti: Yanlış kişi"
+    assert row["text"] == "Anladım, cancel_reminder isteğini reddettin. Gerekçe: Yanlış kişi."
+    # NOT the third-person, model-only phrasing -- that would be Jarvis
+    # narrating Kadir's own action back at him (the bug this fix closes).
+    assert "Kullanıcı" not in row["text"]
 
 
 def test_rejecting_twice_appends_the_transcript_row_only_once(client, db):
@@ -350,6 +382,91 @@ def test_rejecting_twice_appends_the_transcript_row_only_once(client, db):
 
     assert first.status_code == 200 and second.status_code == 200
     assert second.json()["already"] is True
+    rows = [m for m in _chat_rows(db) if m.get("kind") == "approval_decision"]
+    assert len(rows) == 1
+
+
+async def test_reject_writes_the_exact_model_notice_to_a_warm_session(client, db, monkeypatch):
+    """The LIVE-event half (Onay Kartı 2.0, Task 3, review Important 2): a
+    session still open in memory must see the notice on its VERY NEXT turn
+    -- the scenario a transcript-only fix misses entirely, since
+    `_ensure_session` returns early for an already-open session
+    (main.py:406-409) and never replays anything into it. Isolated
+    session_service (same pattern as `production_init` below) so this does
+    not depend on, or leak into, other tests sharing SESSION/USER."""
+    sessions = InMemorySessionService()
+    monkeypatch.setattr(main_mod, "_session_service", sessions)
+    approval_id = _request(db)
+    await sessions.create_session(app_name=main_mod.APP_NAME, user_id=USER, session_id=SESSION)
+
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
+    assert r.status_code == 200
+
+    session = await sessions.get_session(
+        app_name=main_mod.APP_NAME, user_id=USER, session_id=SESSION)
+    texts = [e.content.parts[0].text for e in session.events
+             if e.content and e.content.parts]
+    assert "Kullanıcı cancel_reminder çağrısını reddetti: Yanlış kişi" in texts
+
+
+def test_reject_writes_nothing_live_when_the_session_is_not_open(client, db):
+    """The other half of the same pin: no session in memory for this
+    (user, session_id) -> the live-event try/except must skip quietly (no
+    exception surfaced to the client) and still perform the transcript
+    write (test_reject_appends_a_chat_facing_transcript_row's job)."""
+    approval_id = _request(db)
+    r = client.post(f"/api/approvals/{approval_id}/reject", json={"reason": "Yanlış kişi"})
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST approve — symmetric notice (Onay Kartı 2.0, Task 3 review fix (a))
+# ---------------------------------------------------------------------------
+
+
+def test_approve_appends_a_chat_notice_with_the_outcome(client, db, monkeypatch):
+    """Before this fix, only rejections wrote anything -- a cold-started
+    session would see the original "onaylıyor musun, bekle" card and never
+    learn the model's own tool call actually ran. Approval must close the
+    loop too."""
+    ex = CountingExecutor(result="Hatırlatma iptal edildi.")
+    monkeypatch.setitem(approvals.EXECUTORS, "cancel_reminder", ex)
+    approval_id = _request(db)
+
+    r = client.post(f"/api/approvals/{approval_id}/approve")
+
+    assert r.status_code == 200
+    rows = [m for m in _chat_rows(db) if m.get("kind") == "approval_decision"]
+    assert len(rows) == 1
+    assert rows[0]["text"] == "Onayladın, cancel_reminder isteğini çalıştırdım: Hatırlatma iptal edildi."
+
+
+async def test_approve_writes_the_outcome_to_a_warm_session(client, db, monkeypatch):
+    sessions = InMemorySessionService()
+    monkeypatch.setattr(main_mod, "_session_service", sessions)
+    ex = CountingExecutor(result="Hatırlatma iptal edildi.")
+    monkeypatch.setitem(approvals.EXECUTORS, "cancel_reminder", ex)
+    approval_id = _request(db)
+    await sessions.create_session(app_name=main_mod.APP_NAME, user_id=USER, session_id=SESSION)
+
+    r = client.post(f"/api/approvals/{approval_id}/approve")
+    assert r.status_code == 200
+
+    session = await sessions.get_session(
+        app_name=main_mod.APP_NAME, user_id=USER, session_id=SESSION)
+    texts = [e.content.parts[0].text for e in session.events
+             if e.content and e.content.parts]
+    assert "Kullanıcı cancel_reminder çağrısını onayladı: Hatırlatma iptal edildi." in texts
+
+
+def test_approving_twice_does_not_double_notify(client, db, monkeypatch):
+    ex = CountingExecutor()
+    monkeypatch.setitem(approvals.EXECUTORS, "cancel_reminder", ex)
+    approval_id = _request(db)
+
+    client.post(f"/api/approvals/{approval_id}/approve")
+    client.post(f"/api/approvals/{approval_id}/approve")
+
     rows = [m for m in _chat_rows(db) if m.get("kind") == "approval_decision"]
     assert len(rows) == 1
 

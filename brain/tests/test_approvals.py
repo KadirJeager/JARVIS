@@ -364,6 +364,19 @@ def test_rejection_with_a_whitespace_only_reason_is_refused():
         approvals.decide(db, approval_id, USER, "rejected", reason="   ")
 
 
+@pytest.mark.parametrize("bad_reason", [123, True, 3.14, {"a": 1}, ["x"]])
+def test_rejection_with_a_non_string_reason_is_refused(bad_reason):
+    """Same bug class the config.operand_of review fixed in the same commit:
+    a non-string value must fail closed, not stringify into a repr that gets
+    written to the approval doc/claim and quoted verbatim in
+    REJECTION_MODEL_NOTICE ("...reddetti: {'a': 1}")."""
+    db = FakeDB()
+    approval_id = _request(db)
+    with pytest.raises(ValueError):
+        approvals.decide(db, approval_id, USER, "rejected", reason=bad_reason)
+    assert _doc(db, approval_id)["status"] == approvals.STATUS_PENDING
+
+
 def test_a_rejection_without_reason_never_consumes_the_claim_slot():
     """The mandatory-reason check must run BEFORE claim create() -- a
     malformed rejection must not burn the idempotency slot, so a later,

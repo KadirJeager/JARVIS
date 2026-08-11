@@ -427,7 +427,12 @@ def decide(db, approval_id: str, user_id: str, decision: str, *,
     guard -- i.e. BEFORE the Firestore read, let alone the claim create()
     below -- so a malformed call fails before it can consume the claim's
     idempotency slot for a real rejection later. Blank-after-strip counts as
-    missing, same rule as config.operand_of's own blank check.
+    missing, same rule as config.operand_of's own blank check. A NON-STRING
+    reason (123, True, {"a": 1}, ["x"]) is rejected outright, not
+    stringified: the exact bug class this function's own review fixed in
+    config.operand_of in the same commit -- silently accepting it would
+    write a repr into both the approval doc and REJECTION_MODEL_NOTICE
+    ("...reddetti: {'a': 1}") instead of failing closed.
 
     Sıra sözleşmedir, gevşetilemez:
     oku → sahiplik → status pending mi → SÜRE → claim create() → status yaz →
@@ -438,9 +443,9 @@ def decide(db, approval_id: str, user_id: str, decision: str, *,
     if decision not in DECISIONS:
         raise ValueError(f"geçersiz karar: {decision!r} (beklenen: {DECISIONS})")
     if decision == STATUS_REJECTED:
-        reason = reason.strip() if isinstance(reason, str) else reason
-        if not reason:
-            raise ValueError("ret için gerekçe zorunlu (reason boş/eksik olamaz)")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("ret için gerekçe zorunlu (reason boş/eksik/metin-dışı olamaz)")
+        reason = reason.strip()
     if executors is None:
         executors = EXECUTORS
 

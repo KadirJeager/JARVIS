@@ -10,7 +10,7 @@ from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from . import antispoof, approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_challenge, voice_manage, voice_trust
 from .agent import AGENT_NAME
@@ -902,12 +902,48 @@ async def get_approval(approval_id: str, email: str = Depends(require_user)):
     return item
 
 
-# Sentence handed back to the model as the rejected tool call's result (Onay
-# Kartı 2.0, Task 3, P2b). See _decide_approval's docstring for WHERE this
-# actually reaches the model -- it is not the tool call's own synchronous
-# return value, because that value was already produced (and consumed) at
-# approval-REQUEST time, long before a decision exists.
+# Sentence handed back to the MODEL as the decided tool call's result (Onay
+# Kartı 2.0, Task 3, P2b; review fix (a): approvals close the loop too, not
+# only rejections). This is the LIVE-event half only (_model_notice, used by
+# _decide_approval) -- it is NEVER rendered to Kadir, so third-person
+# "Kullanıcı ... reddetti" framing (an observation ABOUT the user, the way a
+# tool/function result reads) is correct here. REJECTION_MODEL_NOTICE is the
+# brief's own exact required string; kept as a named constant because a test
+# pins it verbatim.
 REJECTION_MODEL_NOTICE = "Kullanıcı {tool} çağrısını reddetti: {reason}"
+
+
+def _model_notice(status: str, tool: str, reason: str | None, outcome: str | None) -> str:
+    """The LIVE-event half of decision delivery (see REJECTION_MODEL_NOTICE
+    above and _decide_approval's docstring for where this is used and why
+    it differs from _chat_notice below)."""
+    if status == approvals.STATUS_REJECTED:
+        return REJECTION_MODEL_NOTICE.format(tool=tool, reason=reason)
+    if status == approvals.STATUS_FAILED:
+        return f"Kullanıcı {tool} çağrısını onayladı ama yürütme başarısız oldu: {outcome}"
+    return (f"Kullanıcı {tool} çağrısını onayladı: {outcome}" if outcome
+            else f"Kullanıcı {tool} çağrısını onayladı.")
+
+
+def _chat_notice(status: str, tool: str, reason: str | None, outcome: str | None) -> str:
+    """The _messages transcript half of decision delivery (Onay Kartı 2.0,
+    Task 3 review fix (b)): THIS one DOES surface to Kadir, via
+    GET /api/history -> the Android client's Bubble (role="model" renders as
+    a Jarvis-styled bubble; kind="approval_decision" is unknown to the
+    shipped client -- UiMessage.isApprovalCard requires an EXACT
+    kind=="approval" match, android/.../UiMessage.kt -- so ChatScreen.kt
+    always falls through to a plain Bubble for this kind, never an
+    ApprovalCard). _model_notice's third-person "Kullanıcı ... reddetti"
+    framing is correct for a tool result the model alone reads, but rendered
+    as a Jarvis-voiced chat bubble it reads as Jarvis narrating Kadir's OWN
+    action back at him -- so this half is addressed TO Kadir instead, the
+    way Jarvis would actually reply, same information."""
+    if status == approvals.STATUS_REJECTED:
+        return f"Anladım, {tool} isteğini reddettin. Gerekçe: {reason}."
+    if status == approvals.STATUS_FAILED:
+        return f"Onayladın ama {tool} çalıştırılamadı: {outcome}"
+    return (f"Onayladın, {tool} isteğini çalıştırdım: {outcome}" if outcome
+            else f"Onayladın, {tool} isteğini çalıştırdım.")
 
 
 async def _decide_approval(approval_id: str, email: str, decision: str,
@@ -916,21 +952,37 @@ async def _decide_approval(approval_id: str, email: str, decision: str,
     ihlalini ve olmayan onayı BİREBİR aynı `status="not_found"` ile döner; uç
     ikisini de aynı 404'e çevirir.
 
-    FINDING (Onay Kartı 2.0, Task 3, P2b -- see task-3-report.md for the
-    full trace): decide() itself has NO channel back into a live model turn.
-    The tool call that raised this approval already returned its own result
-    -- APPROVAL_PENDING_REPLY, "onay kartı gönderildi, bekle" -- at REQUEST
-    time (_approval_sink, above). By the time a decision lands here, minutes
-    or hours later over a completely separate HTTP request, that ADK turn is
-    long over; there is no open function-call waiting on this response. The
-    only path back into the model's context AT ALL is the same one the
-    pending card itself already relies on: _messages -> _ensure_session's
-    transcript replay on the session's next cold start (main.py, above,
-    "rehydrate"). So on an ACTUAL new rejection (not a stale/duplicate
-    `already` touch), this appends the same kind of row the sink itself
-    writes -- best effort, exactly like the sink's card/push writes: the
-    decision is already durably recorded above regardless of whether this
-    write succeeds."""
+    Delivery to the model (Onay Kartı 2.0, Task 3, P2b; review fix (a)/(b))
+    has TWO independent halves, fired on ANY fresh, real decision --
+    approval too, not only rejection (fix (a): otherwise the model never
+    learns whether Kadir approved or rejected what it is still waiting on).
+    Neither half alone is sufficient:
+
+    1. A live ADK Event, appended directly to the session IF it is still in
+       memory (`_session_service.get_session` -- the SAME lookup
+       `_ensure_session` uses at the top of this file, main.py:406-409):
+       this is what the model reads on its VERY NEXT turn in that session.
+       Covers TEXT (Kadir keeps typing right after deciding -- the scenario
+       this feature exists for, and the one a transcript-only fix would
+       have missed entirely, since `_ensure_session` returns early for an
+       already-open session and never replays anything into it) AND VOICE
+       (voice.py shares this exact same `_session_service` and session id
+       `voice-{user_id}`, voice.py:508, and voice turns also run through
+       `run_async` -- see `_init_voice`'s docstring above).
+    2. A `_messages` transcript row, replayed ONLY on `_ensure_session`'s
+       COLD-START rehydration (main.py:403-441) -- i.e. only if the process
+       LOST the in-memory session (restart/eviction) AND the user later
+       sends a NEW turn to that SAME session id. This is what survives a
+       restart, for TEXT ONLY: it buys NOTHING on the voice path, because
+       voice.py never calls `_messages.history` at all -- a voice-born
+       approval's decision never rehydrates there, this half is dead weight
+       for voice specifically. Kept anyway (costs nothing) -- and it is also
+       what Kadir sees as a chat bubble, hence `_chat_notice`'s DIFFERENT,
+       non-narrating phrasing (see that function's docstring).
+
+    Both best-effort, in separate try/except blocks so one failing does not
+    skip the other: the decision itself is already durably recorded above
+    regardless of whether either write succeeds."""
     try:
         _init()
         out = await asyncio.to_thread(
@@ -943,23 +995,44 @@ async def _decide_approval(approval_id: str, email: str, decision: str,
     if out["status"] == approvals.STATUS_NOT_FOUND:
         raise HTTPException(status_code=404, detail=APPROVAL_NOT_FOUND)
 
-    if (decision == approvals.STATUS_REJECTED
-            and out["status"] == approvals.STATUS_REJECTED
-            and not out["already"]):
+    # `already=True` covers both a stale/duplicate touch AND expiry-at-decide
+    # (approvals.decide always returns already=True for STATUS_EXPIRED) --
+    # neither one is a fresh, real decision, so neither gets a notice.
+    if not out["already"]:
         try:
             approval = await asyncio.to_thread(
                 lambda: approvals.get(_memory.db, approval_id, email))
-            if approval is not None:
-                tool = approval.get("tool_name") or approval.get("kind") or "işlem"
-                text = REJECTION_MODEL_NOTICE.format(tool=tool, reason=reason)
-                _messages.append(email, approval["session_id"], "model", text,
-                                 kind="approval_decision",
-                                 meta={"approval_id": approval_id})
         except Exception:
+            approval = None
             logging.exception(
-                "approvals: ret gerekçesi transcript'e yazılamadı id=%s -- karar "
-                "kayıtlı ama model bir sonraki soğuk başlangıca kadar görmeyecek",
-                approval_id)
+                "approvals: karar sonrası doküman tekrar okunamadı id=%s -- model "
+                "bilgilendirilemeyecek", approval_id)
+        if approval is not None:
+            tool = approval.get("tool_name") or approval.get("kind") or "işlem"
+            session_id = approval["session_id"]
+
+            try:
+                session = await _session_service.get_session(
+                    app_name=APP_NAME, user_id=email, session_id=session_id)
+                if session is not None:
+                    text = _model_notice(out["status"], tool, reason, out["outcome"])
+                    await _session_service.append_event(session, Event(
+                        author=AGENT_NAME,
+                        content=types.Content(role="model", parts=[types.Part(text=text)]),
+                    ))
+            except Exception:
+                logging.exception(
+                    "approvals: karar canlı oturuma yazılamadı id=%s session=%s",
+                    approval_id, session_id)
+
+            try:
+                text = _chat_notice(out["status"], tool, reason, out["outcome"])
+                _messages.append(email, session_id, "model", text,
+                                 kind="approval_decision", meta={"approval_id": approval_id})
+            except Exception:
+                logging.exception(
+                    "approvals: karar transcript'e yazılamadı id=%s session=%s",
+                    approval_id, session_id)
     return out
 
 
@@ -970,33 +1043,72 @@ async def approve_approval(approval_id: str, email: str = Depends(require_user))
     return await _decide_approval(approval_id, email, approvals.STATUS_APPROVED)
 
 
+# id -> prompt_fill lookup (Onay Kartı 2.0, Task 3 review fix (c)): the brief
+# describes the reject body as `"<slug-or-text>"`. A client sending one of
+# REJECT_REASONS' own ids (a picker shortcut, e.g. "wrong_target") must NOT
+# have that bare English slug land verbatim in `decision_reason` or in
+# REJECTION_MODEL_NOTICE ("...reddetti: wrong_target") -- resolved here,
+# server-side, once, rather than documented as a client-side obligation.
+_REJECT_REASON_PROMPT_FILL_BY_ID: dict[str, str] = {
+    r.id: r.prompt_fill for r in approvals.REJECT_REASONS
+}
+
+
 class RejectRequest(BaseModel):
     """Body for POST /api/approvals/{id}/reject (Onay Kartı 2.0, Task 3,
     P2a): a reason is mandatory at the HTTP boundary too, not only inside
-    approvals.decide(). `default="", validate_default=True` routes an
-    ENTIRELY MISSING field through the SAME strip-and-reject validator as a
-    whitespace-only one -- without `validate_default`, pydantic v2 only runs
-    field validators on values actually present in the body, so a missing
-    field would surface its own generic English "Field required" error
-    instead of this constraint's Turkish detail. Free text or a
-    REJECT_REASONS preset's `prompt_fill` are both accepted; this model does
-    not care which."""
+    approvals.decide(). `default="", validate_default=True` routes a
+    PRESENT-BUT-EMPTY body (`{}`) through the SAME strip-and-reject
+    validator as a whitespace-only one -- without `validate_default`,
+    pydantic v2 only runs field validators on values actually present in
+    the body. An entirely ABSENT body still needs `_validate_reject_body`
+    below: FastAPI's own required-parameter check for a MISSING body param
+    runs before this model's field defaults ever apply. Accepts either free
+    text or one of REJECT_REASONS' `id`s (resolved to that preset's
+    `prompt_fill`, see `_REJECT_REASON_PROMPT_FILL_BY_ID`) or its
+    `prompt_fill` directly -- the brief's own `"<slug-or-text>"`."""
     reason: str = Field(default="", validate_default=True)
 
     @field_validator("reason")
     @classmethod
-    def _strip(cls, v: str) -> str:
+    def _strip_and_resolve(cls, v: str) -> str:
         v = v.strip()
         if not v:
             raise ValueError("reddetme gerekçesi boş olamaz")
-        return v
+        return _REJECT_REASON_PROMPT_FILL_BY_ID.get(v, v)
+
+
+def _validate_reject_body(req: RejectRequest | None) -> RejectRequest:
+    """`req: RejectRequest | None = None` (below) makes the whole JSON body
+    OPTIONAL at the FastAPI parameter level -- necessary because a request
+    with NO body at all otherwise 422s on FastAPI's own generic ENGLISH
+    "Field required" for the missing body PARAMETER itself, a check that
+    runs before RejectRequest's `validate_default` ever gets a chance to
+    apply its Turkish message (verified: `validate_default=True` alone does
+    NOT help a zero-byte body, only a present-but-empty `{}` one). This
+    re-validates the empty case through the SAME model, so "no body at
+    all", `{}`, and `{"reason": "   "}` all produce the identical Turkish
+    detail instead of two of the three surfacing an English one."""
+    if req is not None:
+        return req
+    try:
+        return RejectRequest.model_validate({})
+    except ValidationError as exc:
+        # Pydantic's raw .errors() embeds the underlying ValueError object in
+        # `ctx` -- not JSON-serializable, so FastAPI's own response encoder
+        # would 500 on it. Re-shape to the same {type, loc, msg} fields the
+        # automatic (body-present) 422 path already exposes.
+        detail = [{"type": e["type"], "loc": list(e["loc"]), "msg": e["msg"]}
+                  for e in exc.errors()]
+        raise HTTPException(status_code=422, detail=detail)
 
 
 @app.post("/api/approvals/{approval_id}/reject")
-async def reject_approval(approval_id: str, req: RejectRequest,
+async def reject_approval(approval_id: str, req: RejectRequest | None = None,
                           email: str = Depends(require_user)):
     """Reddet: yürütme YOK. Gerekçe zorunlu (Onay Kartı 2.0, Task 3, P2a) --
     bare bir ret modele hiçbir şey öğretmez ve aynı çağrıyı tekrarlatır."""
+    req = _validate_reject_body(req)
     return await _decide_approval(approval_id, email, approvals.STATUS_REJECTED,
                                   reason=req.reason)
 
