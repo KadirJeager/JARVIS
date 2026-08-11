@@ -1100,6 +1100,41 @@ Write the before/after `anchor_score` figures into `.superpowers/sdd/progress.md
 
 ---
 
+## Task 11: Voice-session timeline instrumentation — the first-words bug needs data, not hypotheses
+
+**Files:**
+- Modify: `android/app/src/main/java/com/jarvis/data/voice/session/VoiceSession.kt`
+- Modify: `android/app/src/main/java/com/jarvis/data/voice/session/AndroidSpeechToText.kt`
+- Modify: `android/app/src/main/java/com/jarvis/JarvisApp.kt` (the `VoiceSession(...)` construction site — wire the logger)
+- Test: extend `android/app/src/test/java/com/jarvis/data/voice/session/VoiceSessionTest.kt`
+
+**Why this task exists:** Kadir reported (2026-08-11 02:48, Pixel 10 Pro) that the first words of his sentence were not captured; the server saw a single utterance with `dur_in=2.42s`. The client currently logs **nothing** about the session timeline — no timestamps for mic start, recognizer arm, first partial, final, or echo-guard gating — so the failure cannot be localized. The candidate deaf windows are already visible in the code (`stt.listen()` → recognizer actually listening; `relisten()`'s `STT_RESTART_DELAY_MS` + recognizer startup after every final; the echo-guard tail), but per the DATA-logging rule, no hypothesis is worth testing until the timeline is measured. This task is instrumentation only: **no behavioral change**.
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces: a greppable one-line event stream in logcat that Task 10's device round reads to localize the first-words loss.
+
+**Design constraints (from the file's own architecture — verified against the code, not from memory):**
+- `VoiceSession` is deliberately JVM-pure (owns no Android type; even the clock is the injected `nowMs` seam, `VoiceSession.kt:62`). Do **not** import `android.util.Log` there. Add a constructor parameter `private val logger: (String) -> Unit = {}` following the `nowMs` pattern; `JarvisApp` wires it to `Log.i("VoiceSession", line)`.
+- Line format, one line per event, greppable and parseable: `tl ev=<event> t=+<ms> gen=<N> [k=v ...]` where `t` is ms since this generation's `start()` (derived from `nowMs`; capture the start stamp per generation).
+- Log **lengths, never transcript content** (existing convention: no user text in logcat).
+- Volume discipline: per listen cycle log only the **first** partial (time-to-first-partial is the datum). Mic-loop frames tick ~50-100/s — per-frame logging is forbidden; log only the send→drop / drop→send **transitions** of the echo-guard gate, with which window caused it (`speaking` vs `tail`).
+
+**Events to emit from `VoiceSession`** (all inside the existing `synchronized(lock)` bodies; anchors verified):
+- `start` (gen bumped, `start()`), `open` (transport `onOpen` entered), `mic.ok` / `mic.fail` (around `mic.start`, `VoiceSession.kt:223`), `stt.arm` (each `stt.listen()` call: the initial one in `onOpen` and each `relisten` fire, with the configured delay as a field)
+- `stt.begin` with the branch taken: `guarded=true` (echo latch path, `VoiceSession.kt:297`) or barge-in path
+- `stt.first_partial len=N guarded=<bool>`
+- `stt.final len=N out=<sent|drop_speaking|drop_tail_latch|drop_echo_text>` — the three drop reasons map to the three conditions at `VoiceSession.kt:338-339`; distinguishing them is the point
+- `stt.recoverable`, `tts.speak n=<ttsActive>`, `tts.done n=<ttsActive>`, `turn.complete`, `guard.tail` (openGuardTail), `mic.gate send=<bool> why=<speaking|tail|clear>` (transition only), `interrupt`, `end reason=<error|user|closed>`
+**Events to emit from `AndroidSpeechToText`** (uses `android.util.Log` already; TAG exists): `startListening` dispatch, `onReadyForSpeech` (**the** datum: the moment the recognizer is actually listening — the `listen()`→ready gap is the primary deaf-window suspect), `onEndOfSpeech`, `onError code=N`, `onResults len=N`. These are lifecycle facts the session cannot see; keep both layers.
+
+- [ ] **Step 1: Write the failing tests first** — extend `VoiceSessionTest` with a collecting logger (`val lines = mutableListOf<String>()`, injected as the new parameter). Drive the existing fakes through: connect → begin → partial ×2 → final; assert (a) event ordering `start < open < stt.arm < stt.begin < stt.first_partial < stt.final`, (b) only ONE `first_partial` line for the two partials, (c) `out=sent` on a clean final vs `out=drop_speaking` when TTS is active (reuse the existing fake-clock echo-guard test setup), (d) mic gate transition logged once per state change, not per frame. Follow the existing test file's fake/clock conventions exactly.
+- [ ] **Step 2: Implement** — logger seam + event lines in `VoiceSession`; `Log.i`/existing `Log.w` lines in `AndroidSpeechToText` (that class is documented JVM-untestable, `AndroidSpeechToText.kt:23-26` — no new test there); wire `JarvisApp`.
+- [ ] **Step 3: Run** `cd android && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` (check `free -g` ≥ 4 first).
+- [ ] **Step 4: Commit** — suggested message: `feat(voice): DATA-level timeline instrumentation for the voice session` with a body explaining the first-words report and that this is measurement, not fix.
+
+---
+
 ## Blocking decision, not a task: the watch credential
 
 `feat/wear-w1-core` is 12 commits, unmerged, and stores a device token **on the watch** (`android/wear/.../data/TokenCipher.kt`, Keystore + GCM; minted by the phone in W0 and pushed over `MessageClient`).
