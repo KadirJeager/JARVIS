@@ -105,7 +105,7 @@ class MainActivity : FragmentActivity() {
                 // anchors under a channel label the live voice bridge never sends.
                 val enrollVm: EnrollDeviceViewModel = viewModel {
                     EnrollDeviceViewModel(
-                        container.voiceApi,
+                        container.voiceEnrollApi,
                         AndroidClipRecorder(),
                         "android-" + android.os.Build.MODEL,
                     )

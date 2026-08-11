@@ -539,7 +539,15 @@ class VoiceBridge:
             while await self._receive_once(ws):
                 pass
         finally:
-            active_bridges.pop(self._user_id, None)
+            # Compare-and-delete, mirroring the trust-registry cleanup below
+            # (voice_trust.clear's owner check): if a STALE connection for this
+            # user is torn down AFTER a NEW one has already registered (both
+            # keyed by user_id, last-registration-wins on the way in), an
+            # unconditional pop() here would deregister the NEW bridge instead
+            # of the one actually exiting -- the live challenge/enroll REST
+            # calls would then find no bridge at all. Only remove OUR OWN entry.
+            if active_bridges.get(self._user_id) is self:
+                active_bridges.pop(self._user_id, None)
             # The peer is gone (or the loop broke): anything still queued has
             # nowhere to send, so flag it BEFORE awaiting the turn tasks --
             # a task mid-run_async finishes into _safe_send no-ops instead of

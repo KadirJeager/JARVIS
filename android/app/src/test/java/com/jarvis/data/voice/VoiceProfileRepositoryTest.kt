@@ -1,9 +1,6 @@
 package com.jarvis.data.voice
 
-import com.jarvis.data.net.ChallengeResponse
 import com.jarvis.data.net.ConfirmResponse
-import com.jarvis.data.net.EnrollRequest
-import com.jarvis.data.net.EnrollResponse
 import com.jarvis.data.net.LabelPatch
 import com.jarvis.data.net.NotePatch
 import com.jarvis.data.net.ProfileDeletedResponse
@@ -59,9 +56,6 @@ class VoiceProfileRepositoryTest {
             profileDeleted = true
             return ProfileDeletedResponse(true)
         }
-        // Unrelated to this repository's contract; VoiceEnrollApiTest covers these.
-        override suspend fun challenge(): ChallengeResponse = ChallengeResponse("challenge_created", true)
-        override suspend fun enroll(req: EnrollRequest): EnrollResponse = EnrollResponse(0)
     }
 
     @Test

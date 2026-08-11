@@ -29,6 +29,17 @@ def test_antispoof_importable_without_torch():
     assert antispoof._model is None
 
 
+def test_is_loaded_reflects_model_or_score_fn():
+    """The probe main.py's enroll guard reads (C1b, final review 2026-08-11):
+    false with neither the singleton warm nor a test/injection score fn set --
+    calling is_bonafide in that state would trigger _load_model(). True the
+    moment either is set, matching is_bonafide's own bypass check."""
+    assert antispoof._model is None
+    assert antispoof.is_loaded() is False
+    antispoof._score_fn = lambda pcm: 0.0
+    assert antispoof.is_loaded() is True
+
+
 def test_is_bonafide_threshold_behavior():
     """Verify threshold boundary: cm_fake_prob < 0.85 -> bonafide (True), >= 0.85 -> spoof (False)."""
     # 1. Below threshold (0.84) -> Bonafide
@@ -207,6 +218,40 @@ async def test_challenge_grant_succeeds_on_bonafide_audio():
 
     assert bridge._cm_verdict_fresh is True
     assert voice_challenge.has_valid_grant(db, bridge._user_id) is True
+
+
+@pytest.mark.asyncio
+async def test_challenge_grant_refuses_a_freshly_scored_spoof():
+    """I5 (final review, 2026-08-11): mutation coverage gap. Both
+    `test_challenge_grant_requires_a_bonafide_utterance` and
+    `test_challenge_grant_blocked_when_cm_silent` above publish trust signals
+    directly via `voice_trust.publish` and never call `_verify_utterance`, so
+    `_cm_verdict_fresh` stays False and both short-circuit on the `elif not
+    self._cm_verdict_fresh:` STALE branch in voice.py -- the `cm_ok is True`
+    half of `if self._cm_verdict_fresh and cm_ok is True:` is never even
+    evaluated. Mutating that comparison to `cm_ok is not None` therefore
+    survives the whole suite: a FRESH, freshly-scored `cm_ok=False` (a spoof
+    caught on THIS utterance -- `False is not None` is True) would then satisfy
+    the mutated condition and mint a grant.
+
+    This test earns freshness the same REAL way
+    `test_challenge_grant_succeeds_on_bonafide_audio` does -- through
+    `_verify_utterance` scoring this utterance's own buffered PCM via
+    `antispoof._score_fn` -- but with a spoof verdict, closing the gap: fresh
+    AND rejected must still refuse the grant.
+    """
+    antispoof._score_fn = lambda pcm: (False, 0.99)  # spoof, >= CM_REJECT_THRESHOLD
+    bridge, ws, db = _bridge_with_pending_challenge(code="4831")
+    bridge.speaker_service = _RecordingSpeaker()
+    bridge._utterance = bytearray(b"\x00\x01\x02\x03")  # this utterance's mic PCM
+
+    await bridge._on_utterance_final(ws, "dört sekiz üç bir")
+
+    assert bridge._cm_verdict_fresh is True
+    assert voice_challenge.has_valid_grant(db, bridge._user_id) is False
+    import json
+    reply_text = json.loads(ws.sent[-3])["text"]
+    assert "canlılık" in reply_text.lower() or "doğrulanamadı" in reply_text.lower()
 
 
 @pytest.mark.asyncio

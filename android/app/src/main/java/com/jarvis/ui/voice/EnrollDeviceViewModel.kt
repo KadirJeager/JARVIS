@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.jarvis.data.net.EnrollRequest
 import com.jarvis.data.net.NETWORK_MESSAGE
-import com.jarvis.data.net.VoiceApi
+import com.jarvis.data.net.VoiceEnrollApi
 import java.io.IOException
 import java.util.Base64
 import kotlinx.coroutines.CancellationException
@@ -20,8 +20,8 @@ import retrofit2.HttpException
  * gallery cannot learn a new one on its own (the adapt gate scores against immutable
  * anchors — that is what stops a poisoning ratchet). Enrollment is the only path onto a
  * new channel, and it needs a fresh liveness proof: the server speaks a 4-digit code over
- * an OPEN voice bridge ([VoiceApi.challenge]), the user repeats it, and only THEN does
- * [VoiceApi.enroll] accept clips (409 otherwise).
+ * an OPEN voice bridge ([VoiceEnrollApi.challenge]), the user repeats it, and only THEN does
+ * [VoiceEnrollApi.enroll] accept clips (409 otherwise).
  *
  * Each state carries the Turkish label the screen renders for it -- see [label]. Idle and
  * Failed render nothing here: Idle has nothing to report yet, and [EnrollState.Failed]'s
@@ -41,7 +41,12 @@ sealed interface EnrollState {
 fun EnrollState.label(): String? = when (this) {
     EnrollState.Idle -> null
     EnrollState.RequestingCode -> "Kod isteniyor…"
-    EnrollState.WaitingForSpokenCode -> "Jarvis'in söylediği kodu tekrar et"
+    // I3 mitigation (final review, 2026-08-11): the echo-guard tail drops the
+    // first ~2 s of mic PCM right after the TTS finishes speaking, so a user
+    // who answers instantly gets a truncated buffer scored. Coaching a short
+    // pause here is a client-side mitigation, not a fix for the guard itself.
+    EnrollState.WaitingForSpokenCode ->
+        "Jarvis'in söylediği kodu, konuşması bittikten kısa bir duraklamadan sonra tekrar et"
     EnrollState.Recording -> "Konuş — örnek alınıyor (3/3)"
     EnrollState.Uploading -> "Kaydediliyor…"
     is EnrollState.Done -> "Bu cihaz tanıtıldı ($anchors örnek)"
@@ -65,7 +70,7 @@ private const val CODE_NOT_SPOKEN_MESSAGE =
     "Kodu duyabilmen için önce sesli aramayı başlat, sonra tekrar dene."
 
 class EnrollDeviceViewModel(
-    private val api: VoiceApi,
+    private val api: VoiceEnrollApi,
     private val recorder: ClipRecorder,
     private val deviceHint: String,
 ) : ViewModel() {
@@ -75,7 +80,7 @@ class EnrollDeviceViewModel(
 
     /**
      * Ignored while a request is already in flight (RequestingCode through Uploading) --
-     * a double tap on "Bu cihazı tanıt" must not fire a second [VoiceApi.challenge].
+     * a double tap on "Bu cihazı tanıt" must not fire a second [VoiceEnrollApi.challenge].
      * Callable again from [EnrollState.Idle], [EnrollState.Done] or [EnrollState.Failed]
      * (retry after a failure, or enrolling a further batch of samples).
      */
@@ -109,7 +114,7 @@ class EnrollDeviceViewModel(
      * The user says they repeated the spoken code over the live bridge. The grant is
      * minted server-side (Task 3's CM gate) and this ViewModel has no way to observe
      * that directly, so this is a plain user-driven transition -- not a fixed wait.
-     * [VoiceApi.enroll]'s 409 already covers the case where the grant was not actually
+     * [VoiceEnrollApi.enroll]'s 409 already covers the case where the grant was not actually
      * minted (code mis-heard, bridge dropped, CM rejected the utterance).
      */
     fun proceedToRecording() {
@@ -141,7 +146,10 @@ class EnrollDeviceViewModel(
     }
 
     private fun mapEnrollError(e: HttpException): String = when (e.code()) {
-        409 -> "Kod doğrulanmadı. Jarvis'in söylediği dört haneli kodu tekrar et, sonra yeniden dene."
+        // M1 (final review, 2026-08-11): the grant behind this 409 already expired or was
+        // never minted -- repeating the SAME (now-dead) code cannot recover it. The only
+        // way forward is a NEW challenge, which only the button re-fires.
+        409 -> "Kod doğrulanamadı. 'Bu cihazı tanıt' ile yeni bir kod alıp tekrar dene."
         422 -> "Alınan ses örneği sahte olarak işaretlendi, kayıt yapılmadı."
         503 -> "Ses doğrulaması şu anda yapılamıyor, birazdan tekrar dene."
         else -> "Kayıt tamamlanamadı (${e.code()})."

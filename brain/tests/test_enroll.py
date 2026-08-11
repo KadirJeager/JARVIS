@@ -425,6 +425,38 @@ def test_enroll_rejects_malformed_base64_clip(enroll_client):
     assert r.status_code == 400
 
 
+def test_enroll_refuses_503_without_scoring_when_cm_not_loaded(enroll_client, monkeypatch):
+    """C1b (final review, 2026-08-11): jarvis-brain never warms the CM, so a
+    misrouted enroll call must refuse fail-closed WITHOUT triggering a lazy
+    load -- scoring must never even be attempted. enroll_client's fixture sets
+    _score_fn (which would make antispoof.is_loaded() true on its own), so
+    is_loaded is overridden directly here to isolate the guard from that."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(antispoof, "is_loaded", lambda: False)
+    scored = []
+    monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: (scored.append(pcm), 0.01)[1])
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 503
+    assert r.json()["detail"] == "Ses doğrulaması şu anda yapılamıyor, birazdan tekrar dene"
+    assert scored == [], "the CM must never be asked to score when the probe reports not-loaded"
+
+
+def test_enroll_proceeds_when_cm_probe_reports_loaded(enroll_client, monkeypatch):
+    """Same guard, opposite answer: a loaded CM (jarvis-voice after warmup, or
+    any process where the probe reports true) must see enrollment behave
+    exactly as before this guard existed."""
+    c, _db = enroll_client
+    main_mod.app.dependency_overrides[require_user] = lambda: "kadir@example.com"
+    main_mod.app.dependency_overrides[require_google_user] = lambda: "kadir@example.com"
+    monkeypatch.setattr(antispoof, "is_loaded", lambda: True)
+    monkeypatch.setattr(antispoof, "_score_fn", lambda pcm: 0.01)
+    r = c.post("/api/voice/enroll", json={"clips": [_clip()]})
+    assert r.status_code == 200
+    assert r.json()["anchors"] >= 1
+
+
 def test_enroll_returns_503_when_cm_exceeds_timeout(enroll_client, monkeypatch):
     """A stuck CM forward pass -- or a cold model load blocking on
     huggingface_hub.snapshot_download when CM_MODEL_DIR is unpopulated --

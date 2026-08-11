@@ -111,7 +111,7 @@ data class RejectResponse(
 /**
  * Response to `POST /api/voice/challenge` (brain/app/voice.py). `code_spoken` tells the
  * caller whether the 4-digit code was actually spoken over an open live voice bridge for
- * this user, versus minted with nowhere to say it -- see [VoiceApi.challenge].
+ * this user, versus minted with nowhere to say it -- see [VoiceEnrollApi.challenge].
  */
 @Serializable
 data class ChallengeResponse(val status: String, val code_spoken: Boolean = false)

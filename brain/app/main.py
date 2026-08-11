@@ -617,6 +617,25 @@ async def enroll(req: EnrollRequest, email: str = Depends(require_google_user)):
     # mid-conversation. Runs BEFORE the ECAPA embedding below so a rejected
     # clip costs no inference.
     if config.CM_ENABLED and config.CM_ENROLL_REQUIRED:
+        # C1b (final review, 2026-08-11): jarvis-brain (3 Gi) deliberately never
+        # warms the ~1.2 GiB CM (see this file's _warmup_targets(), gated on
+        # config.CM_WARMUP). A misrouted enroll call landing here anyway must
+        # not lazy-load the model into a live service under load -- that is
+        # exactly the 2026-08-10 OOM class. Refuse fail-closed instead, WITHOUT
+        # calling antispoof.is_bonafide (which would trigger the load). On
+        # jarvis-voice, CM_WARMUP loads the model at startup, so
+        # antispoof.is_loaded() is normally True and this branch is a no-op;
+        # a cold-scale-up instance racing a request briefly 503s here, which is
+        # the correct fail-closed answer, not a lazy load.
+        if not antispoof.is_loaded():
+            logging.warning(
+                "enroll: CM not loaded in this process, refusing without scoring "
+                "user=%s", email,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Ses doğrulaması şu anda yapılamıyor, birazdan tekrar dene",
+            )
         try:
             # Budgeted like the sibling live-verify call (app/voice.py:378-380):
             # a stuck forward pass, or _load_model() blocking on

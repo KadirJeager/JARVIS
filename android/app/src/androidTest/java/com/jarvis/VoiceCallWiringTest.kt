@@ -19,15 +19,12 @@ import com.jarvis.data.net.ApprovalApi
 import com.jarvis.data.net.ApprovalDecisionDto
 import com.jarvis.data.net.ApprovalDto
 import com.jarvis.data.net.ApprovalsResponse
-import com.jarvis.data.net.ChallengeResponse
 import com.jarvis.data.net.ChatRequest
 import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.ConfirmResponse
 import com.jarvis.data.net.DeviceTokenApi
 import com.jarvis.data.net.DeviceTokenRequest
 import com.jarvis.data.net.DeviceTokenResponse
-import com.jarvis.data.net.EnrollRequest
-import com.jarvis.data.net.EnrollResponse
 import com.jarvis.data.net.FcmApi
 import com.jarvis.data.net.FcmRegisterResponse
 import com.jarvis.data.net.FcmTokenRequest
@@ -147,10 +144,6 @@ class VoiceCallWiringTest {
         override suspend fun confirm(id: String) = ConfirmResponse("s-new")
         override suspend fun reject(id: String) = RejectResponse(null)
         override suspend fun deleteProfile() = ProfileDeletedResponse(true)
-        // This class does not exercise the enrollment flow; fail fast rather than
-        // silently absorb a call this fake was never told to answer for.
-        override suspend fun challenge(): ChallengeResponse = error("FakeVoiceApi.challenge() not stubbed")
-        override suspend fun enroll(req: EnrollRequest): EnrollResponse = error("FakeVoiceApi.enroll() not stubbed")
     }
 
     private class FakeTransport : VoiceTransport {

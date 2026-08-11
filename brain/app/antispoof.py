@@ -200,6 +200,21 @@ def _get_model():
     return _model
 
 
+def is_loaded() -> bool:
+    """Cheap, read-only probe: would calling `is_bonafide` score WITHOUT
+    triggering `_load_model()`? True once the lazy singleton is warm, OR when
+    a test/injection `_score_fn` is set (it bypasses `_get_model()` entirely --
+    see `is_bonafide` below). Never touches `_model` itself, so unlike
+    `_get_model()` this can be called freely without risking a load.
+
+    Exists so a caller (main.py's `/api/voice/enroll`) can refuse fail-closed
+    instead of lazily loading the ~1.2 GiB CM into a process that deliberately
+    never warms it (jarvis-brain's 3 Gi budget) -- see main.py's enroll guard
+    for the incident this closes.
+    """
+    return _model is not None or _score_fn is not None
+
+
 def pcm16_to_tensor(pcm: bytes):
     """Raw PCM16 mono 16kHz bytes -> float32 tensor [samples] in [-1, 1].
     Matches speaker.pcm16_to_tensor pattern.

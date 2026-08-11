@@ -15,7 +15,7 @@ from google.genai import types
 
 import app.voice as voice_mod
 from app import antispoof, config, speaker as speaker_mod, trust, voice_protocol as vp, voice_trust
-from app.voice import APP_NAME, VoiceBridge, _handshake
+from app.voice import APP_NAME, VoiceBridge, _handshake, active_bridges
 
 USER = "kadir@example.com"
 
@@ -1141,6 +1141,57 @@ async def test_teardown_of_a_replaced_connection_keeps_the_live_one_s_signals():
     await asyncio.wait_for(
         b.run(FakeWS([{"type": "websocket.disconnect"}]), user_id=USER), timeout=2)
     assert voice_trust.peek(key) is None
+
+
+@pytest.mark.asyncio
+async def test_teardown_of_a_replaced_connection_keeps_the_live_bridge_registered():
+    """I1 (final review, 2026-08-11): active_bridges is keyed by user_id, the
+    same shape as the trust registry above, and the same race applies. A's
+    dead socket lingering while B has already reconnected must not let A's
+    teardown deregister B -- an unconditional pop() there means
+    /api/voice/challenge (which reads active_bridges to find a bridge to
+    speak the code over) finds NOTHING for a user who is, in fact, live on a
+    call. active_bridges has no owner token like voice_trust does, so the
+    compare-and-delete is by identity: pop only if the CURRENT entry IS this
+    connection.
+    """
+    a = VoiceBridge(runner=_NoTurnsRunner(), session_service=_StatelessSessions(),
+                    speaker_service=FakeSpeaker((True, 0.9)),
+                    presence="locked", device_hint="phone")
+    b = VoiceBridge(runner=_NoTurnsRunner(), session_service=_StatelessSessions(),
+                    speaker_service=FakeSpeaker((True, 0.9)),
+                    presence="locked", device_hint="tablet")
+
+    # A connects and registers (run()'s very first line).
+    a_gate = asyncio.Event()
+    a_task = asyncio.create_task(a.run(_GatedWS(a_gate), user_id=USER))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if active_bridges.get(USER) is a:
+            break
+    assert active_bridges.get(USER) is a
+
+    # B reconnects over the SAME key while A's dead socket still lingers.
+    b_gate = asyncio.Event()
+    b_task = asyncio.create_task(b.run(_GatedWS(b_gate), user_id=USER))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if active_bridges.get(USER) is b:
+            break
+    assert active_bridges.get(USER) is b
+
+    # ...and only THEN does A's socket finally notice it is gone and tear down.
+    a_gate.set()
+    await asyncio.wait_for(a_task, timeout=2)
+
+    assert active_bridges.get(USER) is b, (
+        "A's teardown deregistered B's live bridge -- the next challenge()/"
+        "enroll() call would find no bridge for a user who is actually live")
+
+    # B's own teardown still removes its own entry.
+    b_gate.set()
+    await asyncio.wait_for(b_task, timeout=2)
+    assert active_bridges.get(USER) is None
 
 
 def test_clear_is_a_no_op_for_a_foreign_owner(caplog):

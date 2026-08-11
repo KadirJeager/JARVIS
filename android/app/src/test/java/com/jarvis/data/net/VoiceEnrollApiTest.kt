@@ -11,9 +11,13 @@ import org.junit.Test
 import retrofit2.HttpException
 
 /**
- * [VoiceApi.challenge] and [VoiceApi.enroll] against the real production chain
- * ([NetworkModule.createApis]'s OkHttp client, its `Json`, its Retrofit converter) and a
- * local server -- the same wire-level idiom as [VoicePatchWireTest] / [ApprovalWireTest].
+ * [VoiceEnrollApi.challenge] and [VoiceEnrollApi.enroll] against the real production chain
+ * ([NetworkModule.createVoiceEnrollApi]'s OkHttp client, its `Json`, its Retrofit
+ * converter) and a local server -- the same wire-level idiom as [VoicePatchWireTest] /
+ * [ApprovalWireTest]. [createVoiceEnrollApi] is a SEPARATE factory from [createApis]
+ * because these two calls must be built against jarvis-voice, never jarvis-brain -- see
+ * [VOICE_BASE_URL]'s doc -- but it shares the same OkHttp/auth/json config, which is what
+ * this test's `baseUrl` override still exercises.
  *
  * `/api/voice/enroll` has required a liveness grant since 6 Aug and no client could
  * mint one before this task, so these were, until now, dead endpoints. The 409/422 tests
@@ -24,17 +28,16 @@ import retrofit2.HttpException
 class VoiceEnrollApiTest {
 
     private lateinit var server: MockWebServer
-    private lateinit var api: VoiceApi
+    private lateinit var api: VoiceEnrollApi
 
     @Before
     fun setUp() {
         server = MockWebServer()
         server.start()
-        val apis = NetworkModule.createApis(
+        api = NetworkModule.createVoiceEnrollApi(
             tokenProvider = { "test-token" },
             baseUrl = server.url("/").toString(),
         )
-        api = apis.voice
     }
 
     @After

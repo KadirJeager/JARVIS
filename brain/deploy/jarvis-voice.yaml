@@ -11,6 +11,15 @@ spec:
         autoscaling.knative.dev/minScale: '1'
         run.googleapis.com/startup-cpu-boost: 'true'
         run.googleapis.com/container-dependencies: '{"voice":["llm-proxy"]}'
+        # C1c (final review, 2026-08-11): best-effort cookie stickiness so the
+        # /api/voice/challenge REST call lands on the SAME instance holding the
+        # caller's WebSocket bridge (active_bridges is in-process, per
+        # instance -- see app/voice.py). Not a hard guarantee (Cloud Run
+        # session affinity is best-effort, not sticky-forever), but with
+        # minScale 1 this deployment usually runs a single instance anyway,
+        # so this mainly narrows the window during the rare multi-instance
+        # burst (maxScale 20).
+        run.googleapis.com/sessionAffinity: 'true'
         # Always-allocated CPU: the model-warmup daemon thread (main.py
         # _warm_heavy_models) starved to death under the default
         # throttle-when-idle policy -- logs showed e5/ECAPA only loading when

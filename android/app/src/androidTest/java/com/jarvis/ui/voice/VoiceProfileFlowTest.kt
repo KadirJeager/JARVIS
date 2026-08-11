@@ -9,10 +9,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.jarvis.data.net.ChallengeResponse
 import com.jarvis.data.net.ConfirmResponse
-import com.jarvis.data.net.EnrollRequest
-import com.jarvis.data.net.EnrollResponse
 import com.jarvis.data.net.LabelPatch
 import com.jarvis.data.net.NotePatch
 import com.jarvis.data.net.ProfileDeletedResponse
@@ -64,11 +61,6 @@ class VoiceProfileFlowTest {
         }
         override suspend fun reject(id: String) = RejectResponse(null)
         override suspend fun deleteProfile() = ProfileDeletedResponse(true)
-        // This flow test drives VoiceProfileViewModel end to end and does not exercise
-        // enrollment; fail fast rather than silently absorb a call this fake was never
-        // told to answer for.
-        override suspend fun challenge(): ChallengeResponse = error("FakeVoiceApi.challenge() not stubbed")
-        override suspend fun enroll(req: EnrollRequest): EnrollResponse = error("FakeVoiceApi.enroll() not stubbed")
     }
 
     @Test

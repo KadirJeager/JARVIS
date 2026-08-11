@@ -12,6 +12,23 @@ const val BASE_URL = "https://jarvis-brain-000000000000.europe-west1.run.app"
 /** Deployed jarvis-voice live-call WebSocket (same endpoint the web PWA uses). */
 const val VOICE_WS_URL = "wss://jarvis-voice-000000000000.europe-west1.run.app/ws/voice"
 
+/**
+ * Deployed jarvis-voice base URL, HTTPS sibling of [VOICE_WS_URL]'s host. [VoiceEnrollApi]'s
+ * `challenge()`/`enroll()` MUST hit this service, not [BASE_URL] (jarvis-brain) -- this is a
+ * deployed-topology contract, not a style choice, and routing it wrong was tonight's
+ * Critical:
+ * - `challenge()` asks the server to speak a code over the caller's OPEN voice
+ *   WebSocket bridge. That bridge lives in jarvis-voice's in-process `active_bridges` map
+ *   (see voice.py); jarvis-brain has no bridge for this user at all, so a challenge sent
+ *   there can never find one to speak over.
+ * - `enroll()` scores submitted clips against the channel-adaptive CM (anti-spoof). Only
+ *   jarvis-voice warms that ~1.2 GiB model at startup; jarvis-brain deliberately never
+ *   loads it (see brain/app/main.py's enroll guard) to stay inside its 3 Gi budget, so
+ *   routing enroll there either 503s or -- worse -- lazy-loads the model into a live
+ *   service under load (the 2026-08-10 OOM class).
+ */
+const val VOICE_BASE_URL = "https://jarvis-voice-000000000000.europe-west1.run.app"
+
 /** Every API surface, sharing one OkHttp client and one Retrofit instance. */
 class ApiSet(
     val chat: JarvisApi,
@@ -48,17 +65,7 @@ object NetworkModule {
         tokenRefresher: () -> String? = { null },
         baseUrl: String = BASE_URL,
     ): ApiSet {
-        val json = Json { ignoreUnknownKeys = true; explicitNulls = true }
-        val client = OkHttpClient.Builder()
-            .addInterceptor(AuthInterceptor(tokenProvider))
-            .authenticator(TokenAuthenticator(tokenRefresher))
-            .build()
-        val retrofit = Retrofit.Builder()
-            // Retrofit demands the trailing slash; accept it either way from the caller.
-            .baseUrl(baseUrl.trimEnd('/') + "/")
-            .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
+        val retrofit = buildRetrofit(tokenProvider, tokenRefresher, baseUrl)
         return ApiSet(
             chat = retrofit.create(JarvisApi::class.java),
             voice = retrofit.create(VoiceApi::class.java),
@@ -67,5 +74,36 @@ object NetworkModule {
             fcm = retrofit.create(FcmApi::class.java),
             deviceTokens = retrofit.create(DeviceTokenApi::class.java),
         )
+    }
+
+    /**
+     * Same OkHttp/auth/json config as [createApis], only the base differs: [VoiceEnrollApi]
+     * (`challenge()`/`enroll()`) must land on jarvis-voice, not jarvis-brain -- see
+     * [VOICE_BASE_URL]'s doc for why. A SEPARATE Retrofit instance, not another interface
+     * on [createApis]'s single instance, because that instance is pinned to [baseUrl] and
+     * this one must be pinned to [VOICE_BASE_URL] instead.
+     */
+    fun createVoiceEnrollApi(
+        tokenProvider: () -> String?,
+        tokenRefresher: () -> String? = { null },
+        baseUrl: String = VOICE_BASE_URL,
+    ): VoiceEnrollApi = buildRetrofit(tokenProvider, tokenRefresher, baseUrl).create(VoiceEnrollApi::class.java)
+
+    private fun buildRetrofit(
+        tokenProvider: () -> String?,
+        tokenRefresher: () -> String?,
+        baseUrl: String,
+    ): Retrofit {
+        val json = Json { ignoreUnknownKeys = true; explicitNulls = true }
+        val client = OkHttpClient.Builder()
+            .addInterceptor(AuthInterceptor(tokenProvider))
+            .authenticator(TokenAuthenticator(tokenRefresher))
+            .build()
+        return Retrofit.Builder()
+            // Retrofit demands the trailing slash; accept it either way from the caller.
+            .baseUrl(baseUrl.trimEnd('/') + "/")
+            .client(client)
+            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+            .build()
     }
 }

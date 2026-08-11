@@ -1,17 +1,9 @@
 package com.jarvis.ui.voice
 
 import com.jarvis.data.net.ChallengeResponse
-import com.jarvis.data.net.ConfirmResponse
 import com.jarvis.data.net.EnrollRequest
 import com.jarvis.data.net.EnrollResponse
-import com.jarvis.data.net.LabelPatch
-import com.jarvis.data.net.NotePatch
-import com.jarvis.data.net.ProfileDeletedResponse
-import com.jarvis.data.net.RejectResponse
-import com.jarvis.data.net.SampleDeletedResponse
-import com.jarvis.data.net.VoiceApi
-import com.jarvis.data.net.VoiceProfileResponse
-import com.jarvis.data.net.VoiceSampleDto
+import com.jarvis.data.net.VoiceEnrollApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,14 +42,15 @@ class EnrollDeviceViewModelTest {
         Response.error<Any>(code, "{}".toResponseBody("application/json".toMediaType())),
     )
 
-    /** Only [challenge] and [enroll] matter to this ViewModel; every other member of
-     *  [VoiceApi] is unused here and throws if accidentally called. */
-    private class FakeVoiceApi(
+    /** [VoiceEnrollApi] is narrow by construction (just [challenge] and [enroll]), so
+     *  unlike the old [VoiceApi]-backed fake this needs no throwing stubs for unrelated
+     *  members. */
+    private class FakeVoiceEnrollApi(
         val anchors: Int = 0,
         val codeSpoken: Boolean = true,
         val challengeStatus: Int? = null,
         val enrollStatus: Int? = null,
-    ) : VoiceApi {
+    ) : VoiceEnrollApi {
         var challengeCalls = 0
         var enrollCalls = 0
         var lastEnroll: EnrollRequest? = null
@@ -78,17 +71,6 @@ class EnrollDeviceViewModelTest {
             ) }
             return EnrollResponse(anchors)
         }
-
-        override suspend fun profile(): VoiceProfileResponse = throw UnsupportedOperationException()
-        override suspend fun patchLabel(id: String, req: LabelPatch): VoiceSampleDto =
-            throw UnsupportedOperationException()
-        override suspend fun patchNote(id: String, req: NotePatch): VoiceSampleDto =
-            throw UnsupportedOperationException()
-        override suspend fun deleteSample(id: String): SampleDeletedResponse =
-            throw UnsupportedOperationException()
-        override suspend fun confirm(id: String): ConfirmResponse = throw UnsupportedOperationException()
-        override suspend fun reject(id: String): RejectResponse = throw UnsupportedOperationException()
-        override suspend fun deleteProfile(): ProfileDeletedResponse = throw UnsupportedOperationException()
     }
 
     private class FakeRecorder : ClipRecorder {
@@ -113,7 +95,7 @@ class EnrollDeviceViewModelTest {
 
     @Test
     fun happyPathReachesDoneWithAnchorCount() = runTest(dispatcher) {
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(anchors = 10), FakeRecorder(), "android-Pixel 10 Pro")
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(anchors = 10), FakeRecorder(), "android-Pixel 10 Pro")
         vm.start()
         advanceUntilIdle()
         assertEquals(EnrollState.WaitingForSpokenCode, vm.state.value)
@@ -123,23 +105,32 @@ class EnrollDeviceViewModelTest {
         assertEquals(EnrollState.Done(10), vm.state.value)
     }
 
+    /**
+     * M1 (final review, 2026-08-11): the grant behind a 409 already expired or was never
+     * minted, so recovery is a NEW code via the button -- not repeating the dead one. Pins
+     * the exact message, not a loose substring, so a future regression back to "repeat the
+     * code" wording is caught.
+     */
     @Test
-    fun missingGrantTellsTheUserToRepeatTheCode() = runTest(dispatcher) {
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(enrollStatus = 409), FakeRecorder(), "x")
+    fun missingGrantTellsTheUserToGetANewCode() = runTest(dispatcher) {
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(enrollStatus = 409), FakeRecorder(), "x")
         vm.start()
         advanceUntilIdle()
         vm.proceedToRecording()
         advanceUntilIdle()
 
         val failed = vm.state.value as EnrollState.Failed
-        assertTrue(failed.message.contains("kod"))
+        assertEquals(
+            "Kod doğrulanamadı. 'Bu cihazı tanıt' ile yeni bir kod alıp tekrar dene.",
+            failed.message,
+        )
     }
 
     @Test
     fun spoofRejectionSaysSoPlainly() = runTest(dispatcher) {
         // Retrying identically will not help, so the message must not read as a
         // transient error.
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(enrollStatus = 422), FakeRecorder(), "x")
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(enrollStatus = 422), FakeRecorder(), "x")
         vm.start()
         advanceUntilIdle()
         vm.proceedToRecording()
@@ -151,7 +142,7 @@ class EnrollDeviceViewModelTest {
 
     @Test
     fun cmUnavailableSaysToTryAgainLater() = runTest(dispatcher) {
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(enrollStatus = 503), FakeRecorder(), "x")
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(enrollStatus = 503), FakeRecorder(), "x")
         vm.start()
         advanceUntilIdle()
         vm.proceedToRecording()
@@ -166,7 +157,7 @@ class EnrollDeviceViewModelTest {
         // One name, one unit: the gallery's channel tag must match what the live
         // path writes (JarvisApp.kt: "android-" + Build.MODEL), or enrollment adds
         // anchors under a channel label no utterance will ever carry.
-        val api = FakeVoiceApi(anchors = 1)
+        val api = FakeVoiceEnrollApi(anchors = 1)
         val vm = EnrollDeviceViewModel(api, FakeRecorder(), "android-Pixel 10 Pro")
         vm.start()
         advanceUntilIdle()
@@ -178,7 +169,7 @@ class EnrollDeviceViewModelTest {
 
     @Test
     fun recorderFailureDoesNotStrandTheUiInRecording() = runTest(dispatcher) {
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(), FailingRecorder(), "x")
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(), FailingRecorder(), "x")
         vm.start()
         advanceUntilIdle()
         vm.proceedToRecording()
@@ -194,7 +185,7 @@ class EnrollDeviceViewModelTest {
      */
     @Test
     fun codeNotSpokenTellsTheUserToStartTheCallFirst() = runTest(dispatcher) {
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(codeSpoken = false), FakeRecorder(), "x")
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(codeSpoken = false), FakeRecorder(), "x")
         vm.start()
         advanceUntilIdle()
 
@@ -212,7 +203,7 @@ class EnrollDeviceViewModelTest {
      */
     @Test
     fun proceedToRecordingIsANoOpBeforeWaitingForSpokenCode() = runTest(dispatcher) {
-        val api = FakeVoiceApi(anchors = 1)
+        val api = FakeVoiceEnrollApi(anchors = 1)
         val vm = EnrollDeviceViewModel(api, FakeRecorder(), "x")
 
         vm.proceedToRecording()
@@ -226,7 +217,7 @@ class EnrollDeviceViewModelTest {
      *  "mark busy synchronously, resolve async" ViewModel convention. */
     @Test
     fun proceedToRecordingAdvancesSynchronouslyThenReachesDone() = runTest(dispatcher) {
-        val api = FakeVoiceApi(anchors = 3)
+        val api = FakeVoiceEnrollApi(anchors = 3)
         val vm = EnrollDeviceViewModel(api, FakeRecorder(), "x")
         vm.start()
         advanceUntilIdle()
@@ -246,7 +237,7 @@ class EnrollDeviceViewModelTest {
      */
     @Test
     fun cancellationDuringRecordingIsNotRecastAsFailed() = runTest(dispatcher) {
-        val vm = EnrollDeviceViewModel(FakeVoiceApi(), CancellingRecorder(), "x")
+        val vm = EnrollDeviceViewModel(FakeVoiceEnrollApi(), CancellingRecorder(), "x")
         vm.start()
         advanceUntilIdle()
 

@@ -39,7 +39,16 @@ interface VoiceApi {
 
     @DELETE("api/voice/profile")
     suspend fun deleteProfile(): ProfileDeletedResponse
+}
 
+/**
+ * `challenge()`/`enroll()` -- SEPARATE from [VoiceApi] because they must be built against
+ * [NetworkModule.VOICE_BASE_URL] (jarvis-voice), not [NetworkModule.BASE_URL] (jarvis-brain)
+ * that the rest of [VoiceApi] rides. See [NetworkModule.VOICE_BASE_URL]'s doc for why:
+ * jarvis-voice holds the in-process `active_bridges` map `challenge()` needs and is the
+ * only service that warms the CM `enroll()` scores against.
+ */
+interface VoiceEnrollApi {
     /**
      * Asks the server to mint a 4-digit liveness code. When a live voice bridge is
      * open for this user the server speaks it over that bridge, which is why the

@@ -19,7 +19,7 @@ import com.jarvis.data.net.ApiSet
 import com.jarvis.data.net.DeviceTokenRequest
 import com.jarvis.data.net.NetworkModule
 import com.jarvis.data.net.VOICE_WS_URL
-import com.jarvis.data.net.VoiceApi
+import com.jarvis.data.net.VoiceEnrollApi
 import com.jarvis.data.push.FcmTokenRegistrar
 import com.jarvis.data.push.PUSH_LOG_TAG
 import com.jarvis.data.push.firebaseMessagingToken
@@ -62,6 +62,15 @@ class AppContainer(
         // claims, so this path must bypass the freshness reuse and actually mint.
         tokenRefresher = { runBlocking { authManager.silentSignIn(force = true).getOrNull() } },
     ),
+    // A SEPARATE Retrofit instance pinned to jarvis-voice (see NetworkModule.VOICE_BASE_URL):
+    // [com.jarvis.ui.voice.EnrollDeviceViewModel]'s challenge()/enroll() calls must never
+    // land on jarvis-brain (this app's default [apis] base). Swappable for the same reason
+    // [apis] is: a test with a fake AuthClient must not fire real requests at either
+    // deployed service.
+    val voiceEnrollApi: VoiceEnrollApi = NetworkModule.createVoiceEnrollApi(
+        tokenProvider = { authManager.currentToken() },
+        tokenRefresher = { runBlocking { authManager.silentSignIn(force = true).getOrNull() } },
+    ),
     // Swappable so a test can say "this device has signed in before" and assert the boot
     // path actually skips the splash — otherwise only the ViewModel would be pinned, and
     // deleting the call from MainActivity would leave the suite green.
@@ -98,14 +107,6 @@ class AppContainer(
     val conversationsRepository = ConversationsRepository(apis.conversations, sessionStore)
     val voiceProfileRepository = VoiceProfileRepository(apis.voice)
     val approvalRepository = ApprovalRepository(apis.approvals)
-
-    /**
-     * Exposed directly (not only wrapped in [voiceProfileRepository]) because
-     * [com.jarvis.ui.voice.EnrollDeviceViewModel] (Task 9) takes a [VoiceApi] itself --
-     * its constructor is pinned by its own test suite, and [VoiceProfileRepository]'s
-     * pass-through methods do not cover `challenge`/`enroll`.
-     */
-    val voiceApi: VoiceApi = apis.voice
 
     /**
      * Shared by BOTH producers of a token: `JarvisFCMService.onNewToken` and the app-open
