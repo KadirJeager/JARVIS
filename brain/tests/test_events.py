@@ -194,3 +194,35 @@ def test_event_job_unknown_kind_returns_handled_false(configured, monkeypatch):
     assert r.status_code == 200  # 400 DEĞİL: gözlem kaydı
     assert r.json()["handled"] is False
     assert len(_stored(db)) == 1
+
+
+# --- F9: task_tick canlı ilerleme satırı ----------------------------------------
+
+
+def test_task_tick_writes_live_progress_then_cleans_up_on_done(monkeypatch):
+    """Uçtan uca üretim kablosu: task_tick ACTIVE görevde REPORT_SESSION_ID'de
+    TEK kind=task_progress satırı upsert eder ("adım 1/3"); görev done olunca
+    satır silinir, yerini nihai rapora bırakır."""
+    from app.messages import MessageStore
+
+    owner = sorted(config.ALLOWED_EMAILS)[0]
+    db = FakeDB()
+    tasks.enqueue(db, "devriye", "siteyi yokla", max_steps=3)
+
+    out = events.record(db, source="scheduler", kind="task_tick",
+                        payload={}, fetch=lambda url: 200)
+    assert out["handled"] is True
+    rows = MessageStore(db).history(owner, tasks.REPORT_SESSION_ID)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == tasks.PROGRESS_KIND
+    assert "devriye" in rows[0]["text"] and "adım 1/3" in rows[0]["text"]
+
+    monkeypatch.setattr(
+        tasks, "health_patrol_step",
+        lambda fetch: lambda cp: {"done": True, "result": "bitti"},
+    )
+    events.record(db, source="scheduler", kind="task_tick",
+                  payload={}, fetch=lambda url: 200)
+    rows = MessageStore(db).history(owner, tasks.REPORT_SESSION_ID)
+    assert [r.get("kind") for r in rows] == [None]
+    assert "tamamlandı" in rows[0]["text"]

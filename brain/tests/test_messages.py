@@ -133,3 +133,36 @@ def test_delete_session_isolates_by_user():
     store.delete_session("u@x.com", "s1")
     assert store.history("u@x.com", "s1") == []
     assert [h["text"] for h in store.history("other@x.com", "s1")] == ["B nin mesaji"]
+
+
+# --- F9: deterministik-id satır (upsert/delete) --------------------------------
+
+
+def test_upsert_row_creates_then_updates_a_single_doc():
+    """F9 ilerleme satırının temeli: aynı row_id'ye ikinci yazım YENİ doküman
+    açmaz, mevcudun metnini/ts'sini yerinde günceller."""
+    db = FakeDB()
+    store = MessageStore(db, now_fn=lambda: "2026-08-23T10:00:00+00:00")
+    store.upsert_row("u@x.com", "tasks", "task-progress-u@x.com-t1",
+                     "model", "adım 1/5", kind="task_progress")
+    store.upsert_row("u@x.com", "tasks", "task-progress-u@x.com-t1",
+                     "model", "adım 2/5", kind="task_progress")
+
+    rows = db.collection(COLLECTION).stream()
+    assert len(list(rows)) == 1  # append değil: iki yazım, TEK doküman
+    (row,) = store.history("u@x.com", "tasks")
+    assert row["text"] == "adım 2/5"
+    assert row["kind"] == "task_progress"
+    assert "meta" not in row  # yazılmadı; _project boş alanı taşımaz
+    assert row["ts"] == "2026-08-23T10:00:00+00:00"
+
+
+def test_delete_row_removes_and_reports_absence():
+    db = FakeDB()
+    store = MessageStore(db)
+    rid = "task-progress-u@x.com-t1"
+    assert store.delete_row("u@x.com", "tasks", rid) is False  # hiç yokken
+    store.upsert_row("u@x.com", "tasks", rid, "model", "adım 1/5")
+    assert store.delete_row("u@x.com", "tasks", rid) is True
+    assert store.delete_row("u@x.com", "tasks", rid) is False  # ikinci silme
+    assert store.history("u@x.com", "tasks") == []

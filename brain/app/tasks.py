@@ -36,6 +36,14 @@ REPORT_SESSION_ID oturumuna model mesajı olarak düşer; üretim kablosu
 yazar — doküman var ama listede yok hatası F13'te kapatıldı. FCM push Y2
 işi olmaya devam eder. Alıcı tek-kullanıcı varsayımıyla default_owner()'dır
 — çok kullanıcılı sahiplik (owner alanı) sonraki faz.
+
+Canlı ilerleme (F9): görev ACTIVE adım attıkça REPORT_SESSION_ID'deki TEK
+ilerleme satırı yerinde güncellenir ("'X' çalışıyor — adım 4/20"). Satır
+append DEĞİL upsert'tir (deterministik doc id — progress_row_id): tick-başı
+append messages koleksiyonunu spam'leyeceği için F9 uzun süre açık kalmıştı;
+upsert tek yazım/tick ile sınırlar. Görev terminal'e (done /
+budget_exhausted) ulaşınca nihai rapor düşer ve ilerleme satırı silinir —
+geçici satır kalıcı çöp bırakmaz.
 """
 import logging
 from datetime import datetime, timezone
@@ -47,6 +55,11 @@ from . import config
 TASKS_COLLECTION = "tasks"
 # Tek kavram tek isim: görev raporları her zaman bu oturum kimliğine düşer.
 REPORT_SESSION_ID = "tasks"
+
+# F9 canlı ilerleme satırının transcript kind'ı. İstemci bilinmeyen kind'ları
+# toleranslı okur (spec §7): eski APK bu satırı düz model baloncuğu olarak
+# gösterir; terminalde satır silindiği için kalıcı iz bırakmaz.
+PROGRESS_KIND = "task_progress"
 
 STATUS_ACTIVE = "active"
 STATUS_DONE = "done"
@@ -99,6 +112,54 @@ def enqueue(db, title, goal, max_steps=None, checkpoint=None, now_fn=_now) -> st
     return ref.id
 
 
+def progress_row_id(user_id: str, task_id: str) -> str:
+    """F9 ilerleme satırının deterministik transcript doc id'si: kullanıcı ve
+    görev başına TEK satır — tick sayısı ne olursa olsun. Firestore doc id
+    kurallarına uygun ([A-Za-z0-9._@-]; '/' yok)."""
+    return f"task-progress-{user_id}-{task_id}"
+
+
+def _progress_text(task: dict) -> str:
+    budget = task["budget"]
+    return (f"'{task['title']}' çalışıyor — "
+            f"adım {budget['steps_used']}/{budget['max_steps']}\n"
+            f"Son adım: {task.get('last_step_result')}")
+
+
+def make_progress_writer(store, user_id: str):
+    """F9 canlı ilerleme yazıcısı. store: MessageStore (upsert_row/delete_row
+    imzalı). Sözleşme step_once ile aramızda: her adım sonunda (status neyse)
+    progress(task, task_id) çağrılır; ACTIVE'de satır upsert edilir, terminal
+    durumda satır SİLİNİR — nihai rapor zaten düşmüş olur, geçici satır
+    kalıcı çöp bırakmaz.
+
+    Tick-başı append yapmamanın sebebi ölçülmüştür (devir notu §4): messages
+    koleksiyonu görev başına yüzlerce "adım 3/20" satırıyla dolar. Upsert tek
+    dokümanı günceller; yazma maliyeti tick sıklığına, koleksiyon boyutu 1'e
+    sabittir."""
+    def progress(task: dict, task_id: str) -> None:
+        row_id = progress_row_id(user_id, task_id)
+        if task.get("status") in (STATUS_DONE, STATUS_BUDGET_EXHAUSTED):
+            store.delete_row(user_id, REPORT_SESSION_ID, row_id)
+            return
+        store.upsert_row(user_id, REPORT_SESSION_ID, row_id, "model",
+                         _progress_text(task), kind=PROGRESS_KIND,
+                         meta={"task_id": task_id})
+    return progress
+
+
+def _progress(progress_fn, task: dict, task_id: str) -> None:
+    """İlerleme yazımı best-effort — _report'un aynısı: hata görevin kararını
+    (Firestore'a işlenmiş durum) bozmaz, loglanır ve yutulur."""
+    if progress_fn is None:
+        return
+    try:
+        progress_fn(task, task_id)
+    except Exception:
+        logging.exception("tasks: ilerleme satırı yazılamadı (status=%s title=%r)",
+                          task.get("status"), task.get("title"))
+
+
 def make_reporter(store, user_id: str, conversations_store=None):
     """store: messages.MessageStore (veya aynı append imzalı herhangi bir şey).
     Raporlar sabit REPORT_SESSION_ID oturumuna model mesajı olarak düşer.
@@ -142,7 +203,8 @@ def _report(report_fn, task: dict, new_status: str) -> None:
                           new_status, task.get("title"))
 
 
-def step_once(db, task_id: str, step_fn, report_fn=None, now_fn=_now) -> dict:
+def step_once(db, task_id: str, step_fn, report_fn=None, progress_fn=None,
+              now_fn=_now) -> dict:
     """Tek görevde TAM BİR adım. Dönen dict en az {stepped, status, task_id}.
 
     Sıra: status active değilse no-op → bütçe dolmuşsa adım ATILMAZ, görev
@@ -150,7 +212,11 @@ def step_once(db, task_id: str, step_fn, report_fn=None, now_fn=_now) -> dict:
     steps_used+1 / checkpoint / last_step_result yazılır. step_fn done derse
     status done + rapor. Adım tavanı doldurursa bir tick bekletmeden hemen
     budget_exhausted + rapor (bildirim bir tur gecikmesin). step_fn hatası
-    görevi öldürmez: hata last_step_result'a, sayaç yine +1 (modül docstring)."""
+    görevi öldürmez: hata last_step_result'a, sayaç yine +1 (modül docstring).
+
+    progress_fn (F9): her MUTASYONLU çıkışta progress(task, task_id) çağrılır —
+    active adımda ilerleme satırı güncellenir, terminalde silinir
+    (make_progress_writer sözleşmesi). Mutasyonsuz no-op çıkışta çağrılmaz."""
     ref = db.collection(TASKS_COLLECTION).document(task_id)
     snap = ref.get()
     if not snap.exists:
@@ -166,6 +232,7 @@ def step_once(db, task_id: str, step_fn, report_fn=None, now_fn=_now) -> dict:
         ref.set(update, merge=True)
         task.update(update)
         _report(report_fn, task, STATUS_BUDGET_EXHAUSTED)
+        _progress(progress_fn, task, task_id)  # bayat ilerleme satırını sil
         logging.info("tasks: bütçe doldu id=%s (adım atılmadı)", task_id)
         return {"stepped": False, "status": STATUS_BUDGET_EXHAUSTED, "task_id": task_id}
 
@@ -180,6 +247,8 @@ def step_once(db, task_id: str, step_fn, report_fn=None, now_fn=_now) -> dict:
     except Exception as exc:
         update["last_step_result"] = f"adım hatası: {exc}"
         ref.set(update, merge=True)
+        task.update(update)
+        _progress(progress_fn, task, task_id)  # hatayı canlı satırda da göster
         logging.info("tasks: adım hatası id=%s steps=%d hata=%s", task_id, steps_used, exc)
         return {"stepped": True, "status": STATUS_ACTIVE, "task_id": task_id,
                 "steps_used": steps_used, "error": str(exc)}
@@ -193,6 +262,7 @@ def step_once(db, task_id: str, step_fn, report_fn=None, now_fn=_now) -> dict:
         ref.set(update, merge=True)
         task.update(update)
         _report(report_fn, task, STATUS_DONE)
+        _progress(progress_fn, task, task_id)  # satır silinir
         logging.info("tasks: bitti id=%s steps=%d", task_id, steps_used)
         return {"stepped": True, "status": STATUS_DONE, "task_id": task_id,
                 "steps_used": steps_used, "result": outcome.get("result")}
@@ -203,17 +273,20 @@ def step_once(db, task_id: str, step_fn, report_fn=None, now_fn=_now) -> dict:
         ref.set(update, merge=True)
         task.update(update)
         _report(report_fn, task, STATUS_BUDGET_EXHAUSTED)
+        _progress(progress_fn, task, task_id)  # satır silinir
         logging.info("tasks: bütçe doldu id=%s steps=%d", task_id, steps_used)
         return {"stepped": True, "status": STATUS_BUDGET_EXHAUSTED, "task_id": task_id,
                 "steps_used": steps_used, "result": outcome.get("result")}
 
     ref.set(update, merge=True)
+    task.update(update)
+    _progress(progress_fn, task, task_id)  # "'X' çalışıyor — adım n/m"
     logging.info("tasks: adım id=%s steps=%d/%d", task_id, steps_used, budget["max_steps"])
     return {"stepped": True, "status": STATUS_ACTIVE, "task_id": task_id,
             "steps_used": steps_used, "result": outcome.get("result")}
 
 
-def tick(db, step_fn, report_fn=None, now_fn=_now) -> dict:
+def tick(db, step_fn, report_fn=None, progress_fn=None, now_fn=_now) -> dict:
     """Her active görevde bir step_once; tick özetini döner.
 
     Görev başına hata izolasyonu repo-watch deseninin aynısı: bir görevin
@@ -230,7 +303,8 @@ def tick(db, step_fn, report_fn=None, now_fn=_now) -> dict:
     for snap in snaps:
         task_id = snap.reference.id
         try:
-            out = step_once(db, task_id, step_fn, report_fn=report_fn, now_fn=now_fn)
+            out = step_once(db, task_id, step_fn, report_fn=report_fn,
+                            progress_fn=progress_fn, now_fn=now_fn)
         except Exception:
             errors += 1
             logging.exception("tasks: tick görev hatası id=%s", task_id)

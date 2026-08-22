@@ -300,3 +300,84 @@ def test_reporter_without_index_store_keeps_old_behavior():
 
 def conversations_empty(db):
     return list(db.collection("conversations").stream()) == []
+
+
+# ---------------------------------------------------------------------------
+# F9 canlı ilerleme: TEK satır upsert edilir, terminalde silinir
+# ---------------------------------------------------------------------------
+
+
+def test_progress_writer_keeps_one_row_and_updates_it_in_place():
+    """Tick-başı append YASAK (ölçülen spam riski): iki adım sonunda hâlâ TEK
+    satır vardır ve metni son adımı gösterir."""
+    db = FakeDB()
+    progress = tasks.make_progress_writer(MessageStore(db), OWNER)
+    task_id = tasks.enqueue(db, "uzun iş", "g", max_steps=5)
+
+    out1 = tasks.step_once(db, task_id, _ok_step, progress_fn=progress)
+    out2 = tasks.step_once(db, task_id, _ok_step, progress_fn=progress)
+
+    rows = _reports(db)
+    assert len(rows) == 1
+    (row,) = rows
+    assert row["kind"] == tasks.PROGRESS_KIND
+    assert "uzun iş" in row["text"]
+    assert f"adım {out2['steps_used']}/5" in row["text"]
+    assert out1["steps_used"] == 1 and out2["steps_used"] == 2
+
+
+def test_progress_row_disappears_when_task_done_and_final_report_lands():
+    """Terminalde nihai rapor düşer, geçici ilerleme satırı silinir — kalıcı
+    çöp bırakmaz."""
+    db = FakeDB()
+    progress = tasks.make_progress_writer(MessageStore(db), OWNER)
+    report = tasks.make_reporter(MessageStore(db), OWNER)
+    task_id = tasks.enqueue(db, "kısa iş", "g", max_steps=5)
+    tasks.step_once(db, task_id, _ok_step, report_fn=report, progress_fn=progress)
+    assert len(_reports(db)) == 1
+
+    def finishing(checkpoint):
+        return {"done": True, "result": "bitti"}
+
+    tasks.step_once(db, task_id, finishing, report_fn=report, progress_fn=progress)
+
+    rows = _reports(db)
+    assert [r.get("kind") for r in rows] == [None]
+    assert "tamamlandı" in rows[0]["text"]
+
+
+def test_error_step_is_visible_in_the_live_progress_line():
+    """İlke 4 (hata = gözlem): başarısız adım da canlı satıra yazılır — kullanıcı
+    'adım hatası: …'yı bir sonraki poll'da görür, karanlıkta beklemmez."""
+    db = FakeDB()
+    progress = tasks.make_progress_writer(MessageStore(db), OWNER)
+    task_id = tasks.enqueue(db, "t", "g", max_steps=5)
+
+    def boom(checkpoint):
+        raise RuntimeError("ağ koptu")
+
+    tasks.step_once(db, task_id, boom, progress_fn=progress)
+    (row,) = _reports(db)
+    assert "adım hatası" in row["text"] and "ağ koptu" in row["text"]
+
+
+def test_budget_exhausted_without_stepping_clears_stale_progress_row():
+    db = FakeDB()
+    progress = tasks.make_progress_writer(MessageStore(db), OWNER)
+    task_id = tasks.enqueue(db, "t", "g", max_steps=5)
+    tasks.step_once(db, task_id, _ok_step, progress_fn=progress)
+    assert len(_reports(db)) == 1
+
+    _set(db, task_id, budget={"max_steps": 5, "steps_used": 5})
+    tasks.step_once(db, task_id, lambda cp: None, progress_fn=progress)
+    assert _reports(db) == []
+
+
+def test_step_once_without_progress_fn_is_unchanged():
+    """progress_fn opsiyoneldir: eski çağrı biçimi (yalnız report_fn) hiçbir
+    ilerleme satırı yazmaz, davranış değişmeden çalışır."""
+    db = FakeDB()
+    task_id = tasks.enqueue(db, "t", "g", max_steps=5)
+    out = tasks.step_once(db, task_id, _ok_step)
+    assert out["stepped"] is True
+    assert _reports(db) == []

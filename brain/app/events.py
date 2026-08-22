@@ -87,14 +87,19 @@ def _handle_task_tick(db, payload: dict, fetch, now_fn) -> dict:
 
     fetch (events.http_status imzalı) health_patrol step'ine enjekte edilir;
     raporlar payload["owner"] yoksa tasks.default_owner()'ın REPORT_SESSION_ID
-    oturumuna düşer (owner çözülemezse rapor atlanır, görevler yine yürür)."""
+    oturumuna düşer (owner çözülemezse rapor atlanır, görevler yine yürür).
+    F9: aynı oturumda TEK canlı ilerleme satırı da tutulur (upsert; terminalde
+    silinir) — uzun işte uygulama "adım 4/20"yi tick aralarında görür."""
     owner = payload.get("owner") or tasks.default_owner()
     report_fn = None
+    progress_fn = None
     if owner:
-        report_fn = tasks.make_reporter(messages.MessageStore(db), owner,
+        store = messages.MessageStore(db)
+        report_fn = tasks.make_reporter(store, owner,
                                         conversations.ConversationStore(db))
+        progress_fn = tasks.make_progress_writer(store, owner)
     return tasks.tick(db, tasks.health_patrol_step(fetch),
-                      report_fn=report_fn, now_fn=now_fn)
+                      report_fn=report_fn, progress_fn=progress_fn, now_fn=now_fn)
 
 
 def _handle_task_enqueue(db, payload: dict, now_fn) -> tuple[dict | None, bool, str, bool]:

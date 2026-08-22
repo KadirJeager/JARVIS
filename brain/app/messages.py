@@ -60,6 +60,41 @@ class MessageStore:
             row["meta"] = meta
         self.db.collection(COLLECTION).add(row)
 
+    def upsert_row(self, user_id: str, session_id: str, row_id: str, role: str,
+                   text: str, kind: str | None = None,
+                   meta: dict | None = None) -> None:
+        """Write ONE transcript row under a DETERMINISTIC document id (`row_id`):
+        create it on first call, overwrite text/ts in place on every later one.
+
+        This is the F9 primitive -- a live progress line must UPDATE itself
+        tick after tick instead of appending a new row per tick (the measured
+        spam risk that kept F9 open). Same row shape as [append]; the caller
+        owns the id scheme and must make it unique per (user, session, thing)
+        -- embedding user_id and session_id in row_id is the convention (see
+        tasks.progress_row_id)."""
+        row = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "role": role,
+            "text": text,
+            "ts": self._now(),
+        }
+        if kind:
+            row["kind"] = kind
+        if meta:
+            row["meta"] = meta
+        self.db.collection(COLLECTION).document(row_id).set(row)
+
+    def delete_row(self, user_id: str, session_id: str, row_id: str) -> bool:
+        """Delete the deterministic-id row written by [upsert_row]. Returns
+        whether a row was actually there (False = already gone or never
+        written -- both are success for the caller's cleanup purpose)."""
+        ref = self.db.collection(COLLECTION).document(row_id)
+        if not ref.get().exists:
+            return False
+        ref.delete()
+        return True
+
     def history(self, user_id: str, session_id: str, limit: int = MAX_HISTORY_MESSAGES) -> list[dict]:
         """Newest `limit` messages for (user_id, session_id), returned oldest→newest.
 
