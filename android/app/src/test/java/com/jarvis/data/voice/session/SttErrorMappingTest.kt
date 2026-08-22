@@ -25,6 +25,13 @@ import org.junit.Test
  * a dropped network connection, which on-device never raises and a network-to-network
  * "fallback" cannot fix. The recoverable set must behave identically regardless of which
  * recognizer is in use.
+ *
+ * Since 2026-08-23 the decision also carries a BOUNDED ERROR_CLIENT(5) escalation: with
+ * budget left ([STT_MAX_CLIENT_ERROR_RETRIES]), code 5 retries through VoiceSession's
+ * delayed re-arm instead of ending the call -- measured production trigger was two Fatal
+ * 5s in one session, one on the very first listen. Tests below pin both sides: strict
+ * behaviour under the no-budget default, retry within budget, fatality past it, and no
+ * leakage into any other code's verdict.
  */
 class SttErrorMappingTest {
 
@@ -100,8 +107,48 @@ class SttErrorMappingTest {
 
     @Test
     fun representativeFatalCode_isFatalRegardlessOfRecognizer() {
-        // ERROR_CLIENT -- not language-related, so the on-device flag must not change it.
+        // ERROR_CLIENT with NO budget context (the default parameter = cap): the strict
+        // historical behaviour stays pinned for callers that never pass the counter.
         assertEquals(SttErrorAction.Fatal, sttErrorAction(5, usingOnDeviceRecognizer = true))
         assertEquals(SttErrorAction.Fatal, sttErrorAction(5, usingOnDeviceRecognizer = false))
+    }
+
+    @Test
+    fun clientError_isRetriedWhileBudgetRemains_thenFatal() {
+        // Measured production trigger (Pixel 10 Pro / Android 17, 2026-08-23 night):
+        // ERROR_CLIENT twice per session, both Fatal, once on the very first listen.
+        // The escalation is bounded: occurrences 1..STT_MAX_CLIENT_ERROR_RETRIES retry
+        // (through VoiceSession.relisten()'s delayed re-arm), past that it is fatal.
+        assertEquals(
+            SttErrorAction.Retry,
+            sttErrorAction(5, usingOnDeviceRecognizer = true, clientErrorCount = 1),
+        )
+        assertEquals(
+            SttErrorAction.Retry,
+            sttErrorAction(5, usingOnDeviceRecognizer = false, clientErrorCount = STT_MAX_CLIENT_ERROR_RETRIES),
+        )
+        assertEquals(
+            SttErrorAction.Fatal,
+            sttErrorAction(5, usingOnDeviceRecognizer = true, clientErrorCount = STT_MAX_CLIENT_ERROR_RETRIES + 1),
+        )
+    }
+
+    @Test
+    fun clientErrorEscalation_doesNotTouchOtherMappings() {
+        // Budget must not leak into any other code's verdict: recoverables stay
+        // recoverable and language codes keep their fallback/fatal split even when
+        // the ERROR_CLIENT budget is fully unspent (count = 0).
+        assertEquals(
+            SttErrorAction.FallbackToNetwork,
+            sttErrorAction(13, true, clientErrorCount = 0), // ERROR_LANGUAGE_UNAVAILABLE
+        )
+        assertEquals(
+            SttErrorAction.Retry,
+            sttErrorAction(8, false, clientErrorCount = 0), // ERROR_RECOGNIZER_BUSY
+        )
+        assertEquals(
+            SttErrorAction.Fatal,
+            sttErrorAction(11, true, clientErrorCount = 0), // ERROR_SERVER_DISCONNECTED
+        )
     }
 }

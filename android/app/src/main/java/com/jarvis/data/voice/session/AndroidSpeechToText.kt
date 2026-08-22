@@ -137,6 +137,11 @@ class AndroidSpeechToText(
     // with one log line instead of delivering it twice.
     private var syntheticFinalSent = false
 
+    // Main-thread only, cycle-scoped (reset in listen()). Set when endOfSpeech has
+    // flushed the pipe's write side for THIS cycle -- makes the flush strictly
+    // one-shot even if a recognizer ever delivered onEndOfSpeech twice.
+    private var eosFlushed = false
+
     // Main-thread only. Logged once per start()/destroy() cycle -- the first time
     // this instance falls back to (or never attempts) the PFD feed after a given
     // start() -- so repeated legacy cycles do not spam logcat. destroy() resets it,
@@ -161,6 +166,10 @@ class AndroidSpeechToText(
     // scope. Reset in destroy(), alongside usingOnDeviceRecognizer.
     private var networkFallbackActive = false
 
+    // Call-scoped ERROR_CLIENT(5) budget -- see [sttErrorAction]'s third parameter.
+    // Main-thread only (mutated in onError, reset in start/destroy).
+    private var clientErrorCount = 0
+
     // Written by start()/destroy() (any thread), read from main-thread callbacks.
     @Volatile
     private var listener: SpeechToTextListener? = null
@@ -184,10 +193,17 @@ class AndroidSpeechToText(
      * (blank -> recoverable, matching onResults' own empty-result semantics), and
      * let VoiceSession's normal relisten() re-arm the next cycle. syntheticFinalSent
      * turns a late real terminal into a logged no-op rather than a double final.
+     *
+     * Since the EOF flush ([flushPfdWriteSide]) the watchdog is only the BACKSTOP on
+     * PFD cycles: endOfSpeech closes the pipe's write side first, and a recognizer
+     * that honours EOF finalizes on its own inside the shorter [EOS_FLUSH_GRACE_MS]
+     * window. The full [EOS_FINAL_TIMEOUT_MS] window now applies mainly to legacy
+     * (self-microphone) cycles, which have no write side to close. The `flushed=`
+     * field in the log line says which path actually timed out.
      */
     private val eosWatchdog = Runnable {
         if (listener == null) return@Runnable // destroy() already claimed teardown
-        Log.i(TAG, "tl ev=eos.noFinal timeoutMs=$EOS_FINAL_TIMEOUT_MS")
+        Log.i(TAG, "tl ev=eos.noFinal flushed=$eosFlushed")
         syntheticFinalSent = true
         endCurrentPfdCycle()
         val text = lastPartialText
@@ -235,7 +251,13 @@ class AndroidSpeechToText(
             main.removeCallbacks(eosWatchdog)
             Log.i(TAG, "tl ev=onError code=$error")
             endCurrentPfdCycle()
-            when (sttErrorAction(error, usingOnDeviceRecognizer)) {
+            // Counted BEFORE the dispatch below: sttErrorAction's third argument is
+            // "how many ERROR_CLIENTs has this call already absorbed, this one
+            // included". The retry branch spends that budget through
+            // listener?.onRecoverableError() -> VoiceSession.relisten(), whose 300 ms
+            // pause is what keeps a recurring ERROR_CLIENT from hot-spinning.
+            if (error == SpeechRecognizer.ERROR_CLIENT) clientErrorCount++
+            when (sttErrorAction(error, usingOnDeviceRecognizer, clientErrorCount)) {
                 SttErrorAction.Retry -> listener?.onRecoverableError()
                 SttErrorAction.FallbackToNetwork -> fallbackToNetworkRecognizer(error)
                 SttErrorAction.Fatal -> {
@@ -255,11 +277,18 @@ class AndroidSpeechToText(
         }
         override fun onEndOfSpeech() {
             Log.i(TAG, "tl ev=onEndOfSpeech")
-            // See [eosWatchdog]: the endpoint was announced, so a final MUST follow
-            // within EOS_FINAL_TIMEOUT_MS -- otherwise we finalize the best partial
-            // ourselves instead of stalling the dialogue on a mute recognizer.
+            // See [eosWatchdog]: the endpoint was announced, so a final MUST follow --
+            // otherwise we finalize the best partial ourselves instead of stalling the
+            // dialogue on a mute recognizer. On a live PFD cycle we first tell the
+            // recognizer the input has ENDED (flushPfdWriteSide): that is what lets an
+            // EOF-honoring decoder deliver a REAL final inside the shorter grace
+            // window instead of leaving us with the +2 s synthetic promotion.
             main.removeCallbacks(eosWatchdog)
-            main.postDelayed(eosWatchdog, EOS_FINAL_TIMEOUT_MS)
+            val flushed = flushPfdWriteSide()
+            main.postDelayed(
+                eosWatchdog,
+                if (flushed) EOS_FLUSH_GRACE_MS else EOS_FINAL_TIMEOUT_MS,
+            )
         }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
@@ -277,6 +306,8 @@ class AndroidSpeechToText(
             }
             // One policy instance per start() call (see class doc).
             policy = tapSource?.let { PfdFeedPolicy() }
+            // Fresh per-call ERROR_CLIENT budget (see sttErrorAction's third param).
+            clientErrorCount = 0
             // Computed once and threaded through -- isOnDeviceRecognizerAvailable(context)
             // and createRecognizer() used to each re-run this same platform check, which
             // only shared the PREDICATE, not the evaluation: nothing actually stopped the
@@ -304,6 +335,7 @@ class AndroidSpeechToText(
             hadResult = false
             lastPartialText = null
             syntheticFinalSent = false
+            eosFlushed = false
             // A new cycle supersedes any watchdog the previous one armed (e.g.
             // VoiceSession re-armed listening while a stale eos timer was pending).
             main.removeCallbacks(eosWatchdog)
@@ -411,6 +443,8 @@ class AndroidSpeechToText(
             networkFallbackActive = false
             lastPartialText = null
             syntheticFinalSent = false
+            eosFlushed = false
+            clientErrorCount = 0
         }
     }
 
@@ -429,6 +463,54 @@ class AndroidSpeechToText(
      * itself to be `@Volatile`.
      */
     internal fun currentlyUsingOnDeviceRecognizer(): Boolean = usingOnDeviceRecognizer
+
+    /**
+     * Tells a PFD-fed recognizer that the audio input has ENDED, without tearing the
+     * cycle down: detach the tap (no further frames are offered), drain-and-release
+     * the writer (the poison pill makes it exit, and its `.use` closes the WRITE end),
+     * and leave [PfdCycle.readFd] open so the recognizer can drain every buffered byte
+     * and then see a true EOF on its own dup of the read end. Closing our read-end copy
+     * would NOT produce this EOF -- dup'd descriptors are independent -- which is
+     * exactly why endCurrentPfdCycle()'s teardown ordering cannot substitute for it.
+     *
+     * Measured production context (Pixel 10 Pro / Android 17, tr-TR, PFD feed,
+     * 2026-08-23): the on-device recognizer emits partials and onEndOfSpeech and then
+     * NEVER delivers a terminal callback while the feed stays open, so every final that
+     * night was the watchdog's synthetic promotion (+2 s latency, partial-quality
+     * text). Signalling input end at the announced endpoint is the standard streaming
+     * contract: a decoder honouring EOF finalizes promptly on its own -- real decoder
+     * text, faster than the backstop.
+     *
+     * Deliberately NOT done here (that stays [endCurrentPfdCycle]'s job): nulling
+     * [activeCycle], closing the read end, policy accounting, and the writer join. If
+     * the flush WORKS, the arriving onResults/onError runs the normal teardown with
+     * hadResult=true -- strictly healthier evidence for PfdFeedPolicy than the stall
+     * it replaces (the stall case always scored ALIVE via hadPartial alone; that does
+     * not change). If the recognizer ignores EOF or errors on it (a spurious
+     * ERROR_CLIENT is conceivable), the watchdog fires into the unchanged teardown
+     * path -- byte-for-byte today's behaviour on a shorter clock -- and the bounded
+     * ERROR_CLIENT retry absorbs one bad reaction.
+     *
+     * Barge-in note: from this instant the tap no longer feeds the recognizer, so tail
+     * speech past a FALSE endpoint is cut short by up to
+     * EOS_FINAL_TIMEOUT_MS - EOS_FLUSH_GRACE_MS compared to the old backstop-only flow.
+     * Accepted on purpose: the endpoint was already announced by the recognizer itself,
+     * TTS cannot be playing yet (no agent turn has run, so there is no echo window to
+     * protect), and the next cycle reattaches the tap fresh in listen().
+     *
+     * @return whether a live PFD cycle was actually flushed -- false in legacy mode
+     *   (no tap source or no active cycle), where there is no write side to close and
+     *   the full backstop window applies.
+     */
+    private fun flushPfdWriteSide(): Boolean {
+        if (eosFlushed) return false // strictly one shot per cycle
+        val cycle = activeCycle ?: return false
+        eosFlushed = true
+        tapSource?.setTap(null)
+        cycle.queue.clear()
+        cycle.queue.offer(POISON_PILL)
+        return true
+    }
 
     /**
      * Builds a fresh pipe + writer + tap for one recognizer cycle and returns
@@ -657,7 +739,20 @@ class AndroidSpeechToText(
         // enough that a slow-but-alive decoder is never raced (healthy finals land
         // well under 1 s after the endpoint), tight enough that a stalled one costs
         // the dialogue two seconds instead of the rest of the call.
+        //
+        // Since the EOF flush this is the LEGACY-path window (and the backstop if a
+        // flushed cycle somehow still stalls): a flushed PFD cycle gets the shorter
+        // EOS_FLUSH_GRACE_MS below, because closing the write side already told the
+        // decoder the input ended.
         const val EOS_FINAL_TIMEOUT_MS = 2000L
+
+        // Grace window for a FLUSHED PFD cycle (see flushPfdWriteSide): the write side
+        // is closed, so an EOF-honoring decoder needs no silence detection to decide
+        // the utterance is over -- it only needs to drain the pipe and decode, which
+        // healthy services finish in well under a second. 1.5 s leaves decode headroom
+        // while cutting the worst-case stall cost by a quarter second versus the
+        // legacy window; the watchdog's synthetic promotion remains the backstop.
+        const val EOS_FLUSH_GRACE_MS = 1500L
 
         // Frames buffered between the tap (mic capture thread) and the writer
         // (pipe I/O thread) before offer() starts rejecting and counting drops.
@@ -886,9 +981,35 @@ enum class SttErrorAction {
  *
  * Pure Kotlin over compile-time-constant error codes on purpose, so the mapping itself is
  * unit-testable on the JVM (SttErrorMappingTest), exactly like [isRecoverableSttError].
+ *
+ * ### The ERROR_CLIENT(5) escalation
+ *
+ * Measured in production (Pixel 10 Pro / Android 17, 2026-08-23 night): ERROR_CLIENT
+ * arrived twice in one session -- once on the very first listen() after launch -- and
+ * both times fell through to [SttErrorAction.Fatal], ending a call that a re-arm would
+ * have saved. The code is also documented in [AndroidSpeechToText.buildPfdCycleIntent]
+ * as a possible symptom of our own fd hand-off racing (a spurious, one-off 5), which
+ * makes an immediate Fatal doubly wasteful. So while [clientErrorCount] -- the number
+ * of ERROR_CLIENTs THIS call has already absorbed, current one included -- still has
+ * budget left ([STT_MAX_CLIENT_ERROR_RETRIES]), code 5 maps to [SttErrorAction.Retry]
+ * instead. Unlike FallbackToNetwork's immediate re-arm, that Retry path goes through
+ * VoiceSession.relisten()'s STT_RESTART_DELAY_MS pause, so a recurring 5 cannot
+ * hot-spin the recognition service; past the budget the original Fatal stands.
+ *
+ * The parameter DEFAULTS to "budget exhausted" (Int.MAX_VALUE), i.e. the strict
+ * historical behaviour: callers (and tests) that know nothing about the counter keep
+ * today's verdicts verbatim -- passing a real count is what opts into the escalation.
  */
-fun sttErrorAction(errorCode: Int, usingOnDeviceRecognizer: Boolean): SttErrorAction = when {
+const val STT_MAX_CLIENT_ERROR_RETRIES = 2
+
+fun sttErrorAction(
+    errorCode: Int,
+    usingOnDeviceRecognizer: Boolean,
+    clientErrorCount: Int = Int.MAX_VALUE,
+): SttErrorAction = when {
     isRecoverableSttError(errorCode) -> SttErrorAction.Retry
+    errorCode == SpeechRecognizer.ERROR_CLIENT && clientErrorCount <= STT_MAX_CLIENT_ERROR_RETRIES ->
+        SttErrorAction.Retry
     isLanguageUnavailableToOnDeviceRecognizer(errorCode) && usingOnDeviceRecognizer ->
         SttErrorAction.FallbackToNetwork
     else -> SttErrorAction.Fatal
