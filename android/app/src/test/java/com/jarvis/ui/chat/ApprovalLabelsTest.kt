@@ -2,6 +2,7 @@ package com.jarvis.ui.chat
 
 import com.jarvis.data.approvals.ApprovalStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -32,5 +33,32 @@ class ApprovalLabelsTest {
         val labels = ApprovalStatus.entries.map { approvalStatusLabel(it) }
         assertEquals("her durum ayırt edilebilmeli", labels.size, labels.toSet().size)
         assertTrue("hiçbir rozet boş olamaz", labels.none { it.isBlank() })
+    }
+
+    @Test
+    fun approvalCauseLabelMapping() {
+        assertEquals("Kırmızı bölge kuralı", approvalCauseLabel("red_zone"))
+        assertEquals("Yetki isteği", approvalCauseLabel("capability_request"))
+        assertNull(approvalCauseLabel(null))
+        assertNull(approvalCauseLabel(""))
+        assertNull(approvalCauseLabel("  "))
+        assertEquals("Neden bilinmiyor", approvalCauseLabel("unknown_cause_slug"))
+    }
+
+    @Test
+    fun approvalTrustLabelMapping() {
+        assertEquals("Yüksek güvenle", approvalTrustLabel("HIGH"))
+        assertEquals("Orta güvenle", approvalTrustLabel("MEDIUM"))
+        assertEquals("Düşük güvenle", approvalTrustLabel("LOW"))
+        assertNull(approvalTrustLabel(null))
+        assertNull(approvalTrustLabel(""))
+        assertEquals("Güven düzeyi bilinmiyor", approvalTrustLabel("UNKNOWN_TRUST"))
+    }
+
+    @Test
+    fun approvalReversibilityLabelMapping() {
+        assertEquals("Geri alınabilir", approvalReversibilityLabel(true))
+        assertEquals("Geri alınamaz", approvalReversibilityLabel(false))
+        assertNull(approvalReversibilityLabel(null))
     }
 }

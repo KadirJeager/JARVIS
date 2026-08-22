@@ -1,6 +1,7 @@
 package com.jarvis.ui.chat
 
 import com.jarvis.data.approvals.Approval
+import com.jarvis.data.approvals.RejectReason
 import com.jarvis.data.chat.Conversation
 import com.jarvis.data.chat.UiMessage
 
@@ -49,6 +50,11 @@ data class ChatUiState(
 
     /** Approvals with a decision in flight. Their buttons are inert AND look inert. */
     val decidingApprovals: Set<String> = emptySet(),
+
+    /** Approval currently in step-two rejection flow. */
+    val rejectingApprovalId: String? = null,
+    /** Preset rejection reasons fetched from the server (§5.9 P2c). */
+    val rejectionReasons: List<RejectReason> = emptyList(),
 
     /** The approval a notification asked us to show (`data.approval_id`, spec §10). */
     val focusedApprovalId: String? = null,

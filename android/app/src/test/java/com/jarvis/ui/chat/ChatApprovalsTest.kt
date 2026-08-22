@@ -13,8 +13,9 @@ import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.HistoryMessage
 import com.jarvis.data.net.HistoryResponse
 import com.jarvis.data.net.JarvisApi
-import com.jarvis.data.net.RejectRequest
 import com.jarvis.data.net.ReasonsResponse
+import com.jarvis.data.net.RejectReasonDto
+import com.jarvis.data.net.RejectRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -69,6 +70,7 @@ class ChatApprovalsTest {
         var queue: List<ApprovalDto> = emptyList(),
         var singles: Map<String, ApprovalDto> = emptyMap(),
         var decision: ApprovalDecisionDto = ApprovalDecisionDto("approved", "oldu", false),
+        var presetReasons: List<RejectReasonDto> = emptyList(),
         var listFailure: Throwable? = null,
         var decideFailure: Throwable? = null,
     ) : ApprovalApi {
@@ -99,7 +101,7 @@ class ChatApprovalsTest {
             return decision
         }
 
-        override suspend fun reasons(): ReasonsResponse = ReasonsResponse(emptyList())
+        override suspend fun reasons(): ReasonsResponse = ReasonsResponse(presetReasons)
     }
 
     private fun dto(id: String, status: String = "pending", title: String = "'cancel_reminder' çalıştırılsın mı?") =
@@ -308,20 +310,76 @@ class ChatApprovalsTest {
     }
 
     @Test
-    fun rejecting_without_a_reason_is_refused_locally() = runTest(dispatcher) {
-        /** P2a boundary lives in the VM until Task 6's reason picker lands: nothing
-         * is SENT, the card stays decidable, and the refusal is visible as an error. */
+    fun beginReject_doesNotCallRejectApi_andPopulatesReasons() = runTest(dispatcher) {
+        val preset = listOf(RejectReasonDto("r1", "Yanlış kişi", "Yanlış kişi seçildi."))
+        val approvals = FakeApprovalApi(queue = listOf(dto("1")), presetReasons = preset)
+        val vm = vm(approvals = approvals)
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.beginReject("1")
+        advanceUntilIdle()
+
+        assertEquals(0, approvals.rejectCalls)
+        assertEquals("1", vm.state.value.rejectingApprovalId)
+        assertEquals(1, vm.state.value.rejectionReasons.size)
+        assertEquals("Yanlış kişi", vm.state.value.rejectionReasons[0].title)
+    }
+
+    @Test
+    fun confirmReject_sendsReasonToApi_andClearsRejectingId() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi(
+            queue = listOf(dto("1")),
+            decision = ApprovalDecisionDto("rejected", null, already = false),
+        )
+        val vm = vm(approvals = approvals)
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.beginReject("1")
+        assertEquals("1", vm.state.value.rejectingApprovalId)
+
+        vm.confirmReject("yanlış kişi")
+        advanceUntilIdle()
+
+        assertEquals(1, approvals.rejectCalls)
+        assertEquals("yanlış kişi", approvals.lastRejectReason)
+        assertNull(vm.state.value.rejectingApprovalId)
+        assertEquals(ApprovalStatus.REJECTED, vm.state.value.approvals["1"]!!.status)
+    }
+
+    @Test
+    fun confirmReject_blankReason_refusedLocally() = runTest(dispatcher) {
         val approvals = FakeApprovalApi(queue = listOf(dto("1")))
         val vm = vm(approvals = approvals)
         vm.onSignedIn()
         advanceUntilIdle()
 
-        vm.rejectApproval("1")
+        vm.beginReject("1")
+        vm.confirmReject("   ")
         advanceUntilIdle()
 
         assertEquals(0, approvals.rejectCalls)
         assertNotNull(vm.state.value.error)
+        assertNull(vm.state.value.rejectingApprovalId)
         assertEquals(ApprovalStatus.PENDING, vm.state.value.approvals["1"]!!.status)
+    }
+
+    @Test
+    fun approveApproval_clearsRejectingIdIfMatching() = runTest(dispatcher) {
+        val approvals = FakeApprovalApi(queue = listOf(dto("1")))
+        val vm = vm(approvals = approvals)
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.beginReject("1")
+        assertEquals("1", vm.state.value.rejectingApprovalId)
+
+        vm.approveApproval("1")
+        advanceUntilIdle()
+
+        assertNull(vm.state.value.rejectingApprovalId)
+        assertEquals(1, approvals.approveCalls)
     }
 
     /**

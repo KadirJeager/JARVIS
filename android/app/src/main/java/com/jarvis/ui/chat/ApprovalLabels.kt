@@ -23,3 +23,39 @@ fun approvalStatusLabel(status: ApprovalStatus): String = when (status) {
     // is honest; guessing would put an "Onayla" button on an unknown state.
     ApprovalStatus.UNKNOWN -> "Durum bilinmiyor"
 }
+
+/**
+ * Turkish display label for an approval cause slug.
+ * Fail-closed: an unknown slug returns "Neden bilinmiyor", never raw text or crash.
+ */
+fun approvalCauseLabel(cause: String?): String? {
+    if (cause.isNullOrBlank()) return null
+    return when (cause) {
+        "red_zone" -> "Kırmızı bölge kuralı"
+        "capability_request" -> "Yetki isteği"
+        else -> "Neden bilinmiyor"
+    }
+}
+
+/**
+ * Turkish display label for a trust level slug.
+ * Fail-closed: an unknown trust level returns "Güven düzeyi bilinmiyor".
+ */
+fun approvalTrustLabel(trustLevel: String?): String? {
+    if (trustLevel.isNullOrBlank()) return null
+    return when (trustLevel) {
+        "HIGH" -> "Yüksek güvenle"
+        "MEDIUM" -> "Orta güvenle"
+        "LOW" -> "Düşük güvenle"
+        else -> "Güven düzeyi bilinmiyor"
+    }
+}
+
+/**
+ * Turkish display label for reversibility.
+ */
+fun approvalReversibilityLabel(reversible: Boolean?): String? = when (reversible) {
+    true -> "Geri alınabilir"
+    false -> "Geri alınamaz"
+    null -> null
+}

@@ -38,6 +38,7 @@ class ChatViewModel(
      * in half every time he turned the phone.
      */
     private var freshConversationStarted = false
+    private var reasonsFetched = false
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -271,15 +272,53 @@ class ChatViewModel(
         }
     }
 
-    fun approveApproval(approvalId: String) = decideApproval(approvalId, approve = true)
+    fun approveApproval(approvalId: String) {
+        if (_state.value.rejectingApprovalId == approvalId) {
+            _state.update { it.copy(rejectingApprovalId = null) }
+        }
+        decideApproval(approvalId, approve = true)
+    }
 
     /**
-     * Task 5 boundary: the server refuses a BLANK reason with 422 (P2a), and the
-     * preset-reason picker is Task 6. Until that UI lands, a reasonless reject is
-     * refused HERE -- fail-closed -- instead of silently sending an empty string
-     * that can only come back as an error anyway.
+     * Begins step-two rejection for [approvalId] without making a decision API call.
+     * Lazily fetches rejection reasons ONCE per session.
      */
-    fun rejectApproval(approvalId: String, reason: String? = null) =
+    fun beginReject(approvalId: String) {
+        _state.update { it.copy(rejectingApprovalId = approvalId) }
+        if (!reasonsFetched && approvals != null) {
+            reasonsFetched = true
+            viewModelScope.launch {
+                val reasons = runCatching { approvals.reasons() }.getOrDefault(emptyList())
+                _state.update { it.copy(rejectionReasons = reasons) }
+            }
+        }
+    }
+
+    /** Clears the current step-two rejection state. */
+    fun cancelReject() {
+        _state.update { it.copy(rejectingApprovalId = null) }
+    }
+
+    /**
+     * Confirms rejection using [reason] for the active [ChatUiState.rejectingApprovalId].
+     * Clears [ChatUiState.rejectingApprovalId] on attempt regardless of network outcome.
+     */
+    fun confirmReject(reason: String) {
+        val id = _state.value.rejectingApprovalId ?: return
+        _state.update { it.copy(rejectingApprovalId = null) }
+        decideApproval(id, approve = false, reason = reason)
+    }
+
+    /**
+     * Single-argument overload kept for MainActivity compatibility (`vm::rejectApproval`).
+     * Routes through [beginReject] semantics for step-two selection.
+     */
+    fun rejectApproval(approvalId: String) = beginReject(approvalId)
+
+    /**
+     * Direct rejection with a specific [reason].
+     */
+    fun rejectApproval(approvalId: String, reason: String?) =
         decideApproval(approvalId, approve = false, reason = reason)
 
     /**

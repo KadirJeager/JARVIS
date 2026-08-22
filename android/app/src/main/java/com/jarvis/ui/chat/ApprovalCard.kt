@@ -14,8 +14,15 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -26,6 +33,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.jarvis.data.approvals.Approval
 import com.jarvis.data.approvals.ApprovalStatus
+import com.jarvis.data.approvals.RejectReason
 import com.jarvis.ui.theme.JarvisCyan
 import com.jarvis.ui.theme.JarvisError
 import com.jarvis.ui.theme.JarvisOnAccent
@@ -41,6 +49,8 @@ private fun statusColor(status: ApprovalStatus): Color = when (status) {
     ApprovalStatus.FAILED -> JarvisError
     ApprovalStatus.REJECTED, ApprovalStatus.EXPIRED, ApprovalStatus.UNKNOWN -> JarvisTextMuted
 }
+
+// Spec §5.6: approval fatigue is a security defect; extra prose that does not change a decision makes the card worse.
 
 /**
  * A red-zone action waiting on Kadir, drawn inside the chat thread rather than on a
@@ -64,6 +74,10 @@ fun ApprovalCard(
     onReject: () -> Unit,
     focused: Boolean = false,
     modifier: Modifier = Modifier,
+    isRejecting: Boolean = false,
+    rejectionReasons: List<RejectReason> = emptyList(),
+    onConfirmReject: (String) -> Unit = {},
+    onCancelReject: () -> Unit = {},
 ) {
     Column(
         modifier
@@ -88,6 +102,32 @@ fun ApprovalCard(
             color = JarvisTextPrimary,
             style = MaterialTheme.typography.titleSmall,
         )
+        approval.toolName?.takeIf { it.isNotBlank() }?.let { tool ->
+            Text(
+                text = tool,
+                color = JarvisTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        approval.operand?.takeIf { it.isNotBlank() }?.let { op ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "Neye:",
+                    color = JarvisTextMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                Text(
+                    text = op,
+                    color = JarvisTextPrimary,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+            }
+        }
+
         if (approval.detail.isNotBlank()) {
             Text(
                 text = approval.detail,
@@ -95,6 +135,50 @@ fun ApprovalCard(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
+
+        approval.actor?.takeIf { it.isNotBlank() }?.let { act ->
+            Text(
+                text = "Kim istedi: $act",
+                color = JarvisTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        val trustText = approvalTrustLabel(approval.trustLevel)
+        val causeText = approvalCauseLabel(approval.cause)
+        val trustAndCauseLine = listOfNotNull(trustText, causeText).joinToString(" · ")
+        if (trustAndCauseLine.isNotBlank()) {
+            Text(
+                text = trustAndCauseLine,
+                color = JarvisTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        val revLabel = approvalReversibilityLabel(approval.reversible)
+        if (revLabel != null) {
+            if (approval.reversible == false) {
+                Text(
+                    text = revLabel,
+                    color = JarvisOnAccent,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(JarvisError)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            } else {
+                Text(
+                    text = revLabel,
+                    color = JarvisTextMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .border(width = 1.dp, color = JarvisTextMuted, shape = RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+        }
+
         // The tool's own words after it ran (or the reason it did not). Spec §4.5: an
         // error is an observation, not something to hide from Kadir.
         approval.outcome?.takeIf { it.isNotBlank() }?.let {
@@ -108,6 +192,14 @@ fun ApprovalCard(
 
         when {
             deciding -> DecidingRow(approval.id)
+            approval.decidable && isRejecting -> RejectStepTwoSection(
+                approvalId = approval.id,
+                canDecide = canDecide,
+                rejectionReasons = rejectionReasons,
+                onApprove = onApprove,
+                onConfirmReject = onConfirmReject,
+                onCancelReject = onCancelReject,
+            )
             approval.decidable -> DecisionRow(
                 approvalId = approval.id,
                 enabled = canDecide,
@@ -181,6 +273,109 @@ private fun DecisionRow(
                 .semantics { contentDescription = "Reddet" },
         ) {
             Text("Reddet", style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+@Composable
+private fun RejectStepTwoSection(
+    approvalId: String,
+    canDecide: Boolean,
+    rejectionReasons: List<RejectReason>,
+    onApprove: () -> Unit,
+    onConfirmReject: (String) -> Unit,
+    onCancelReject: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("reject_reasons_$approvalId"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Button(
+            onClick = onApprove,
+            enabled = canDecide,
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = JarvisCyan,
+                contentColor = JarvisOnAccent,
+                disabledContainerColor = JarvisSurfaceHigh,
+                disabledContentColor = JarvisTextMuted,
+            ),
+            modifier = Modifier
+                .testTag("approve_$approvalId")
+                .semantics { contentDescription = "Onayla" },
+        ) {
+            Text("Onayla", style = MaterialTheme.typography.labelLarge)
+        }
+
+        rejectionReasons.forEachIndexed { index, reason ->
+            Button(
+                onClick = { onConfirmReject(reason.promptFill) },
+                enabled = canDecide,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = JarvisSurfaceHigh,
+                    contentColor = JarvisTextPrimary,
+                    disabledContainerColor = JarvisSurfaceHigh,
+                    disabledContentColor = JarvisTextMuted,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("reason_chip_${approvalId}_$index"),
+            ) {
+                Text(reason.title, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        var reasonInput by remember { mutableStateOf("") }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = reasonInput,
+                onValueChange = { reasonInput = it },
+                placeholder = { Text("Gerekçe yazın…", color = JarvisTextMuted) },
+                singleLine = true,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("reason_input_$approvalId"),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = JarvisSurfaceHigh,
+                    unfocusedContainerColor = JarvisSurfaceHigh,
+                    focusedTextColor = JarvisTextPrimary,
+                    unfocusedTextColor = JarvisTextPrimary,
+                    cursorColor = JarvisCyan,
+                ),
+            )
+            Button(
+                onClick = {
+                    val trimmed = reasonInput.trim()
+                    if (trimmed.isNotEmpty()) {
+                        onConfirmReject(trimmed)
+                    }
+                },
+                enabled = canDecide && reasonInput.isNotBlank(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = JarvisCyan,
+                    contentColor = JarvisOnAccent,
+                    disabledContainerColor = JarvisSurfaceHigh,
+                    disabledContentColor = JarvisTextMuted,
+                ),
+                modifier = Modifier.testTag("reason_send_$approvalId"),
+            ) {
+                Text("Gönder", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+
+        TextButton(
+            onClick = onCancelReject,
+            modifier = Modifier.testTag("reject_cancel_$approvalId"),
+        ) {
+            Text("Vazgeç", color = JarvisTextMuted, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
