@@ -46,9 +46,18 @@ sözleşme).
 değil — yürütücü sonradan patlarsa doküman `failed` olurken halka `approved`
 kalır ("karar VERİLMİŞ sayılır" ilkesiyle tutarlıdır). (2) Aynı kullanıcının
 FARKLI onaylarına gelen eşzamanlı terminal geçişleri aynı prev_hash'i okuyup
-zinciri fork'layabilir; tek-kullanıcılı üründe pencere milisaniyelerdir ama
+zinciri fork'layabilir; tek-kullanıcı üründe pencere milisaniyelerdir ama
 sıfır değildir — kalıcı çözüm transaction'lı append ya da Firestore rules'dır
 ve burada değildir.
+
+TODO(debt): OCSF 6003 alan-adlandırması bu koleksiyonda YOK — alan adları bu
+modülün kendisidir. 5 Ağu ekosistem analizi OCSF'i audit şemasının isimlendirme
+referansı sayıyordu; eşleme schema.ocsf.io'dan DOĞRULANMIŞ sınıf tanımıyla
+yapılmalı (çevrimiçi doğrulama 22-23 Ağu oturumunda yapılamadı: arama kotası
+bitik + şema sitesi JS-only; uydurma eşleme yazılmadı). Koleksiyon gençken
+yeniden adlandırma bedava; hash zinciri alan adlarını kapsadığı için SONRADAN
+yeniden adlandırma eski halkaların hash'ini kırar (verify bozuk raporlar) —
+o noktadan sonra tek yol bir mapping tablosudur.
 """
 import hashlib
 import json
