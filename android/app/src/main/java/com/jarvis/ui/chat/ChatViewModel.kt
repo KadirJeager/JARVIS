@@ -273,7 +273,14 @@ class ChatViewModel(
 
     fun approveApproval(approvalId: String) = decideApproval(approvalId, approve = true)
 
-    fun rejectApproval(approvalId: String) = decideApproval(approvalId, approve = false)
+    /**
+     * Task 5 boundary: the server refuses a BLANK reason with 422 (P2a), and the
+     * preset-reason picker is Task 6. Until that UI lands, a reasonless reject is
+     * refused HERE -- fail-closed -- instead of silently sending an empty string
+     * that can only come back as an error anyway.
+     */
+    fun rejectApproval(approvalId: String, reason: String? = null) =
+        decideApproval(approvalId, approve = false, reason = reason)
 
     /**
      * Sends a decision and adopts the status the SERVER returned.
@@ -287,15 +294,21 @@ class ChatViewModel(
      * The guard is [ChatUiState.canDecide], the same flag the buttons are drawn from, so a
      * double tap sends one decision and an already-decided card sends none.
      */
-    private fun decideApproval(approvalId: String, approve: Boolean) {
+    private fun decideApproval(approvalId: String, approve: Boolean, reason: String? = null) {
         val repoRef = approvals ?: return
         if (!_state.value.canDecide(approvalId)) return
+        val trimmedReason = reason?.trim().orEmpty()
+        if (!approve && trimmedReason.isEmpty()) {
+            _state.update { it.copy(error = "Reddetmek için bir gerekçe seçin.") }
+            return
+        }
         _state.update {
             it.copy(decidingApprovals = it.decidingApprovals + approvalId, error = null)
         }
         viewModelScope.launch {
             val result = runCatching {
-                if (approve) repoRef.approve(approvalId) else repoRef.reject(approvalId)
+                if (approve) repoRef.approve(approvalId)
+                else repoRef.reject(approvalId, trimmedReason)
             }
             _state.update { s ->
                 val stillDeciding = s.decidingApprovals - approvalId

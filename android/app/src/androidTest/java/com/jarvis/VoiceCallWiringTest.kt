@@ -17,6 +17,8 @@ import com.jarvis.data.auth.AuthStateStore
 import com.jarvis.data.net.ApiSet
 import com.jarvis.data.net.ApprovalApi
 import com.jarvis.data.net.ApprovalDecisionDto
+import com.jarvis.data.net.RejectRequest
+import com.jarvis.data.net.ReasonsResponse
 import com.jarvis.data.net.ApprovalDto
 import com.jarvis.data.net.ApprovalsResponse
 import com.jarvis.data.net.ChatRequest
@@ -121,7 +123,9 @@ class VoiceCallWiringTest {
         override suspend fun list() = ApprovalsResponse(emptyList())
         override suspend fun get(id: String) = ApprovalDto(id = id, title = "t", status = "pending")
         override suspend fun approve(id: String) = ApprovalDecisionDto("approved", null, false)
-        override suspend fun reject(id: String) = ApprovalDecisionDto("rejected", null, false)
+        override suspend fun reject(id: String, request: RejectRequest) =
+            ApprovalDecisionDto("rejected", null, false)
+        override suspend fun reasons(): ReasonsResponse = ReasonsResponse(emptyList())
     }
 
     private class FakeChatApi : JarvisApi {

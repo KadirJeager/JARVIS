@@ -13,6 +13,8 @@ import com.jarvis.data.net.ChatResponse
 import com.jarvis.data.net.HistoryMessage
 import com.jarvis.data.net.HistoryResponse
 import com.jarvis.data.net.JarvisApi
+import com.jarvis.data.net.RejectRequest
+import com.jarvis.data.net.ReasonsResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -73,6 +75,7 @@ class ChatApprovalsTest {
         var listCalls = 0
         var approveCalls = 0
         var rejectCalls = 0
+        var lastRejectReason: String? = null
         var fetched = mutableListOf<String>()
 
         override suspend fun list(): ApprovalsResponse {
@@ -89,11 +92,14 @@ class ChatApprovalsTest {
             decideFailure?.let { throw it }
             return decision
         }
-        override suspend fun reject(id: String): ApprovalDecisionDto {
+        override suspend fun reject(id: String, request: RejectRequest): ApprovalDecisionDto {
             rejectCalls++
+            lastRejectReason = request.reason
             decideFailure?.let { throw it }
             return decision
         }
+
+        override suspend fun reasons(): ReasonsResponse = ReasonsResponse(emptyList())
     }
 
     private fun dto(id: String, status: String = "pending", title: String = "'cancel_reminder' çalıştırılsın mı?") =
@@ -292,12 +298,30 @@ class ChatApprovalsTest {
         vm.onSignedIn()
         advanceUntilIdle()
 
-        vm.rejectApproval("1")
+        vm.rejectApproval("1", "yanlış kişi")
         advanceUntilIdle()
 
         assertEquals(1, approvals.rejectCalls)
+        assertEquals("yanlış kişi", approvals.lastRejectReason)
         assertEquals(0, approvals.approveCalls)
         assertEquals(ApprovalStatus.REJECTED, vm.state.value.approvals["1"]!!.status)
+    }
+
+    @Test
+    fun rejecting_without_a_reason_is_refused_locally() = runTest(dispatcher) {
+        /** P2a boundary lives in the VM until Task 6's reason picker lands: nothing
+         * is SENT, the card stays decidable, and the refusal is visible as an error. */
+        val approvals = FakeApprovalApi(queue = listOf(dto("1")))
+        val vm = vm(approvals = approvals)
+        vm.onSignedIn()
+        advanceUntilIdle()
+
+        vm.rejectApproval("1")
+        advanceUntilIdle()
+
+        assertEquals(0, approvals.rejectCalls)
+        assertNotNull(vm.state.value.error)
+        assertEquals(ApprovalStatus.PENDING, vm.state.value.approvals["1"]!!.status)
     }
 
     /**
@@ -416,7 +440,7 @@ class ChatApprovalsTest {
         vm.onSignedIn()
         advanceUntilIdle()
 
-        vm.rejectApproval("1")
+        vm.rejectApproval("1", "yanlış kişi")
         advanceUntilIdle()
 
         assertEquals("Bağlantı kurulamadı. İnterneti kontrol edip tekrar dene.", vm.state.value.error)

@@ -112,16 +112,79 @@ class ApprovalWireTest {
     }
 
     @Test
-    fun reject_postsToTheRejectPath() = runBlocking {
+    fun reject_postsToTheRejectPath_withReasonInBody() = runBlocking {
         enqueue("""{"status":"rejected","outcome":null,"already":false}""")
 
-        val decision = repo.reject("a1")
+        val decision = repo.reject("a1", "Şimdi olmaz")
 
         val request = server.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/api/approvals/a1/reject", request.url.encodedPath)
+        val body = checkNotNull(request.body).utf8()
+        assertTrue(body.contains(""""reason":"Şimdi olmaz""""))
         assertEquals(ApprovalStatus.REJECTED, decision.status)
         assertNull(decision.outcome)
+    }
+
+    @Test
+    fun listPending_decodesAllNewFieldsAndZone() = runBlocking {
+        val fullApproval = """
+            {"id":"a1","user_id":"kadir@example.com","kind":"tool_call",
+             "title":"'cancel_reminder' çalıştırılsın mı?",
+             "detail":"Kırmızı bölge eylemi: cancel_reminder(reminder_id=r7).",
+             "tool_name":"cancel_reminder","tool_args":{"reminder_id":"r7"},
+             "zone":"red","session_id":"s-1","status":"pending",
+             "created_at":"2026-08-03T10:00:00+00:00","expires_at":"2026-08-03T11:00:00+00:00",
+             "decided_at":null,"decided_by":null,"outcome":null,
+             "actor":"orchestrator","trust_level":"MEDIUM","cause":"red_zone",
+             "operand":"r7","reversible":false,"decision_reason":"Yanlış kişi"}
+        """.trimIndent()
+        enqueue("""{"approvals":[$fullApproval]}""")
+
+        val queue = repo.pending()
+        assertEquals(1, queue.size)
+        val item = queue[0]
+        assertEquals("red", item.zone)
+        assertEquals("orchestrator", item.actor)
+        assertEquals("MEDIUM", item.trustLevel)
+        assertEquals("red_zone", item.cause)
+        assertEquals("r7", item.operand)
+        assertEquals(false, item.reversible)
+        assertEquals("Yanlış kişi", item.decisionReason)
+    }
+
+    @Test
+    fun listPending_withoutNewFields_parsesWithNulls() = runBlocking {
+        enqueue("""{"approvals":[$oneApproval]}""")
+
+        val queue = repo.pending()
+        assertEquals(1, queue.size)
+        val item = queue[0]
+        // zone is NOT a new field: the old server always sent it, and the sample
+        // JSON above carries it. Only the six Task-2/3 fields may be absent.
+        assertEquals("red", item.zone)
+        assertNull(item.actor)
+        assertNull(item.trustLevel)
+        assertNull(item.cause)
+        assertNull(item.operand)
+        assertNull(item.reversible)
+        assertNull(item.decisionReason)
+    }
+
+    @Test
+    fun reasons_getsReasonsEndpoint_andDecodesList() = runBlocking {
+        enqueue("""{"reasons":[{"id":"r1","title":"Yanlış kişi","prompt_fill":"Yanlış kişi."}]}""")
+
+        val list = repo.reasons()
+
+        val request = server.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals("/api/approvals/reasons", request.url.encodedPath)
+
+        assertEquals(1, list.size)
+        assertEquals("r1", list[0].id)
+        assertEquals("Yanlış kişi", list[0].title)
+        assertEquals("Yanlış kişi.", list[0].promptFill)
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.jarvis.data.net
 
 import kotlinx.serialization.Serializable
+import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
@@ -32,9 +33,46 @@ interface ApprovalApi {
     @POST("api/approvals/{id}/approve")
     suspend fun approve(@Path("id") id: String): ApprovalDecisionDto
 
+    /**
+     * Typed rejection (§5.9 P2a): the server REFUSES a blank reason with 422, so the
+     * reason is a required parameter here too -- no default, no deprecated bridge.
+     * Both methods stay ABSTRACT on purpose: Retrofit registers only abstract methods
+     * as endpoints; a Kotlin default body turns the call into that body's code instead
+     * of an HTTP request.
+     */
     @POST("api/approvals/{id}/reject")
-    suspend fun reject(@Path("id") id: String): ApprovalDecisionDto
+    suspend fun reject(
+        @Path("id") id: String,
+        @Body request: RejectRequest,
+    ): ApprovalDecisionDto
+
+    /** Preset rejection reasons for the card's picker (§5.9 P2c). */
+    @GET("api/approvals/reasons")
+    suspend fun reasons(): ReasonsResponse
 }
+
+/**
+ * Request body for POST /api/approvals/{id}/reject.
+ */
+@Serializable
+data class RejectRequest(
+    val reason: String,
+)
+
+/**
+ * One item from GET /api/approvals/reasons.
+ */
+@Serializable
+data class RejectReasonDto(
+    val id: String? = null,
+    val title: String? = null,
+    val prompt_fill: String? = null,
+)
+
+@Serializable
+data class ReasonsResponse(
+    val reasons: List<RejectReasonDto> = emptyList(),
+)
 
 /**
  * One approval exactly as `approvals._project` writes it.
@@ -66,6 +104,12 @@ data class ApprovalDto(
     val decided_at: String? = null,
     val decided_by: String? = null,
     val outcome: String? = null,
+    val actor: String? = null,
+    val trust_level: String? = null,
+    val cause: String? = null,
+    val operand: String? = null,
+    val reversible: Boolean? = null,
+    val decision_reason: String? = null,
 )
 
 @Serializable

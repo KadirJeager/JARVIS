@@ -3,6 +3,8 @@ package com.jarvis.data.approvals
 import com.jarvis.data.net.ApprovalApi
 import com.jarvis.data.net.ApprovalDecisionDto
 import com.jarvis.data.net.ApprovalDto
+import com.jarvis.data.net.RejectReasonDto
+import com.jarvis.data.net.RejectRequest
 import retrofit2.HttpException
 
 /**
@@ -47,7 +49,18 @@ class ApprovalRepository(private val api: ApprovalApi) {
 
     suspend fun approve(id: String): ApprovalDecision = api.approve(id).toDomain()
 
-    suspend fun reject(id: String): ApprovalDecision = api.reject(id).toDomain()
+    suspend fun reject(id: String, reason: String): ApprovalDecision =
+        api.reject(id, RejectRequest(reason)).toDomain()
+
+    /**
+     * Preset rejection reasons served by backend (§5.9 P2c).
+     * Older servers returning 404 fall back to an empty list.
+     */
+    suspend fun reasons(): List<RejectReason> = try {
+        api.reasons().reasons.mapNotNull { it.toDomainOrNull() }
+    } catch (e: HttpException) {
+        if (e.code() == 404) emptyList() else throw e
+    }
 }
 
 /** Wire status strings are the ones `approvals.STATUS_*` writes; anything else is UNKNOWN. */
@@ -77,6 +90,24 @@ private fun ApprovalDto.toDomainOrNull(): Approval? {
         createdAt = created_at,
         expiresAt = expires_at,
         outcome = outcome,
+        zone = zone,
+        actor = actor,
+        trustLevel = trust_level,
+        cause = cause,
+        operand = operand,
+        reversible = reversible,
+        decisionReason = decision_reason,
+    )
+}
+
+private fun RejectReasonDto.toDomainOrNull(): RejectReason? {
+    val reasonId = id?.takeIf { it.isNotBlank() } ?: return null
+    val fill = prompt_fill?.takeIf { it.isNotBlank() } ?: return null
+    val reasonTitle = title?.takeIf { it.isNotBlank() } ?: reasonId
+    return RejectReason(
+        id = reasonId,
+        title = reasonTitle,
+        promptFill = fill,
     )
 }
 

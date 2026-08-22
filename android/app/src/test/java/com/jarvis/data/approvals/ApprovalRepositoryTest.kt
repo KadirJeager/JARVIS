@@ -4,6 +4,9 @@ import com.jarvis.data.net.ApprovalApi
 import com.jarvis.data.net.ApprovalDecisionDto
 import com.jarvis.data.net.ApprovalDto
 import com.jarvis.data.net.ApprovalsResponse
+import com.jarvis.data.net.ReasonsResponse
+import com.jarvis.data.net.RejectReasonDto
+import com.jarvis.data.net.RejectRequest
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -39,16 +42,19 @@ class ApprovalRepositoryTest {
         override suspend fun list(): ApprovalsResponse = throw boom
         override suspend fun get(id: String): ApprovalDto = throw boom
         override suspend fun approve(id: String): ApprovalDecisionDto = throw boom
-        override suspend fun reject(id: String): ApprovalDecisionDto = throw boom
+        override suspend fun reject(id: String, request: RejectRequest): ApprovalDecisionDto = throw boom
+        override suspend fun reasons(): ReasonsResponse = throw boom
     }
 
     private class FakeApprovalApi(
         var queue: List<ApprovalDto> = emptyList(),
         var single: ApprovalDto = ApprovalDto(id = "a1", title = "t"),
         var decision: ApprovalDecisionDto = ApprovalDecisionDto("approved", "oldu", false),
+        var reasonsResponse: ReasonsResponse = ReasonsResponse(),
     ) : ApprovalApi {
         var approved: String? = null
         var rejected: String? = null
+        var rejectedReason: String? = null
         var fetched: String? = null
 
         override suspend fun list() = ApprovalsResponse(queue)
@@ -60,10 +66,12 @@ class ApprovalRepositoryTest {
             approved = id
             return decision
         }
-        override suspend fun reject(id: String): ApprovalDecisionDto {
+        override suspend fun reject(id: String, request: RejectRequest): ApprovalDecisionDto {
             rejected = id
+            rejectedReason = request.reason
             return decision
         }
+        override suspend fun reasons(): ReasonsResponse = reasonsResponse
     }
 
     @Test
@@ -157,13 +165,95 @@ class ApprovalRepositoryTest {
         val repo = ApprovalRepository(api)
 
         val approved = repo.approve("a1")
-        val rejected = repo.reject("a2")
+        val rejected = repo.reject("a2", "Şimdi olmaz")
 
         assertEquals("a1", api.approved)
         assertEquals("a2", api.rejected)
+        assertEquals("Şimdi olmaz", api.rejectedReason)
         assertEquals(ApprovalStatus.FAILED, approved.status)
         assertTrue(approved.outcome!!.contains("yürütme hatası"))
         assertEquals(ApprovalStatus.FAILED, rejected.status)
+    }
+
+    @Test
+    fun pending_preservesNewFieldsAndZone() = runBlocking {
+        val api = FakeApprovalApi(
+            queue = listOf(
+                ApprovalDto(
+                    id = "a1",
+                    title = "t",
+                    status = "pending",
+                    zone = "red",
+                    actor = "orchestrator",
+                    trust_level = "HIGH",
+                    cause = "red_zone",
+                    operand = "user_123",
+                    reversible = true,
+                    decision_reason = "gerekce",
+                ),
+            ),
+        )
+        val item = ApprovalRepository(api).pending()[0]
+        assertEquals("red", item.zone)
+        assertEquals("orchestrator", item.actor)
+        assertEquals("HIGH", item.trustLevel)
+        assertEquals("red_zone", item.cause)
+        assertEquals("user_123", item.operand)
+        assertEquals(true, item.reversible)
+        assertEquals("gerekce", item.decisionReason)
+    }
+
+    @Test
+    fun pending_withoutNewFields_yieldsNulls() = runBlocking {
+        val api = FakeApprovalApi(
+            queue = listOf(ApprovalDto(id = "a1", title = "t", status = "pending")),
+        )
+        val item = ApprovalRepository(api).pending()[0]
+        assertNull(item.zone)
+        assertNull(item.actor)
+        assertNull(item.trustLevel)
+        assertNull(item.cause)
+        assertNull(item.operand)
+        assertNull(item.reversible)
+        assertNull(item.decisionReason)
+    }
+
+    @Test
+    fun reasons_mapsValidRowsAndDropsUnrenderableRows() = runBlocking {
+        val api = FakeApprovalApi(
+            reasonsResponse = ReasonsResponse(
+                reasons = listOf(
+                    RejectReasonDto(id = "r1", title = "T1", prompt_fill = "F1"),
+                    RejectReasonDto(id = null, title = "T2", prompt_fill = "F2"),
+                    RejectReasonDto(id = "  ", title = "T3", prompt_fill = "F3"),
+                    RejectReasonDto(id = "r4", title = "T4", prompt_fill = null),
+                    RejectReasonDto(id = "r5", title = "T5", prompt_fill = "  "),
+                    RejectReasonDto(id = "r6", title = null, prompt_fill = "F6"),
+                    RejectReasonDto(id = "r7", title = "  ", prompt_fill = "F7"),
+                ),
+            ),
+        )
+        val list = ApprovalRepository(api).reasons()
+        assertEquals(3, list.size)
+
+        assertEquals("r1", list[0].id)
+        assertEquals("T1", list[0].title)
+        assertEquals("F1", list[0].promptFill)
+
+        // Title falls back to id when title is null or blank
+        assertEquals("r6", list[1].id)
+        assertEquals("r6", list[1].title)
+        assertEquals("F6", list[1].promptFill)
+
+        assertEquals("r7", list[2].id)
+        assertEquals("r7", list[2].title)
+        assertEquals("F7", list[2].promptFill)
+    }
+
+    @Test
+    fun reasons_handlesVersionSkew404() = runBlocking {
+        val repo = ApprovalRepository(FailingApi(http(404)))
+        assertEquals(emptyList<RejectReason>(), repo.reasons())
     }
 
     /** A decision body the client cannot read is not a silent success. */

@@ -26,10 +26,27 @@ data class Approval(
     val createdAt: String? = null,
     val expiresAt: String? = null,
     val outcome: String? = null,
+    val zone: String? = null,
+    val actor: String? = null,
+    val trustLevel: String? = null,
+    val cause: String? = null,
+    val operand: String? = null,
+    val reversible: Boolean? = null,
+    val decisionReason: String? = null,
 ) {
     /** Only a pending approval can be decided; everything else is already history. */
     val decidable: Boolean get() = status == ApprovalStatus.PENDING
 }
+
+/**
+ * A preset rejection reason for the card (§5.9 P2c).
+ * [id] and [promptFill] are required; [title] falls back to [id] if blank.
+ */
+data class RejectReason(
+    val id: String,
+    val title: String,
+    val promptFill: String,
+)
 
 /**
  * The server's verdict on a decision — `{status, outcome, already}`, not a full approval.
