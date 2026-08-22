@@ -37,7 +37,31 @@ import uuid
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from google.genai import types
 
-from . import antispoof, config, trust, vitals, voice_challenge, voice_trust
+from . import antispoof, config, conversations, messages, trust, vitals, voice_challenge, voice_trust
+
+# F7 (ürün yüzeyi haritası): the voice session's transcript lands in the chat
+# timeline as ONE message row of this kind, in the fixed `voice-{user_id}`
+# session -- so a call becomes a conversation-list entry the app can open,
+# instead of living only in the side snapshot no client reads.
+VOICE_SESSION_KIND = "voice_session"
+_VOICE_BODY_MAX_TURNS = 20
+_VOICE_BODY_MAX_CHARS = 4000
+
+
+def _voice_timeline_body(transcript: list[dict]) -> str:
+    """Render the connection's transcript as the timeline row's text: the last
+    N turns, "Ben:" / "Jarvis:" prefixed (user-visible -> Turkish), capped.
+    Clients that don't know the kind yet render this text verbatim; the kind
+    and meta stay available for a richer card later."""
+    lines = []
+    for t in transcript[-_VOICE_BODY_MAX_TURNS:]:
+        text = (t.get("text") or "").strip()
+        if not text:
+            continue
+        who = "Ben" if t.get("role") == "user" else "Jarvis"
+        lines.append(f"{who}: {text}")
+    body = "\n".join(lines)
+    return body[:_VOICE_BODY_MAX_CHARS]
 from . import voice_protocol as vp
 from .auth import require_google_user, verify_bearer_email
 
@@ -102,6 +126,58 @@ class VoiceBridge:
             return main._enroll_db()
         except Exception:
             return None
+
+    def _persist_transcript(self, session_id: str, user_id: str) -> None:
+        """Called once from run()'s finally on EVERY exit path (happy path,
+        client disconnect, or an exception propagating out). Two independent
+        writes, each wrapped so a Firestore hiccup can never mask the original
+        exception:
+
+        1. The side snapshot (pre-existing): last 50 turns onto `sessions`.
+        2. F7 (ürün yüzeyi): ONE kind=voice_session row appended to the chat
+           timeline in this session, plus conversations.touch() so the row is
+           actually LISTED by the app (list_conversations returns only touched
+           sessions -- the same gap that hides tasks/retro reports). The title
+           comes from the call's first user utterance; a voice-only call keeps
+           the empty title rather than inventing one. Deliberately the FIXED
+           voice-{user_id} session for now: per-call ids would mint a list row
+           per hang-up; revisiting that needs the client's "Devral" work.
+        """
+        if self.memory is None or not self.transcript:
+            return
+        # Snapshot keeps its ORIGINAL precondition (memory present, regardless
+        # of .db): pinned tests pass memories without a db attribute.
+        try:
+            self.memory.snapshot_session(
+                session_id, user_id, {"transcript": self.transcript[-50:]}
+            )
+        except Exception:
+            logging.exception(
+                "voice bridge: failed to snapshot transcript for %s", user_id
+            )
+        db = getattr(self.memory, "db", None)
+        if db is None:
+            return
+        try:
+            body = _voice_timeline_body(self.transcript)
+            messages.MessageStore(db).append(
+                user_id, session_id, "model", body,
+                kind=VOICE_SESSION_KIND,
+                meta={"turns": len(self.transcript)},
+            )
+            first_user = next(
+                (t.get("text") for t in self.transcript if t.get("role") == "user"),
+                None,
+            )
+            conversations.ConversationStore(db).touch(
+                user_id, session_id, "model", body,
+                title=conversations.derive_title(first_user) if first_user else None,
+            )
+        except Exception:
+            logging.exception(
+                "voice bridge: failed to append the timeline row for %s/%s",
+                user_id, session_id,
+            )
 
     async def prompt_challenge(self, code: str) -> bool:
         """Prompt user via TTS over WebSocket with 4-digit challenge code."""
@@ -579,15 +655,7 @@ class VoiceBridge:
             # client disconnect, or exception propagating out of the block
             # above). Wrapped in try/except so a Firestore hiccup can never mask
             # the original exception.
-            if self.memory is not None and self.transcript:
-                try:
-                    self.memory.snapshot_session(
-                        session_id, user_id, {"transcript": self.transcript[-50:]}
-                    )
-                except Exception:
-                    logging.exception(
-                        "voice bridge: failed to snapshot transcript for %s", user_id
-                    )
+            self._persist_transcript(session_id, user_id)
 
 
 async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:

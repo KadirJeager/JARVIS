@@ -87,10 +87,17 @@ class ConversationStore:
         self.db = db
         self._now = now_fn or _now
 
-    def touch(self, user_id: str, session_id: str, role: str, text: str) -> None:
+    def touch(self, user_id: str, session_id: str, role: str, text: str,
+              title: str | None = None) -> None:
         """Upsert the summary doc for (user_id, session_id). Called once per
         MessageStore.append() (see main.run_turn), for both the user turn and
         the model turn.
+
+        `title` (F7, voice bridge) lets a non-"user" caller supply the row
+        title directly -- a synthetic "user" role would lie about who spoke.
+        It follows the same first-wins rule as derived titles: an empty or
+        absent stored title can be filled, an existing one is never
+        overwritten, and None keeps today's behavior unchanged.
 
         Title rule: derived ONLY from a "user" role message, and ONLY if not
         already set -- the first user message wins the title, permanently.
@@ -119,7 +126,7 @@ class ConversationStore:
             doc_ref.create({
                 "user_id": user_id,
                 "session_id": session_id,
-                "title": derive_title(text) if role == "user" else "",
+                "title": title if title else (derive_title(text) if role == "user" else ""),
                 "created_ts": now,
                 "last_ts": now,
                 "message_count": 1,
@@ -130,8 +137,8 @@ class ConversationStore:
         snap = doc_ref.get()
         data = snap.to_dict() if snap.exists else {}
         update = {"last_ts": now, "message_count": data.get("message_count", 0) + 1}
-        if role == "user" and not data.get("title"):
-            update["title"] = derive_title(text)
+        if not data.get("title") and (title or (role == "user" and text)):
+            update["title"] = title or derive_title(text)
         doc_ref.set(update, merge=True)
 
     def list_conversations(self, user_id: str, limit: int = MAX_CONVERSATIONS) -> list[dict]:
