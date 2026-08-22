@@ -127,6 +127,16 @@ class AndroidSpeechToText(
     private var hadPartial = false
     private var hadResult = false
 
+    // Main-thread only, cycle-scoped (reset in listen()): the recognizer's most recent
+    // partial for THIS cycle -- the raw material for the end-of-speech watchdog below.
+    private var lastPartialText: String? = null
+
+    // Main-thread only, cycle-scoped (reset in listen()). Set when the watchdog has
+    // synthesized a final: a real onResults/onError from the same recognizer arriving
+    // afterwards duplicates an utterance the session already consumed -- swallow it
+    // with one log line instead of delivering it twice.
+    private var syntheticFinalSent = false
+
     // Main-thread only. Logged once per start()/destroy() cycle -- the first time
     // this instance falls back to (or never attempts) the PFD feed after a given
     // start() -- so repeated legacy cycles do not spam logcat. destroy() resets it,
@@ -155,6 +165,35 @@ class AndroidSpeechToText(
     @Volatile
     private var listener: SpeechToTextListener? = null
 
+    /**
+     * Armed by [RecognitionListener.onEndOfSpeech], cancelled by any terminal
+     * callback ([onResults]/[onError]) and by [listen]/[destroy]. Fires only when
+     * the recognizer announced the utterance's end and then went silent -- no
+     * result, no error, forever.
+     *
+     * Measured in production (Pixel 10 Pro, Android 17, tr-TR, PFD feed,
+     * 2026-08-23 01:03): three consecutive cycles each emitted onEndOfSpeech and
+     * then NO terminal callback at all -- session summary hadPartial=true
+     * hadResult=false, zero onResults/onError lines. The client therefore never
+     * sent user_text(utterance_final), the server saw a fully silent WS session,
+     * and the call read as "Jarvis bozuk" while every layer below STT was healthy
+     * (WS open, PCM flowing, partials arriving).
+     *
+     * The recovery is to BELIEVE the endpoint: tear the cycle down exactly as a
+     * terminal callback would, promote the best hypothesis heard so far to a final
+     * (blank -> recoverable, matching onResults' own empty-result semantics), and
+     * let VoiceSession's normal relisten() re-arm the next cycle. syntheticFinalSent
+     * turns a late real terminal into a logged no-op rather than a double final.
+     */
+    private val eosWatchdog = Runnable {
+        if (listener == null) return@Runnable // destroy() already claimed teardown
+        Log.i(TAG, "tl ev=eos.noFinal timeoutMs=$EOS_FINAL_TIMEOUT_MS")
+        syntheticFinalSent = true
+        endCurrentPfdCycle()
+        val text = lastPartialText
+        if (text.isNullOrBlank()) listener?.onRecoverableError() else listener?.onResult(text)
+    }
+
     private val recognitionListener = object : RecognitionListener {
         override fun onBeginningOfSpeech() {
             listener?.onBeginningOfSpeech()
@@ -166,10 +205,16 @@ class AndroidSpeechToText(
                 ?.firstOrNull()
                 ?: return
             hadPartial = true
+            lastPartialText = text
             listener?.onPartialResult(text)
         }
 
         override fun onResults(results: Bundle?) {
+            if (syntheticFinalSent) {
+                Log.i(TAG, "tl ev=terminal.afterSynthetic kind=results")
+                return
+            }
+            main.removeCallbacks(eosWatchdog)
             hadResult = true
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -183,6 +228,11 @@ class AndroidSpeechToText(
         }
 
         override fun onError(error: Int) {
+            if (syntheticFinalSent) {
+                Log.i(TAG, "tl ev=terminal.afterSynthetic kind=error code=$error")
+                return
+            }
+            main.removeCallbacks(eosWatchdog)
             Log.i(TAG, "tl ev=onError code=$error")
             endCurrentPfdCycle()
             when (sttErrorAction(error, usingOnDeviceRecognizer)) {
@@ -205,6 +255,11 @@ class AndroidSpeechToText(
         }
         override fun onEndOfSpeech() {
             Log.i(TAG, "tl ev=onEndOfSpeech")
+            // See [eosWatchdog]: the endpoint was announced, so a final MUST follow
+            // within EOS_FINAL_TIMEOUT_MS -- otherwise we finalize the best partial
+            // ourselves instead of stalling the dialogue on a mute recognizer.
+            main.removeCallbacks(eosWatchdog)
+            main.postDelayed(eosWatchdog, EOS_FINAL_TIMEOUT_MS)
         }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
@@ -229,6 +284,9 @@ class AndroidSpeechToText(
             // unlikely mid-call). A local value cannot disagree with itself.
             val onDeviceAvailable = isOnDeviceRecognizerAvailable(context)
             usingOnDeviceRecognizer = onDeviceAvailable
+            // Which implementation actually serves this call -- the first question
+            // every "voice is broken" report on a new device model asks.
+            Log.i(TAG, "tl ev=mode onDevice=$onDeviceAvailable")
             recognizer = createRecognizer(context, onDeviceAvailable).apply {
                 setRecognitionListener(recognitionListener)
             }
@@ -244,6 +302,11 @@ class AndroidSpeechToText(
             endCurrentPfdCycle()
             hadPartial = false
             hadResult = false
+            lastPartialText = null
+            syntheticFinalSent = false
+            // A new cycle supersedes any watchdog the previous one armed (e.g.
+            // VoiceSession re-armed listening while a stale eos timer was pending).
+            main.removeCallbacks(eosWatchdog)
 
             // Post-flip cycles must not carry EXTRA_PREFER_OFFLINE (see
             // networkOnlyRecognizeIntent's doc) -- every other cycle keeps today's
@@ -338,6 +401,7 @@ class AndroidSpeechToText(
     override fun destroy() {
         listener = null
         main.post {
+            main.removeCallbacks(eosWatchdog)
             endCurrentPfdCycle()
             recognizer?.destroy()
             recognizer = null
@@ -345,6 +409,8 @@ class AndroidSpeechToText(
             loggedFallback = false
             usingOnDeviceRecognizer = false
             networkFallbackActive = false
+            lastPartialText = null
+            syntheticFinalSent = false
         }
     }
 
@@ -585,6 +651,13 @@ class AndroidSpeechToText(
 
     private companion object {
         const val TAG = "AndroidSpeechToText"
+
+        // How long after onEndOfSpeech we wait for the recognizer's own terminal
+        // callback before eosWatchdog finalizes the best partial itself. Generous
+        // enough that a slow-but-alive decoder is never raced (healthy finals land
+        // well under 1 s after the endpoint), tight enough that a stalled one costs
+        // the dialogue two seconds instead of the rest of the call.
+        const val EOS_FINAL_TIMEOUT_MS = 2000L
 
         // Frames buffered between the tap (mic capture thread) and the writer
         // (pipe I/O thread) before offer() starts rejecting and counting drops.
