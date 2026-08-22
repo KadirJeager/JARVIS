@@ -31,9 +31,11 @@ health_patrol'dür (checkpoint["url"]'i yoklar, sonucu checkpoint'e geri yazar;
 devriye süreklidir, asla done demez — bütçesi bitince durur).
 
 Raporlama: görev done/budget_exhausted olunca özet, sohbet transcript'ine
-REPORT_SESSION_ID oturumuna model mesajı olarak düşer (chat UI'ın oturum
-listesinde görünür; FCM push Y2 işi). Alıcı tek-kullanıcı varsayımıyla
-default_owner()'dır — çok kullanıcılı sahiplik (owner alanı) sonraki faz.
+REPORT_SESSION_ID oturumuna model mesajı olarak düşer; üretim kablosu
+(events._handle_task_tick) bu oturumu conversations.touch ile indekse de
+yazar — doküman var ama listede yok hatası F13'te kapatıldı. FCM push Y2
+işi olmaya devam eder. Alıcı tek-kullanıcı varsayımıyla default_owner()'dır
+— çok kullanıcılı sahiplik (owner alanı) sonraki faz.
 """
 import logging
 from datetime import datetime, timezone
@@ -97,11 +99,21 @@ def enqueue(db, title, goal, max_steps=None, checkpoint=None, now_fn=_now) -> st
     return ref.id
 
 
-def make_reporter(store, user_id: str):
+def make_reporter(store, user_id: str, conversations_store=None):
     """store: messages.MessageStore (veya aynı append imzalı herhangi bir şey).
-    Raporlar sabit REPORT_SESSION_ID oturumuna model mesajı olarak düşer."""
+    Raporlar sabit REPORT_SESSION_ID oturumuna model mesajı olarak düşer.
+
+    conversations_store (F13 görünürlük düzeltmesi) verilirse her rapordan
+    sonra oturum indeksi touch() edilir: list_conversations yalnızca touch'lı
+    oturumları döndürdüğü için bu çağrı olmadan rapor Firestore'da var ama
+    UYGULAMADA görünmezdi — modül docstring'i aksini iddia ediyordu ve ölçüm
+    onu yalan çıkardı. Başlık sabit verilir (ilk kullanıcı mesajı kuralına
+    muhtaç olmadan); touch hatası raporu bozmaz."""
     def report(task: dict, text: str) -> None:
         store.append(user_id, REPORT_SESSION_ID, "model", text)
+        if conversations_store is not None:
+            conversations_store.touch(user_id, REPORT_SESSION_ID, "model", text,
+                                      title="Görev raporları")
     return report
 
 

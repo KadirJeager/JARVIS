@@ -272,3 +272,24 @@ def test_retro_counts_a_registry_sourced_factory_actor():
 
     assert out["by_template"] == {"arastirmaci": 1, "ozel_arastirmaci": 2}
     assert out["instances_7d"] == 3
+
+
+# ---------------------------------------------------------------------------
+# F13 görünürlük: retro oturumu conversations indeksine touch'lanmalı
+# ---------------------------------------------------------------------------
+
+
+def test_retro_reporter_touches_the_conversation_index():
+    from app import conversations
+    from app.messages import MessageStore
+    from tests.fakes import FakeDB
+
+    owner = "owner@example.com"
+    db = FakeDB()
+    report_fn = retro.make_reporter(MessageStore(db), owner,
+                                    conversations.ConversationStore(db))
+    report_fn("Haftalık retro raporu:\n- 12 ders")
+
+    listed = conversations.ConversationStore(db).list_conversations(owner)
+    assert [(c["session_id"], c["title"]) for c in listed] == \
+        [("retro", "Haftalık retro")]

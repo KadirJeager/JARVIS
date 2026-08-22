@@ -266,3 +266,37 @@ def test_tick_per_task_error_isolation(monkeypatch):
     out = tasks.tick(db, _ok_step)
     assert out["errors"] == 1 and out["stepped"] == 1
     assert _doc(db, b)["budget"]["steps_used"] == 1
+
+
+# ---------------------------------------------------------------------------
+# F13 görünürlük: rapor oturumu conversations indeksine touch'lanmalı
+# ---------------------------------------------------------------------------
+
+
+def test_reporter_touches_the_conversation_index():
+    """list_conversations yalnızca touch'lı oturumları döndürür — touch'sız
+    görev raporu Firestore'da var ama uygulamada GÖRÜNMEZDİ (ölçülen bug)."""
+    from app import conversations
+
+    db = FakeDB()
+    report_fn = tasks.make_reporter(MessageStore(db), OWNER,
+                                    conversations.ConversationStore(db))
+    report_fn({"title": "t"}, "Görev tamamlandı: 't'\nSonuç: ok")
+
+    listed = conversations.ConversationStore(db).list_conversations(OWNER)
+    assert [(c["session_id"], c["title"]) for c in listed] == \
+        [("tasks", "Görev raporları")]
+
+
+def test_reporter_without_index_store_keeps_old_behavior():
+    db = FakeDB()
+    report_fn = tasks.make_reporter(MessageStore(db), OWNER)
+    report_fn({"title": "t"}, "Görev tamamlandı: 't'")
+
+    assert MessageStore(db).history(OWNER, tasks.REPORT_SESSION_ID)
+    # Eski çağrı biçimi (indeks verilmedi): hiçbir doküman yazılmadı.
+    assert conversations_empty(db)
+
+
+def conversations_empty(db):
+    return list(db.collection("conversations").stream()) == []

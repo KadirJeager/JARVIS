@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
-from . import config, messages, tasks
+from . import config, conversations, messages, tasks
 
 REPORT_SESSION_ID = "retro"
 
@@ -45,13 +45,19 @@ def _parse_ts(ts_val: Any) -> datetime | None:
         return None
 
 
-def make_reporter(store, user_id: str):
+def make_reporter(store, user_id: str, conversations_store=None):
     """Factory for reporting function bound to the "retro" session.
 
     Appends the retro report as a model message to session REPORT_SESSION_ID.
+    conversations_store (F13 görünürlük düzeltmesi) verilirse oturum indeksi
+    de touch() edilir — list_conversations yalnızca touch'lı oturumları
+    döndürür, dokümanı olan ama listede görünmeyen rapor hatası kapatılır.
     """
     def report(text: str) -> None:
         store.append(user_id, REPORT_SESSION_ID, "model", text)
+        if conversations_store is not None:
+            conversations_store.touch(user_id, REPORT_SESSION_ID, "model", text,
+                                      title="Haftalık retro")
     return report
 
 
@@ -361,7 +367,8 @@ def run(
     if report_fn is None:
         target_owner = owner or tasks.default_owner()
         if target_owner:
-            report_fn = make_reporter(messages.MessageStore(db), target_owner)
+            report_fn = make_reporter(messages.MessageStore(db), target_owner,
+                                      conversations.ConversationStore(db))
 
     if report_fn:
         try:

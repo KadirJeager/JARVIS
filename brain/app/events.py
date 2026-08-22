@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import messages, retro, tasks
+from . import conversations, messages, retro, tasks
 
 EVENTS_COLLECTION = "events"
 SUPPORTED_KINDS = ("ping", "health_check", "task_tick", "task_enqueue", "weekly_retro",
@@ -91,7 +91,8 @@ def _handle_task_tick(db, payload: dict, fetch, now_fn) -> dict:
     owner = payload.get("owner") or tasks.default_owner()
     report_fn = None
     if owner:
-        report_fn = tasks.make_reporter(messages.MessageStore(db), owner)
+        report_fn = tasks.make_reporter(messages.MessageStore(db), owner,
+                                        conversations.ConversationStore(db))
     return tasks.tick(db, tasks.health_patrol_step(fetch),
                       report_fn=report_fn, now_fn=now_fn)
 
