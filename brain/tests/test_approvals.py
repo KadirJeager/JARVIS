@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from app import approvals, config, reminders, tools
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+from app import approvals, config, decision_log, reminders, tools
 from app.memory import Memory
 from tests.fakes import FakeDB, wired_into_all_tools
 
@@ -52,7 +54,8 @@ class CountingExecutor:
 
 
 def _request(db, *, user_id=USER, kind="tool_call", tool_name="cancel_reminder",
-             tool_args=None, now_fn=_now, ttl_minutes=60, title="Hatırlatma silinecek"):
+             tool_args=None, now_fn=_now, ttl_minutes=60, title="Hatırlatma silinecek",
+             reversible=None):
     return approvals.request(
         db,
         user_id=user_id,
@@ -65,6 +68,7 @@ def _request(db, *, user_id=USER, kind="tool_call", tool_name="cancel_reminder",
         session_id="s1",
         now_fn=now_fn,
         ttl_minutes=ttl_minutes,
+        reversible=reversible,
     )
 
 
@@ -736,3 +740,132 @@ def test_a_tool_call_cannot_borrow_the_agent_grant_executor():
     key = approvals._executor_key({"kind": approvals.KIND_TOOL_CALL,
                                    "tool_name": "kind:agent_grant"})
     assert key is None
+
+
+# ---------------------------------------------------------------------------
+# decision_log entegrasyonu (Onay Kartı 2.0, Task 4)
+# ---------------------------------------------------------------------------
+
+
+def _rings(db):
+    return [s.to_dict() for s in db.collection(decision_log.COLLECTION)
+            .where(filter=FieldFilter("user_id", "==", USER)).stream()]
+
+
+def test_decide_appends_exactly_one_ledger_ring():
+    db = FakeDB()
+    approval_id = _request(db)
+    ex = CountingExecutor()
+
+    approvals.decide(db, approval_id, USER, "approved",
+                     executors={"cancel_reminder": ex}, now_fn=_now)
+
+    rings = _rings(db)
+    assert len(rings) == 1
+    assert rings[0]["decision"] == "approved"
+    assert rings[0]["by"] == USER
+    assert rings[0]["approval_id"] == approval_id
+
+    # İkinci dokunuş yarışı kaybeder: halka sayısı 1'de kalır.
+    approvals.decide(db, approval_id, USER, "approved",
+                     executors={"cancel_reminder": ex}, now_fn=_now)
+    assert len(_rings(db)) == 1
+
+
+def test_reject_ring_carries_the_reason():
+    db = FakeDB()
+    approval_id = _request(db)
+
+    approvals.decide(db, approval_id, USER, "rejected", reason="Yanlış kişi",
+                     executors={}, now_fn=_now)
+
+    ring = _rings(db)[0]
+    assert ring["decision"] == "rejected"
+    assert ring["reason"] == "Yanlış kişi"
+
+
+def test_race_loser_logs_no_ring():
+    """Claim'i başkası almışsa karar BİZİM değildir ve zincire halka yazılmaz."""
+    db = FakeDB()
+    approval_id = _request(db)
+    db.collection(approvals.CLAIMS_COLLECTION).document(approval_id).create(
+        {"decision": "approved", "by": OTHER, "at": _now()})
+
+    out = approvals.decide(db, approval_id, USER, "approved", executors={},
+                           now_fn=_now)
+
+    assert out["already"] is True
+    assert _rings(db) == []
+
+
+def test_irreversible_expiry_in_decide_stays_a_denial():
+    db = FakeDB()
+    approval_id = _request(db, reversible=False)
+    ex = CountingExecutor()
+
+    out = approvals.decide(db, approval_id, USER, "approved",
+                           executors={"cancel_reminder": ex},
+                           now_fn=_now_fn_at(90))
+
+    assert out["status"] == approvals.STATUS_EXPIRED
+    assert out["outcome"] == approvals.EXPIRED_OUTCOME  # fail-closed reddi aynen
+    d = _doc(db, approval_id)
+    assert d["decided_by"] is None and d["status"] == approvals.STATUS_EXPIRED
+    assert ex.calls == []
+    ring = _rings(db)[0]
+    assert ring["decision"] == "expired" and ring["by"] is None
+
+
+def test_reversible_expiry_in_decide_records_notify_outcome():
+    """§5.6: geri alınabilir eylemde süre dolumu ret DEĞİL bildirimdir."""
+    db = FakeDB()
+    approval_id = _request(db, reversible=True)
+
+    out = approvals.decide(db, approval_id, USER, "approved", executors={},
+                           now_fn=_now_fn_at(90))
+
+    assert out["status"] == approvals.STATUS_EXPIRED
+    assert out["outcome"] == approvals.EXPIRED_NOTIFY_OUTCOME
+    assert _doc(db, approval_id)["decided_by"] is None
+    ring = _rings(db)[0]
+    assert ring["decision"] == "expired" and ring["reversible"] is True
+
+
+def test_expire_due_splits_outcome_by_reversibility_and_chains():
+    db = FakeDB()
+    rev = _request(db, reversible=True, ttl_minutes=5, title="geri alınabilir")
+    irr = _request(db, reversible=False, ttl_minutes=5, title="geri alınamaz")
+
+    out = approvals.expire_due(db, now_fn=_now_fn_at(30))
+
+    assert out["expired"] == 2 and out["notified"] == 1
+    assert _doc(db, rev)["outcome"] == approvals.EXPIRED_NOTIFY_OUTCOME
+    assert _doc(db, irr)["outcome"] == approvals.EXPIRED_OUTCOME
+    rings = _rings(db)
+    assert len(rings) == 2 and all(r["by"] is None for r in rings)
+    assert decision_log.verify(db, USER) == (True, None)
+
+
+def test_expire_due_calls_notification_hook_for_reversible_only():
+    db = FakeDB()
+    rev = _request(db, reversible=True, ttl_minutes=5)
+    _request(db, ttl_minutes=5)  # reversibility belirtilmedi -> irreversible
+
+    seen: list[str] = []
+    out = approvals.expire_due(db, now_fn=_now_fn_at(30),
+                               notify=lambda aid, doc: seen.append(aid))
+
+    assert seen == [rev]
+    assert out["notified"] == 1
+
+
+def test_expire_due_survives_a_broken_hook():
+    """Bildirim patlaması süpürmeyi bozmaz — süre dolumu zaten işlenmişti."""
+    db = FakeDB()
+    _request(db, reversible=True, ttl_minutes=5)
+
+    def boom(aid, doc):
+        raise RuntimeError("fcm öldü")
+
+    out = approvals.expire_due(db, now_fn=_now_fn_at(30), notify=boom)
+    assert out["expired"] == 1

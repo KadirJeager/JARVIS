@@ -11,6 +11,8 @@ Model (Firestore):
   outcome}. status: pending|approved|rejected|expired|failed.
 - `approval_claims` (doc id = onay id): {decision, by, at}. Kararın BİRİNCİL
   kaydı budur; onay dokümanındaki `status` onun izdüşümüdür.
+- `decision_log` (doc id = onay id): hash-zincirli karar kaydı (Task 4) —
+  her terminal geçişine tek halka; bkz. decision_log.py.
 
 Üç değişmez bu modülün varlık sebebidir:
 
@@ -45,6 +47,7 @@ from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from . import config
+from . import decision_log
 
 COLLECTION = "approvals"
 CLAIMS_COLLECTION = "approval_claims"
@@ -113,6 +116,14 @@ REJECT_REASONS: tuple[RejectReason, ...] = (
 )
 
 EXPIRED_OUTCOME = "Onay süresi doldu; eylem çalıştırılmadı."
+
+# (Task 4, §5.6): geri alınabilir bir eylemde "süre doldu = reddet" bilgi
+# kaybettirir — orada süre dolumu bir RET değil BİLDİRİMDİR: eylem çalışmadı
+# ama istek yeniden sorulabilir. Geri alınamazda eski fail-closed reddi
+# (EXPIRED_OUTCOME) AYNEN kalır; alan yoksa/None ise irreversible sayılır.
+EXPIRED_NOTIFY_OUTCOME = ("Onay süresi doldu; eylem çalıştırılmadı. Eylem geri "
+                          "alınabilir olduğundan bu bir ret değildir — istek "
+                          "yeniden sorulabilir.")
 NO_EXECUTOR_OUTCOME = "bu araç onaydan sonra çalıştırılamıyor (yürütücü kayıtlı değil)"
 
 # (tool_args, user_id) -> Türkçe sonuç metni
@@ -216,6 +227,29 @@ def _project(approval_id: str, d: dict) -> dict:
 
 def _result(status: str, outcome: str | None, already: bool) -> dict:
     return {"status": status, "outcome": outcome, "already": already}
+
+
+def _ledger_fields(d: dict) -> dict:
+    """Onay dokümanından karar kaydının bağlam alanları. Beyan edilen ne varsa
+    o taşınır — hiçbiri burada HESAPLANMAZ (Task 2'nin kuralının aynısı);
+    Task 2 öncesi dokümanlarda alanlar yoktur ve None olarak akar."""
+    return {"actor": d.get("actor"), "zone": d.get("zone"),
+            "cause": d.get("cause"), "operand": d.get("operand"),
+            "reversible": d.get("reversible")}
+
+
+def _log_decision(db, **kwargs) -> None:
+    """Karar kaydına halka yazar;Transient hata kararı REHİN ALMAZ (Task 4
+    review bulgusu): claim/status zaten işlenmişken bir append istisnası,
+    yürütmeyi hiç koşmayan 'onaylandı' yarım-durumu üretirdi. Delik görünürlüğü
+    verify()'ın işidir — zincirde kopuk halka kalıcı olarak bozuk raporlanır."""
+    try:
+        decision_log.append(db, **kwargs)
+    except AlreadyExists:
+        pass                      # aynı onaya ikinci halka: yarış kaybedeni
+    except Exception:
+        logging.exception("approvals: karar kaydı yazılamadı approval=%s",
+                          kwargs.get("approval_id"))
 
 
 def _executor_key(doc: dict) -> str | None:
@@ -466,11 +500,17 @@ def decide(db, approval_id: str, user_id: str, decision: str, *,
     parsed_now = _parse_iso(now)
     if _is_expired(d, parsed_now):
         # §4.1: zaman aşımı KARAR anında da uygulanır. decided_by yazılmaz —
-        # kararı kimse vermedi, süre verdi.
+        # kararı kimse vermedi, süre verdi. Task 4 (§5.6): geri alınabilir
+        # eylemde süre dolumu bir ret değil bildirimdir; geri alınamazda eski
+        # fail-closed reddi aynen korunur (alan yoksa irreversible sayılır).
+        outcome = EXPIRED_NOTIFY_OUTCOME if d.get("reversible") else EXPIRED_OUTCOME
         ref.set({"status": STATUS_EXPIRED, "decided_at": now,
-                 "outcome": EXPIRED_OUTCOME}, merge=True)
+                 "outcome": outcome}, merge=True)
+        _log_decision(db, approval_id=approval_id, user_id=user_id,
+                      decision="expired", by=None, at=now,
+                      reason=None, **_ledger_fields(d))
         logging.info("approvals: decide süresi dolmuş id=%s (yürütme yok)", approval_id)
-        return _result(STATUS_EXPIRED, EXPIRED_OUTCOME, True)
+        return _result(STATUS_EXPIRED, outcome, True)
 
     claim = {"decision": decision, "by": user_id, "at": now}
     doc_update = {"status": decision, "decided_at": now, "decided_by": user_id}
@@ -492,6 +532,14 @@ def decide(db, approval_id: str, user_id: str, decision: str, *,
         return _result(current.get("status"), current.get("outcome"), True)
 
     ref.set(doc_update, merge=True)
+
+    # Task 4: karar kaydı claim KAZANILDIKTAN sonra yazılır — yarışı kaybeden
+    # vermediği kararı zincire yazmaz. (Çift-yazma zaten doc-id create() ile
+    # imkânsız; bu sıra yalnızca okunabilirlik değil, doğru sorumluluktur.)
+    _log_decision(db, approval_id=approval_id, user_id=user_id,
+                  decision=decision, by=user_id, at=now,
+                  reason=reason if decision == STATUS_REJECTED else None,
+                  **_ledger_fields(d))
 
     if decision == STATUS_REJECTED:
         logging.info("approvals: reddedildi id=%s by=%s reason=%r", approval_id, user_id, reason)
@@ -533,12 +581,25 @@ def decide(db, approval_id: str, user_id: str, decision: str, *,
     return _result(status, outcome, False)
 
 
-def expire_due(db, now_fn=_now) -> dict:
+def expire_due(db, now_fn=_now, notify: Callable[[str, dict], None] | None = None) -> dict:
     """Süresi geçmiş `pending` onayları `expired`'a çeker, özet döner.
 
     Bir TEMİZLİK/bildirim yoludur, güvenlik sınırı DEĞİL: gerçek zaman aşımı
     garantisi decide()'ın süre kontrolündedir (§4.1). Bu iş hiç koşmasa bile
-    süresi geçmiş bir onay çalıştırılamaz."""
+    süresi geçmiş bir onay çalıştırılamaz.
+
+    Task 4 (§5.6): sonuç geri alınabilirliğe göre AYRIŞIR. Geri alınamaz eylem
+    eskisi gibi fail-closed reddedilir (EXPIRED_OUTCOME); geri alınabilirden
+    "reddet" bilgi kaybettirdiği için EXPIRED_NOTIFY_OUTCOME yazılır ve `notify`
+    bağlanmışsa halka başına bir kez çağrılır (imza: (approval_id, doküman)).
+    Kancanın üretimde FCM'e bağlanması bilinçli olarak BU görevde değildir —
+    tüketici olacak ilk dilim bağlayacak; kancasız koşum sahte bildirim
+    üretmez. Dönen `notified`, bildirim-SINIFI süre dolumlarının (geri
+    alınabilir) sayısıdır — kanca bağlı değilse hiçbir bildirim gönderilmediği
+    anlamına gelir. Her süren onay için karar kaydına `by=None` halkası düşer
+    ("kararı kimse vermedi, süre verdi"); çift-yazma doc-id create() ile zaten
+    imkânsız.
+    """
     now = now_fn()
     parsed_now = _parse_iso(now)
     snaps = list(
@@ -547,12 +608,31 @@ def expire_due(db, now_fn=_now) -> dict:
         .stream()
     )
     expired = 0
+    notified = 0
     for snap in snaps:
-        if not _is_expired(snap.to_dict(), parsed_now):
+        d = snap.to_dict()
+        if not _is_expired(d, parsed_now):
             continue
+        reversible = bool(d.get("reversible"))
+        outcome = EXPIRED_NOTIFY_OUTCOME if reversible else EXPIRED_OUTCOME
         snap.reference.set({"status": STATUS_EXPIRED, "decided_at": now,
-                            "outcome": EXPIRED_OUTCOME}, merge=True)
+                            "outcome": outcome}, merge=True)
+        _log_decision(db, approval_id=snap.reference.id,
+                      user_id=d.get("user_id"), decision="expired",
+                      by=None, at=now, reason=None, **_ledger_fields(d))
+        if reversible:
+            notified += 1
+            if notify is not None:
+                try:
+                    notify(snap.reference.id, d)
+                except Exception:
+                    # Bildirim hatası süpürmeyi bozmaz; süre dolumu zaten işlenmişti.
+                    logging.exception("approvals: expire_due notify hatası id=%s",
+                                      snap.reference.id)
         expired += 1
-    summary = f"Onay turu: {len(snaps)} bekleyen onaydan {expired} tanesinin süresi doldu"
-    logging.info("approvals: expire_due checked=%d expired=%d", len(snaps), expired)
-    return {"expired": expired, "checked": len(snaps), "summary": summary}
+    summary = (f"Onay turu: {len(snaps)} bekleyen onaydan {expired} tanesinin "
+               f"süresi doldu ({notified} geri alınabilir)")
+    logging.info("approvals: expire_due checked=%d expired=%d notified=%d",
+                 len(snaps), expired, notified)
+    return {"expired": expired, "checked": len(snaps), "notified": notified,
+            "summary": summary}
