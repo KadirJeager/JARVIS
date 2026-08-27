@@ -11,7 +11,7 @@ spec:
         run.googleapis.com/startup-cpu-boost: 'true'
         run.googleapis.com/container-dependencies: '{"brain":["llm-proxy"]}'
       labels:
-        client.knative.dev/nonce: 'cmd966ba01'
+        client.knative.dev/nonce: 'cme42bde11'
         run.googleapis.com/startupProbeType: Default
     spec:
       containerConcurrency: 80
@@ -19,7 +19,7 @@ spec:
       timeoutSeconds: 300
       containers:
       - name: brain
-        image: gcr.io/your-gcp-project/jarvis-brain:cm-d966ba0
+        image: gcr.io/your-gcp-project/jarvis-brain:cm-e42bde1
         ports:
         - containerPort: 8080
           name: http1
