@@ -37,7 +37,7 @@ import uuid
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from google.genai import types
 
-from . import antispoof, config, conversations, messages, trust, vitals, voice_challenge, voice_trust
+from . import antispoof, config, conversations, messages, trust, vertex_stt, vitals, voice_challenge, voice_trust
 
 # F7 (ürün yüzeyi haritası): the voice session's transcript lands in the chat
 # timeline as ONE message row of this kind, in the fixed `voice-{user_id}`
@@ -80,13 +80,22 @@ active_bridges: dict[str, "VoiceBridge"] = {}
 
 class VoiceBridge:
     def __init__(self, runner, session_service, memory=None, speaker_service=None,
-                 device_hint="unknown", presence="foreground"):
+                 device_hint="unknown", presence="foreground", proto: int = 2):
         self.runner = runner
         self.session_service = session_service
         self.memory = memory
         self.speaker_service = speaker_service
         self.device_hint = device_hint
         self.presence = presence
+        # Protocol version from the hello's client_caps. 2 = device STT/TTS
+        # (the client sends user_text finals); 3 = cloud STT/TTS (the server's
+        # VAD finds the boundary in the PCM stream, vertex_stt transcribes it,
+        # and vertex_tts speaks the reply as binary frames).
+        self.proto = proto
+        # Server-side VAD state (proto 3 only; never fed in proto 2).
+        self._vad_open = False
+        self._vad_last_voice_at = 0.0
+        self._vad_watchdog_task: asyncio.Task | None = None
         self.transcript: list[dict] = []
         self._utterance = bytearray()   # accumulates this utterance's mic PCM
         self._user_id = ""
@@ -249,21 +258,110 @@ class VoiceBridge:
         if msg.get("type") == "websocket.disconnect":
             return False
         if data := msg.get("bytes"):
-            if self.speaker_service is not None:
-                self._utterance.extend(data)
-                # BOUNDED buffer: the drain only happens at an utterance
-                # boundary (a user_text final), and that frame is not
-                # guaranteed to arrive (the device VAD can sit through long
-                # silence without ever finalizing). Unbounded, this grows at
-                # AUDIO_IN_RATE*2 = 32 KB/s (~115 MB/h) inside a process that
-                # already carries torch. Keeping only the most recent window
-                # also bounds inference time, and a window that long is far
-                # more audio than ECAPA needs.
-                if len(self._utterance) > config.SPEAKER_UTTERANCE_MAX_BYTES:
-                    del self._utterance[:-config.SPEAKER_UTTERANCE_MAX_BYTES]
+            self._receive_pcm(data)
         elif text := msg.get("text"):
             await self._handle_text_frame(ws, text)
         return True
+
+    def _receive_pcm(self, data: bytes) -> None:
+        """One binary frame of mic PCM16 mono 16kHz. Feeds the bounded
+        speaker-ID buffer (every protocol), and in proto 3 the server-side
+        VAD that decides utterance boundaries."""
+        if self.speaker_service is not None:
+            self._utterance.extend(data)
+            # BOUNDED buffer: the drain only happens at an utterance
+            # boundary (a user_text final), and that frame is not
+            # guaranteed to arrive (the device VAD can sit through long
+            # silence without ever finalizing). Unbounded, this grows at
+            # AUDIO_IN_RATE*2 = 32 KB/s (~115 MB/h) inside a process that
+            # already carries torch. Keeping only the most recent window
+            # also bounds inference time, and a window that long is far
+            # more audio than ECAPA needs.
+            if len(self._utterance) > config.SPEAKER_UTTERANCE_MAX_BYTES:
+                del self._utterance[:-config.SPEAKER_UTTERANCE_MAX_BYTES]
+        if self.proto >= 3:
+            self._vad_feed(data)
+
+    # --- server-side VAD (proto 3) -------------------------------------------
+    #
+    # The v3 client sends no user_text frames: the boundary must come out of
+    # the PCM stream itself. A frame whose RMS clears VAD_RMS_THRESHOLD is
+    # voice; VAD_SILENCE_S seconds of sub-threshold audio closes the segment.
+    # Simplicity is deliberate (energy, not a learned VAD): a false trigger
+    # costs one empty transcript (the model answers "" per its prompt), while
+    # a missed command would make Kadir repeat himself -- so the constants sit
+    # on the speech-favouring side and the transcriber is the filter.
+
+    @staticmethod
+    def _pcm_rms(data: bytes) -> float:
+        """Root-mean-square amplitude of a PCM16 LE chunk; 0.0 on silence."""
+        n = len(data) // 2
+        if n == 0:
+            return 0.0
+        import array
+        samples = array.array("h")
+        samples.frombytes(data[: n * 2])
+        return (sum(s_ * s_ for s_ in samples) / n) ** 0.5
+
+    def _vad_feed(self, data: bytes) -> None:
+        if self._pcm_rms(data) < config.VAD_RMS_THRESHOLD:
+            return
+        if not self._vad_open:
+            # ONSET: same trim the v2 speech_start frame applied -- the audio
+            # buffered while idle (room noise since the last turn) must not
+            # precede this utterance, for the transcriber exactly as for the
+            # identity embedding.
+            self._vad_open = True
+            del self._utterance[:-config.SPEAKER_BARGE_IN_ONSET_BYTES]
+        self._vad_last_voice_at = self._now()
+
+    async def _vad_segment_end_if_due(self, ws) -> None:
+        """Close the open VAD segment once the silence hangover has elapsed;
+        no-op otherwise. Called by the watchdog loop (run) and directly by
+        tests. On a close: transcribe the buffered speech, report what was
+        heard (evt_user_text), and hand the SAME _on_utterance_final path the
+        v2 user_text frame drives (verify -> trust -> turn)."""
+        if not self._vad_open:
+            return
+        if self._now() - self._vad_last_voice_at < config.VAD_SILENCE_S:
+            return
+        self._vad_open = False
+        pcm = bytes(self._utterance)
+        if not pcm:
+            return
+        try:
+            text = await vertex_stt.transcribe(pcm, rate=vp.AUDIO_IN_RATE)
+        except vertex_stt.VertexSttError:
+            logging.exception("voice bridge: vertex transcription failed for %s", self._user_id)
+            # No transcript -> no turn; the buffer is this segment's audio and
+            # there is nothing left to verify, so it is drained here (the
+            # verify drain lives in _verify_utterance on the success path).
+            self._utterance.clear()
+            await self._safe_send(ws, vp.evt_error("Seni duyamadım, tekrar dener misin?"))
+            return
+        if not text.strip():
+            # RMS crossed the floor but no speech in it (a door, a clatter):
+            # a non-event. Drained like the error path -- silence must not
+            # accumulate into the NEXT segment's transcript.
+            self._utterance.clear()
+            logging.info("voice bridge: empty transcript for %s (%d bytes) -- noise, not speech",
+                         self._user_id, len(pcm))
+            return
+        # Success: tell the client what was heard (its "Ben: ..." row), then
+        # the shared boundary path. The buffer is NOT cleared here:
+        # _verify_utterance scores (and drains) this same PCM.
+        await self._safe_send(ws, vp.evt_user_text(text))
+        await self._on_utterance_final(ws, text)
+
+    async def _vad_watchdog(self, ws) -> None:
+        """Silence needs a clock, not another frame: the hangover elapses
+        while NO audio arrives, so a timer must close the segment."""
+        try:
+            while not self._closed:
+                await asyncio.sleep(config.VAD_WATCHDOG_TICK_S)
+                await self._vad_segment_end_if_due(ws)
+        except asyncio.CancelledError:
+            raise
 
     async def _handle_text_frame(self, ws, raw: str) -> None:
         """Dispatch one client JSON frame. Unknown types and malformed JSON
@@ -614,6 +712,11 @@ class VoiceBridge:
                     voice_score=None,
                 )
             self._user_id = user_id
+            # Proto 3: the VAD needs a clock for the silence hangover (it
+            # elapses while NO frames arrive), so the watchdog runs beside the
+            # receive loop.
+            if self.proto >= 3:
+                self._vad_watchdog_task = asyncio.create_task(self._vad_watchdog(ws))
             # The receive loop is the ONLY pump: mic PCM and control frames
             # arrive on the same socket, and turns run as tasks (see
             # _on_utterance_final) so a multi-second run_async never blocks
@@ -642,6 +745,10 @@ class VoiceBridge:
             # leftover entry would be visible to any later tool call on the
             # same ADK session id (which is per-USER and outlives the
             # connection).
+            if self._vad_watchdog_task is not None:
+                self._vad_watchdog_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._vad_watchdog_task
             for task in list(self._turn_tasks):
                 task.cancel()
             for task in list(self._turn_tasks):
@@ -658,13 +765,14 @@ class VoiceBridge:
             self._persist_transcript(session_id, user_id)
 
 
-async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
-    """Read + verify the hello frame. Returns (email, device_hint, presence),
-    or None if the handshake did not complete. Failure paths: bad hello or bad
-    token -> evt_error + close(4401); a hello WITHOUT client_caps -> a v1
-    client asking for the retired Gemini Live bridge -> evt_error("Uygulamayı
+async def _handshake(ws: WebSocket) -> tuple[str, str, str, int] | None:
+    """Read + verify the hello frame. Returns (email, device_hint, presence,
+    proto), or None if the handshake did not complete. Failure paths: bad hello
+    or bad token -> evt_error + close(4401); a hello WITHOUT client_caps -> a
+    v1 client asking for the retired Gemini Live bridge -> evt_error("Uygulamayı
     güncelle") + close(4409) (there is no server-side audio path left to serve
-    it); client disconnect -> nothing sent, the peer is gone.
+    it); an UNKNOWN proto version -> same 4409 (the server speaks 2 and 3);
+    client disconnect -> nothing sent, the peer is gone.
     device_hint/presence feed the risk-based trust fusion (spec §6, §11) and
     default via vp.parse_hello when the client omits them."""
     try:
@@ -689,7 +797,12 @@ async def _handshake(ws: WebSocket) -> tuple[str, str, str] | None:
         await ws.send_text(json.dumps(vp.evt_error("Uygulamayı güncelle")))
         await ws.close(code=4409)
         return None
-    return email, parsed["device_hint"], parsed["presence"]
+    proto = parsed["client_caps"].get("proto", 2)
+    if not isinstance(proto, int) or proto not in (2, 3):
+        await ws.send_text(json.dumps(vp.evt_error("Uygulamayı güncelle")))
+        await ws.close(code=4409)
+        return None
+    return email, parsed["device_hint"], parsed["presence"], proto
 
 
 @router.websocket("/ws/voice")
@@ -698,7 +811,7 @@ async def ws_voice(ws: WebSocket) -> None:
     hs = await _handshake(ws)
     if hs is None:
         return
-    email, device_hint, presence = hs
+    email, device_hint, presence, proto = hs
     from . import main
 
     try:
@@ -711,7 +824,7 @@ async def ws_voice(ws: WebSocket) -> None:
         speaker_service = main.get_speaker_service()
         await VoiceBridge(
             runner, sessions, memory=memory, speaker_service=speaker_service,
-            device_hint=device_hint, presence=presence,
+            device_hint=device_hint, presence=presence, proto=proto,
         ).run(ws, user_id=email)
     except Exception:
         logging.exception("voice bridge failed for %s", email)

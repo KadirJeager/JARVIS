@@ -463,3 +463,36 @@ SPEAKER_SAMPLE_LABELS = frozenset(
 )
 
 TRUST_STATE_KEY = "trust_level"   # ADK session-state key policy._read_trust falls back to
+
+# --- Vertex ses uçları (ses v3, 27 Ağu planı: docs/superpowers/plans/2026-08-27-ses-v3-f1-sse.md) ---
+# STT: Vertex Gemini unary (WAV-wrapped PCM). TTS: Cloud TTS Gemini-TTS streaming.
+# Kimlik: Cloud Run SA / lokal ADC (Workload Identity; key YOK). Proje: sabit —
+# brain'in bütün GCP kaynakları your-gcp-project'te; quota project deploy yaml'inde pinli.
+VERTEX_LOCATION = os.environ.get("JARVIS_VERTEX_LOCATION", "europe-west1")
+VERTEX_PROJECT = os.environ.get("JARVIS_VERTEX_PROJECT", "your-gcp-project")
+
+# STT: unary generate_content. Spike kanıtı (27 Ağu): gemini-2.5-flash 5.2 s
+# sesi 2.72 s'de transkribe etti; prompt'taki terim listesi cihaz-üstü
+# EXTRA_BIASING_STRINGS'in yerini alır ("Jarvis" artık doğru yazılıyor).
+VERTEX_STT_MODEL = os.environ.get("JARVIS_VERTEX_STT_MODEL", "gemini-2.5-flash")
+VERTEX_STT_TIMEOUT_S = float(os.environ.get("JARVIS_VERTEX_STT_TIMEOUT_S", "15.0"))
+VERTEX_STT_PROMPT = os.environ.get(
+    "JARVIS_VERTEX_STT_PROMPT",
+    "Bu Türkçe konuşmayı aynen transkribe et. Sadece transkripti yaz; yorum, "
+    "açıklama, çeviri ekleme. Kişi ve ürün adlarını doğru yaz: Jarvis, Kadir. "
+    "Konuşma anlaşılmıyorsa ya da konuşma yoksa boş cevap ver.",
+)
+
+# TTS (Task 3): streaming_synthesize. Spike: 130 chunk, ilk chunk 1.19 s.
+VERTEX_TTS_MODEL = os.environ.get("JARVIS_VERTEX_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+VERTEX_TTS_VOICE = os.environ.get("JARVIS_VERTEX_TTS_VOICE", "Kore")
+VERTEX_TTS_LANG = os.environ.get("JARVIS_VERTEX_TTS_LANG", "tr-TR")
+VERTEX_TTS_TIMEOUT_S = float(os.environ.get("JARVIS_VERTEX_TTS_TIMEOUT_S", "20.0"))
+
+# Sunucu-taraflı VAD (proto 3): PCM16 RMS eşiği + sessizlik hangover'ı.
+# Eşik 16-bit amplitüdde: sessiz oda <100, normal konuşma 1000+. Sahada ayarlanır;
+# 500 kasıtlı olarak konuşma lehine (yanlış tetik bir boş transkripte mal olur,
+# kaçırılan komut ise kullanıcıyı tekrar söyletir).
+VAD_RMS_THRESHOLD = float(os.environ.get("JARVIS_VAD_RMS_THRESHOLD", "500"))
+VAD_SILENCE_S = float(os.environ.get("JARVIS_VAD_SILENCE_S", "0.8"))
+VAD_WATCHDOG_TICK_S = float(os.environ.get("JARVIS_VAD_WATCHDOG_TICK_S", "0.25"))

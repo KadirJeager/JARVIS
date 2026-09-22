@@ -1,26 +1,31 @@
-"""Permanent WebSocket voice contract, PROTOCOL v2 (device STT/TTS).
+"""Permanent WebSocket voice contract, PROTOCOL v2 + v3.
 
 v1 (frozen, gone): the client streamed mic PCM and the server bridged it to a
 Gemini Live session, streaming model audio back. v2: STT and TTS moved onto
-the device. The client now runs SpeechRecognizer/TTS itself; the server runs
-TEXT turns through ADK (run_async) and never sends audio back.
+the device (client SpeechRecognizer/TTS; server runs TEXT turns through ADK
+and never sends audio back). v3 (ses-v3 planı, 27 Ağu): STT/TTS moved to the
+SERVER's Vertex legs -- the client streams PCM and plays back PCM; a
+server-side VAD finds the utterance boundary, vertex_stt transcribes it, and
+(from Task 3) vertex_tts speaks the reply as binary frames.
 
 Client -> server: first TEXT frame is a hello JSON
-{"token": "<google id token>", "client_caps": {"stt": "device", "tts":
-"device", "proto": 2}, ...}. A hello WITHOUT client_caps is a v1 client: the
-server answers evt_error("Uygulamayı güncelle") and closes with 4409 -- there
-is no server-side audio path left to serve it. After the hello:
-  - BINARY frames are raw PCM16 mono 16kHz microphone audio. They are used
-    ONLY for speaker identification (app/voice.py's utterance buffer); no
-    model ever transcribes them server-side.
-  - TEXT frame {"type": "speech_start"}: the on-device STT detected speech
-    onset (including barge-in). Lets the server trim the speaker-ID buffer
-    to the utterance onset.
+{"token": "<google id token>", "client_caps": {"stt": ..., "tts": ...,
+"proto": 2|3}, ...}. A hello WITHOUT client_caps is a v1 client: the server
+answers evt_error("Uygulamayı güncelle") and closes with 4409. An unknown
+proto gets the same 4409. After the hello:
+  - BINARY frames are raw PCM16 mono 16kHz microphone audio. In v2 they feed
+    ONLY speaker identification; in v3 they also feed the server VAD +
+    transcriber.
+  - TEXT frame {"type": "speech_start"}: (v2) the on-device STT detected
+    speech onset. Lets the server trim the speaker-ID buffer to the utterance
+    onset. v3 needs no onset frame: the server VAD applies the same trim.
   - TEXT frame {"type": "user_text", "text": ..., "utterance_final": bool}:
-    the on-device STT result. utterance_final=true is the utterance boundary:
-    it triggers speaker verification and the model turn.
-Server -> client: TEXT frames only, JSON events built by the evt_* helpers
-below. NO binary frames ever leave the server in v2.
+    (v2 ONLY) the on-device STT result; utterance_final=true is the utterance
+    boundary. A v3 client NEVER sends this -- its transcripts arrive the other
+    way (see evt_user_text below).
+Server -> client: TEXT frames, JSON events built by the evt_* helpers below.
+In v2 NO binary frames ever leave the server; in v3 BINARY frames are PCM16
+mono 24kHz reply audio (Task 3).
 """
 import json
 
@@ -30,6 +35,14 @@ AUDIO_MIME_IN = "audio/pcm;rate=16000"
 
 def evt_transcript(role: str, text: str) -> dict:
     return {"type": "transcript", "role": role, "text": text}
+
+
+def evt_user_text(text: str) -> dict:
+    """v3 server -> client: what the server-side STT heard, so the client can
+    show the user's own utterance in the conversation UI (the v2 client knew
+    it because ITS recognizer produced it; a v3 client never sees it unless
+    the server reports it back)."""
+    return {"type": "user_text", "text": text}
 
 
 def evt_jarvis_text(text: str) -> dict:

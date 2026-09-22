@@ -1028,7 +1028,7 @@ async def test_handshake_returns_device_hint_and_presence_from_hello(monkeypatch
         "token": "good-token", "device_hint": "headset", "presence": "locked",
         "client_caps": {"stt": "device", "tts": "device", "proto": 2},
     }))
-    email, device_hint, presence = await _handshake(ws)
+    email, device_hint, presence, proto = await _handshake(ws)
     assert (email, device_hint, presence) == ("user@example.com", "headset", "locked")
 
 
@@ -1335,3 +1335,159 @@ def test_the_speech_estimate_scales_with_the_reply_and_is_clamped():
     assert short == pytest.approx(5 / 14.0 + 1.0)
     assert long == pytest.approx(140 / 14.0 + 1.0)
     assert VoiceBridge._speech_seconds("x" * 100_000) == voice_mod.SPEECH_MAX_SECONDS
+
+
+# --- protocol v3: server-side VAD + cloud STT (Vertex) -----------------------
+#
+# A v3 client sends NO user_text frames: the server's VAD finds the utterance
+# boundary in the PCM stream, vertex_stt transcribes it, and the SAME
+# _on_utterance_final path the v2 user_text frame drives takes over (verify ->
+# trust -> turn). vertex_stt.transcribe is always faked here; its own contract
+# is pinned in tests/test_vertex_stt.py.
+
+from app import vertex_stt  # noqa: E402
+
+
+def _armed_v3(bridge, user_id=USER):
+    _armed(bridge, user_id)
+    bridge.proto = 3
+    return bridge
+
+
+def _loud_pcm(nbytes=3200):
+    """One frame of unambiguous speech (square wave well above VAD_RMS_THRESHOLD)."""
+    return b"\xff\x7f\x00\x80" * (nbytes // 4)
+
+
+def _silent_pcm(nbytes=3200):
+    return b"\x00\x00" * (nbytes // 2)
+
+
+@pytest.fixture
+def fake_transcribe(monkeypatch):
+    """Install a fake vertex_stt.transcribe; returns a recorder dict."""
+    rec = {"calls": [], "result": "merhaba", "exc": None}
+
+    async def fake(pcm, rate=16000):
+        rec["calls"].append((pcm, rate))
+        if rec["exc"] is not None:
+            raise rec["exc"]
+        return rec["result"]
+
+    monkeypatch.setattr(vertex_stt, "transcribe", fake)
+    return rec
+
+
+@pytest.mark.asyncio
+async def test_v3_vad_segment_end_transcribes_then_runs_the_turn(fake_transcribe):
+    """The whole v3 pipe in one drive: PCM in -> VAD opens -> silence hangover
+    -> transcript event -> verify (speaker) -> turn -> jarvis_text -> done."""
+    ws = FakeWS([])
+    bridge = _armed_v3(VoiceBridge(FakeTextRunner(), _StatelessSessions(),
+                                   speaker_service=object()))
+    bridge._ws = ws
+    bridge._receive_pcm(_loud_pcm())
+    bridge._receive_pcm(_loud_pcm())
+    assert bridge._vad_open is True
+    bridge._receive_pcm(_silent_pcm())   # below threshold: hangover starts
+    await bridge._vad_segment_end_if_due(ws)   # not yet: inside the silence window
+    assert fake_transcribe["calls"] == []
+    # Push the clock past VAD_SILENCE_S and let the watchdog close the segment.
+    bridge._vad_last_voice_at -= config.VAD_SILENCE_S + 1.0
+    await bridge._vad_segment_end_if_due(ws)
+    # Transcript saw the buffered speech...
+    assert len(fake_transcribe["calls"]) == 1
+    pcm, rate = fake_transcribe["calls"][0]
+    assert rate == vp.AUDIO_IN_RATE and len(pcm) > 0
+    await _drive_turns(bridge)
+    events = _sent_json(ws)
+    types_ = [e["type"] for e in events]
+    # user_text (what the server heard) -> speaker (verify) -> jarvis_text -> turn_complete
+    assert types_[0] == "user_text"
+    assert events[0]["text"] == "merhaba"
+    assert "jarvis_text" in types_ and "turn_complete" in types_
+    assert bridge._vad_open is False
+
+
+@pytest.mark.asyncio
+async def test_v3_silence_only_never_opens_and_never_transcribes(fake_transcribe):
+    ws = FakeWS([])
+    bridge = _armed_v3(VoiceBridge(FakeTextRunner(), _StatelessSessions(),
+                                   speaker_service=object()))
+    bridge._receive_pcm(_silent_pcm())
+    bridge._receive_pcm(_silent_pcm())
+    bridge._vad_last_voice_at -= config.VAD_SILENCE_S + 1.0
+    await bridge._vad_segment_end_if_due(ws)
+    assert fake_transcribe["calls"] == []
+    assert bridge._vad_open is False
+
+
+@pytest.mark.asyncio
+async def test_v3_an_empty_transcript_is_logged_and_spawns_no_turn(fake_transcribe, caplog):
+    """Room noise crossed the RMS floor but holds no speech: the model answers
+    "" per its prompt contract -- that is a non-event, never an error frame."""
+    fake_transcribe["result"] = ""
+    ws = FakeWS([])
+    bridge = _armed_v3(VoiceBridge(FakeTextRunner(), _StatelessSessions(),
+                                   speaker_service=object()))
+    bridge._receive_pcm(_loud_pcm())
+    bridge._vad_last_voice_at -= config.VAD_SILENCE_S + 1.0
+    await bridge._vad_segment_end_if_due(ws)
+    await _drive_turns(bridge)
+    assert _sent_json(ws) == []
+    assert "empty transcript" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_v3_stt_failure_surfaces_an_error_frame_and_listens_on(fake_transcribe):
+    fake_transcribe["exc"] = vertex_stt.VertexSttError("vertex down")
+    ws = FakeWS([])
+    bridge = _armed_v3(VoiceBridge(FakeTextRunner(), _StatelessSessions(),
+                                   speaker_service=object()))
+    bridge._receive_pcm(_loud_pcm())
+    bridge._vad_last_voice_at -= config.VAD_SILENCE_S + 1.0
+    await bridge._vad_segment_end_if_due(ws)
+    events = _sent_json(ws)
+    assert [e["type"] for e in events] == ["error"]
+    # The bridge recovers for the NEXT utterance: buffer drained, VAD re-arms.
+    assert bridge._vad_open is False
+    assert len(bridge._utterance) == 0
+    fake_transcribe["exc"] = None
+    bridge._receive_pcm(_loud_pcm())
+    bridge._vad_last_voice_at -= config.VAD_SILENCE_S + 1.0
+    await bridge._vad_segment_end_if_due(ws)
+    await _drive_turns(bridge)
+    types_ = [e["type"] for e in _sent_json(ws)]
+    assert "jarvis_text" in types_
+
+
+@pytest.mark.asyncio
+async def test_v3_onset_trims_the_inter_turn_noise_off_the_buffer(fake_transcribe):
+    """v1 speech_start trim, server-side: audio buffered BEFORE the voice
+    onset (room noise collected while idle) must not precede the utterance
+    the VAD hands to the transcriber -- same reason speaker.embed must not
+    average it into the identity embedding."""
+    ws = FakeWS([])
+    bridge = _armed_v3(VoiceBridge(FakeTextRunner(), _StatelessSessions(),
+                                   speaker_service=object()))
+    bridge._utterance.extend(_silent_pcm(config.SPEAKER_BARGE_IN_ONSET_BYTES * 3))
+    bridge._receive_pcm(_loud_pcm())
+    bridge._vad_last_voice_at -= config.VAD_SILENCE_S + 1.0
+    await bridge._vad_segment_end_if_due(ws)
+    pcm, _ = fake_transcribe["calls"][0]
+    # Onset kept at most the onset window + the voiced frames, not 3x the window.
+    assert len(pcm) <= config.SPEAKER_BARGE_IN_ONSET_BYTES + 2 * 3200
+
+
+@pytest.mark.asyncio
+async def test_v3_proto2_never_feeds_the_vad(fake_transcribe):
+    """Backward compatibility: a proto 2 bridge (device STT) must not grow a
+    server-side second ear -- the client's user_text frames stay the only
+    boundary, and loud PCM only ever fills the speaker-ID buffer."""
+    ws = FakeWS([])
+    bridge = _armed(VoiceBridge(FakeTextRunner(), _StatelessSessions(),
+                                speaker_service=object()))
+    assert bridge.proto == 2
+    bridge._receive_pcm(_loud_pcm())
+    assert bridge._vad_open is False
+    assert fake_transcribe["calls"] == []
