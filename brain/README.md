@@ -3,6 +3,171 @@
 FastAPI backend for JARVIS: `/api/chat`, `/api/history`, and the voice
 gateway, backed by Firestore for persistent memory and chat transcripts.
 
+## Harness management (2026-09-24)
+
+The [current plan](../docs/2026-09-24-harness-yonetim-plani.md) uses JARVIS as
+a durable, scale-to-zero control plane. The target PC manager is Hermes after
+the PC is woken and auto-login completes. Hermes should prefer terminal tools
+and use computer control when a task requires the desktop. Google's existing
+subscription is the required model budget. Codex CLI was useful for a local
+handoff proof but cannot be a standing dependency. There is no Python adapter
+per terminal tool. Hermes autostart, its Google subscription-backed runtime
+and desktop control still require end-to-end verification.
+
+The single `app.terminal_worker` module runs a trusted manager command template
+with optional subscription-login preflight, process and output limits, model
+API key environment stripping, and a caller-supplied outcome verifier. A live
+read-only Codex run through this generic boundary executed `command -v agy`
+and `agy --version` (1.2.9) and read an independent marker file; the JSONL
+command events and marker were verified. A second live run let Codex invoke
+`agy -p` through its terminal using the existing Google login; the `agy` JSON
+reply matched the requested marker and the command exited zero. This required
+network access in a temporary workspace-write sandbox because the read-only
+sandbox blocked `agy`'s local socket. The common task prompt and JSON
+result schema in `app/manager_instructions.md` and `app/task_result.schema.json`
+also completed a live read-only Codex task with two evidence entries and an
+independent verifier. The PC connector maps manager results into the durable
+ledger and leaves ambiguous delivery unresolved for inspection. The cloud
+handoff still requires end-to-end verification.
+
+Only the existing Google subscription quota is a reliable long-term budget.
+No AI Studio API key or separately billed model API is used. The existing
+`/api/chat` runs the ADK JARVIS agent; it is not a Hermes model provider.
+`app.hermes_model_api` adds a separate authenticated OpenAI chat-completions
+boundary that preserves Hermes's messages and tool calls. The thin
+`app.harness_control:app` now includes that route. Its intended local upstream
+is the **already running CLIProxyAPI sidecar** on `http://localhost:8317`;
+the existing `cliproxy-api-key` is the proxy credential, not an AI Studio key.
+Set `JARVIS_HERMES_TOKEN` for Hermes, `JARVIS_HERMES_UPSTREAM_BASE_URL` to
+`http://localhost:8317`, `JARVIS_HERMES_UPSTREAM_KEY` from
+`cliproxy-api-key`, and `JARVIS_HERMES_UPSTREAM_MODEL` to an available proxy
+model. The route remains closed without configuration. The live JARVIS brain
+already uses this proxy through Gemini `/v1beta`; the Hermes OpenAI route is
+locally contract-tested but its real proxy tool turn and deployment are still
+unverified. No AI Studio API key is needed for this route.
+
+The new `app.harness_tasks` module records tasks in `harness_tasks_v1`, separate
+from the legacy Scheduler collection. It deduplicates source events and
+prevents a second automatic dispatch after a task is claimed. The PC/cloud
+handoff API and PC connector have local contract tests; real Firestore execution
+and deployment remain unverified. No new service or model credential has been deployed.
+
+### Control API and PC connector (local implementation)
+
+`app.harness_control:app` is a separate, lightweight FastAPI app. Its ingest
+token may create a task; its worker token may read, claim and report tasks.
+`JARVIS_OWNER_ID`, `JARVIS_INGEST_TOKEN` and `JARVIS_WORKER_TOKEN` are required
+for real operation. The API records tasks and returns results; it runs no model.
+Build its image from `brain/` with
+`docker build -f app/Dockerfile.harness-control .`. The image has not been
+deployed. Configure Cloud Run minimum instances as zero and use a service
+identity permitted to access only the needed Firestore database. Keep the two
+tokens separate and outside the image and repository.
+
+The [control deployment template](deploy/jarvis-control.template.yaml) reuses
+the **existing** `jarvis-llm-proxy:v7.2.111` sidecar image and its
+`cliproxy-oauth-antigravity` / `cliproxy-api-key` secrets. It also declares
+separate Hermes, worker and ingest bearer secrets; those are new and have not
+been created. Replace the image, service identity and model placeholders after
+checking the proxy's model catalog, then test a real Hermes tool turn before
+shifting traffic from the old brain. The template has not been deployed.
+
+The thin app also exposes `POST /v1/chat/events` for Google Chat events.
+Configure the Chat app's HTTP endpoint URL as `JARVIS_CHAT_AUDIENCE`, set
+`JARVIS_CHAT_ALLOWED_USER` to the owner's canonical `users/{id}` resource name,
+and set `JARVIS_CHAT_MANAGER_KIND` to the installed PC manager kind (for example
+`hermes`). The saved JARVIS Chat app is a Google Workspace add-on: set
+`JARVIS_CHAT_EVENT_FORMAT=workspace_addon` and set
+`JARVIS_CHAT_SERVICE_ACCOUNT` to its per-project service account email shown in
+Chat API connection settings. The signed ID token must match that service
+account and the exact endpoint URL audience. For a classic Chat app, leave the
+event format unset; the service account defaults to
+`chat@system.gserviceaccount.com`. The sender's `user.name` or add-on
+`chat.user.name` must match the allowlist. A message creates one durable task keyed by `message.name`,
+stores the Chat space/thread reply route, and receives a short queue
+acknowledgement. Other interaction events do not create tasks. For a private
+Cloud Run endpoint, grant the matching Chat/add-on service account the Cloud Run Invoker
+role and configure HTTP endpoint URL as the authentication audience.
+The owner's plain `durum`/`status` message reads active task counts directly
+from Firestore and replies without starting a PC manager; PC power is reported
+as unknown until a separate power signal is connected.
+
+`app.chat_delivery.send_task_result` posts terminal task outcomes through Chat
+app authentication. The task outcome is persisted before delivery; if posting
+fails, the control API returns 503 so the PC connector retains and retries its
+journaled result. A stable Chat `requestId` derived from the task ID prevents
+duplicate results when a response is lost. Named-space results reply in the
+original thread. This Chat path has only
+synthetic local tests; it has not been tested with a real Workspace Chat app or
+deployed. Google Chat app setup and private testing require an eligible
+Workspace account under the current official documentation. The Cloud Run
+service identity must be the Chat app's configured service account with
+`chat.bot` access, and the app must be a member of the destination space.
+
+`python -m app.pc_connector --config /path/to/trusted-manager.json --base-url
+https://CONTROL_URL --interval 10` polls outward from the PC. The trusted local
+JSON holds `manager_kind`, `workdir`, `argv`, optional `preflight_argv` and
+`preflight_expected`, `stdin_prompt`, `stdin_json_template`, `stdout_result`,
+and `timeout_seconds`. The generic JSON input and NDJSON result selector were
+exercised with the official `agy` CLI, `--input-format stream-json`,
+`--output-format stream-json` and `--json-schema` using the current Google
+login: the CLI read a temporary marker, exited zero, returned a structured
+report, and an independent checker matched the marker file. This is a local
+proof, not a running PC service. The worker token is read from
+`JARVIS_WORKER_TOKEN` and removed from the
+manager subprocess environment. The SQLite journal defaults to
+`~/.local/state/jarvis/pc-launches.sqlite3` and prevents automatic re-launch
+after an uncertain result.
+
+For the target Hermes manager, use `"driver": "hermes_runs"` and
+`"manager_kind": "hermes"` in the trusted local JSON. The connector then
+submits to the local Hermes Runs API (default `http://127.0.0.1:8642`) and
+reads `HERMES_API_SERVER_KEY` from its environment; no per-tool adapter or
+`argv` is involved. Hermes must have its API server enabled and its own model
+configured to use JARVIS's provider route. The connector requires Hermes to
+advertise durable Runs idempotency for at least 24 hours. It records a request
+fingerprint and launch time; after a crash it can safely recover an identical
+run within 23 hours. Older, changed or legacy journal entries stay uncertain.
+The default completion policy remains `verified`: only a trusted local
+`verification.by_task_id` rule or an injected independent verifier can mark
+a task complete. For open-ended work, trusted PC configuration may set
+`"completion_policy": "agent_reported"`; a Hermes report with passing
+evidence then completes with `result.verification="agent_reported"` so the
+lower assurance is visible. User approval/resume is not yet wired.
+
+Minimal PC manager choice for open-ended requests (URL, keys and persistence
+are supplied separately):
+
+```json
+{"manager_kind":"hermes","driver":"hermes_runs","completion_policy":"agent_reported"}
+```
+
+For a local read-only rollout, the trusted manager configuration can use this
+CLI-neutral transport shape; replace the workspace/schema paths and configure
+AGY's own narrow tool permissions for the task:
+
+```json
+{
+  "manager_kind": "agy",
+  "workdir": "/absolute/path/to/workspace",
+  "argv": ["agy", "--input-format", "stream-json", "--output-format", "stream-json", "--json-schema", "/absolute/path/to/task_result.schema.json", "--mode", "plan", "--sandbox"],
+  "stdin_json_template": {"event": "user", "message": {"content": "{prompt}"}},
+  "stdout_result": {"event_field": "event", "event_value": "result", "payload_path": ["result", "structured_output"], "status_path": ["result", "status"], "success_value": "SUCCESS"},
+  "timeout_seconds": 180
+}
+```
+
+The CLI entrypoint defaults to independent verification. It deliberately
+records a manager's self-reported `completed` as `failed` with
+`verification_failed` until a trusted task verifier is supplied or the trusted
+PC configuration explicitly selects `agent_reported` mode. The local
+API ↔ connector integration test uses a marker file as independent proof and
+checks duplicate event delivery. A live local run also sent a task through the
+TestClient/FakeDB API and PC connector to the real Codex CLI; the marker file
+and terminal JSONL command event independently matched, and the task was
+recorded `completed` with one evidence item. Real Firestore and Cloud Run
+remain unverified, so this is a development boundary.
+
 ## Deploy
 
 The `messages` collection query in `app/messages.py` (`user_id` ==, `session_id`
@@ -24,6 +189,9 @@ still-building index makes `/api/history` fail with a Firestore
 `FAILED_PRECONDITION` (surfaced to clients as the generic 502 infra error).
 
 ## LLM proxy + yerel embedding + ses protokolü v2 (30 Temmuz 2026)
+
+This section documents the existing deployment and the CLIProxyAPI sidecar
+that the thin Hermes provider route is being wired to reuse.
 
 "GOOGLE_API_KEY'siz mimari": beyin artık AI Studio API anahtarıyla Gemini
 API'sine değil, abonelik-OAuth'lu yerel bir LLM proxy'sine (CLIProxyAPI)
@@ -70,8 +238,9 @@ konuşuyor; embedding yerel bir modelde çalışıyor; ses tarafında STT/TTS ci
   - `cliproxy-api-key` — proxy'nin kendi api-key'i; hem sidecar'a
     (`CLIPROXY_API_KEY`) hem brain konteynerine (`GOOGLE_API_KEY` olarak)
     verilir.
-  - `gemini-api-key` — eski AI Studio anahtarı; geri dönüş sigortası olarak
-    bir hafta saklı tutulur, sonra silinebilir.
+  - `gemini-api-key` — eski AI Studio anahtarı. 2026-09-24'te Secret Manager'da
+    etkin bir sürümü görüldü; değeri okunmadı. Kullanıcının yalnız abonelik
+    kotası kararı gereği yeni Hermes sağlayıcısında kullanılmayacak.
 - **Sidecar deploy akışı:** proxy imajı `brain/proxy/Dockerfile`'dan
   (`gcr.io/your-gcp-project/jarvis-llm-proxy:v7.2.111`); servis tanımları
   `brain/deploy/jarvis-brain.yaml` ve `brain/deploy/jarvis-voice.yaml`

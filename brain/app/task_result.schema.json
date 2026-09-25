@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "tools_used", "evidence", "next_action"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "waiting_user", "failed"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "tools_used": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["what", "check", "outcome"],
+        "properties": {
+          "what": {"type": "string"},
+          "check": {"type": "string"},
+          "outcome": {"type": "string", "enum": ["passed", "failed", "unknown"]}
+        }
+      }
+    },
+    "next_action": {"type": "string"}
+  }
+}

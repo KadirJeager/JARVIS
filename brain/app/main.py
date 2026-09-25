@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from . import antispoof, approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_challenge, voice_manage, voice_trust
+from . import antispoof, approvals, auth, config, conversations, device_tokens, events, fcm, guest_gate, hermes_model_api, messages, reminders, repo_watch, speaker, tool_registry, vitals, voice, voice_challenge, voice_manage, voice_trust
 from .agent import AGENT_NAME
 from .auth import require_google_user, require_scheduler, require_user
 
@@ -34,6 +34,7 @@ APP_NAME = "jarvis"
 app = FastAPI(title="JARVIS Brain")
 app.include_router(voice.router)
 app.include_router(voice_manage.router)
+app.include_router(hermes_model_api.router)
 
 
 @app.on_event("startup")
