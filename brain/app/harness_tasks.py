@@ -12,7 +12,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import Aborted, AlreadyExists
 from google.cloud import firestore
 
 
@@ -44,6 +44,13 @@ class TaskConflict(ValueError):
 
 class InvalidTransition(ValueError):
     """The requested state change is unsafe or outside the task lifecycle."""
+
+
+class LedgerBusy(ValueError):
+    """Concurrent writers exhausted Firestore's transaction retries.
+
+    Nothing was written by this call, so the caller may safely retry it.
+    """
 
 
 def _now() -> str:
@@ -139,7 +146,14 @@ def _change(db, key: str, decide) -> dict:
             record.update(updates)
         return record
 
-    return apply(db.transaction())
+    try:
+        return apply(db.transaction())
+    except ValueError as exc:
+        # Firestore wraps the last Aborted in a plain ValueError once its
+        # retries are spent; keep that apart from real validation errors.
+        if isinstance(exc.__cause__, Aborted):
+            raise LedgerBusy("task is busy; retry the request") from exc
+        raise
 
 
 def claim_dispatch(db, key: str, *, now_fn=_now) -> tuple[dict, bool]:

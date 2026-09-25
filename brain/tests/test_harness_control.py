@@ -196,3 +196,16 @@ def test_thin_control_app_exposes_hermes_model_boundary_without_adk(monkeypatch)
     assert seen[0][0] == "http://localhost:8317/v1/chat/completions"
     assert seen[0][1] == "Bearer proxy-secret"
     assert b'"model":"gemini-test-flash"' in seen[0][2]
+
+
+def test_busy_ledger_is_a_retryable_503(client, monkeypatch):
+    http, _ = client
+    key = http.post("/v1/tasks", json=_body("busy"), headers=_headers("ingest")).json()["task"]["task_id"]
+
+    def busy(*_args, **_kwargs):
+        raise ledger.LedgerBusy("task is busy; retry the request")
+
+    monkeypatch.setattr(ledger, "claim_dispatch", busy)
+    response = http.post(f"/v1/tasks/{key}/claim", headers=_headers("worker"))
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"

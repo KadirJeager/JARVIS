@@ -75,9 +75,21 @@ def test_lifecycle_and_terminal_finality(db):
 
 def test_concurrent_claims_dispatch_exactly_once(db):
     key = _create(db)[0]["task_id"]
+
+    def claim(_):
+        try:
+            return ledger.claim_dispatch(db, key)[1]
+        except ledger.LedgerBusy:
+            # Contention may exhaust Firestore's retries; that call wrote
+            # nothing and its caller retries later.
+            return "busy"
+
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda _: ledger.claim_dispatch(db, key)[1], range(8)))
-    assert results.count(True) == 1
+        results = list(pool.map(claim, range(8)))
+    assert results.count(True) <= 1
+    assert set(results) <= {True, False, "busy"}
+    # A later retry never dispatches a second time.
+    assert ledger.claim_dispatch(db, key)[1] is (True not in results)
     assert ledger.get(db, key)["delivery_attempts"] == 1
 
 

@@ -122,6 +122,9 @@ def create_app(*, db=None, owner: str | None = None,
     def ledger_error(exc: Exception):
         if isinstance(exc, KeyError):
             raise HTTPException(status_code=404, detail="task not found") from exc
+        if isinstance(exc, ledger.LedgerBusy):
+            raise HTTPException(status_code=503, detail=str(exc),
+                                headers={"Retry-After": "1"}) from exc
         if isinstance(exc, (ledger.TaskConflict, ledger.InvalidTransition)):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if isinstance(exc, ValueError):

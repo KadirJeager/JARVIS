@@ -210,3 +210,19 @@ def test_validation(db):
     with pytest.raises(ValueError):
         ledger.create_once(db, owner="kadir", source="chat", event_id="e",
                            delivery_target={"device": "pc"}, envelope={"goal": "x"})
+
+
+def test_exhausted_transaction_retries_become_ledger_busy(db, monkeypatch):
+    from google.api_core.exceptions import Aborted
+
+    key = _create(db)[0]["task_id"]
+
+    def contended(callback):
+        def run(tx):
+            raise ValueError("Failed to commit transaction in 5 attempts.") from Aborted("contention")
+        return run
+
+    monkeypatch.setattr(ledger.firestore, "transactional", contended)
+    with pytest.raises(ledger.LedgerBusy):
+        ledger.claim_dispatch(db, key)
+    assert ledger.get(db, key)["status"] == ledger.QUEUED
