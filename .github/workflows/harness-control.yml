@@ -1,0 +1,74 @@
+name: harness-control
+
+on:
+  push:
+    paths:
+      - "brain/app/**"
+      - "brain/tests/**"
+      - "brain/requirements-control.txt"
+      - ".github/workflows/harness-control.yml"
+  pull_request:
+    paths:
+      - "brain/app/**"
+      - "brain/tests/**"
+      - "brain/requirements-control.txt"
+      - ".github/workflows/harness-control.yml"
+
+permissions:
+  contents: read
+
+env:
+  FIRESTORE_EMULATOR_HOST: 127.0.0.1:8085
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: brain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install thin control dependencies
+        run: pip install -r requirements-control.txt "pytest>=8.0" "pytest-asyncio>=0.23"
+      - name: Start Firestore emulator
+        run: |
+          npx -y firebase-tools@13 setup:emulators:firestore
+          jar=$(ls ~/.cache/firebase/emulators/cloud-firestore-emulator-*.jar | head -1)
+          nohup java -jar "$jar" --host=127.0.0.1 --port=8085 > /tmp/firestore.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://$FIRESTORE_EMULATOR_HOST >/dev/null && exit 0; sleep 1; done
+          cat /tmp/firestore.log; exit 1
+      - name: Harness tests (FakeDB and Firestore emulator)
+        run: >
+          python -m pytest -q
+          tests/test_harness_*.py tests/test_hermes_*.py tests/test_pc_connector.py
+          tests/test_task_verification.py tests/test_terminal_worker.py
+          tests/test_tuya_power.py tests/test_chat_delivery.py
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build thin control image
+        run: docker build -f brain/app/Dockerfile.harness-control -t jarvis-control:ci brain
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name control -p 18080:8080 \
+            -e JARVIS_OWNER_ID=ci -e JARVIS_WORKER_TOKEN=worker -e JARVIS_INGEST_TOKEN=ingest \
+            jarvis-control:ci
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:18080/v1/models && break; sleep 1; done
+          # Unconfigured provider and Chat routes fail closed; bad worker token is refused.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/v1/models)" = 503
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/chat/events)" = 503
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' http://127.0.0.1:18080/v1/tasks/queued)" = 401
+      - name: Container logs
+        if: always()
+        run: docker logs control || true
+      - name: Report image size
+        run: docker images jarvis-control:ci --format 'jarvis-control image size {{.Size}}'
