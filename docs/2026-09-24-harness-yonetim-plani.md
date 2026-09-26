@@ -1,5 +1,7 @@
 # JARVIS — harness yönetimi planı
 
+> **Yerini yeni mimariye bıraktı — 2026-09-25:** Güncel ürün ve kabul kapıları [modüler kişisel asistan mimarisindedir](2026-09-25-moduler-kisisel-asistan-mimarisi.md). Bu belge önceki kararları ve tarihli deneyleri korur. Hermes/Chat/Gemini zorunluluğu, bütün kullanıcılar için API yasağı ve PWA/ses yeteneklerini kaldırma kararı yeni hedef değildir. Aşağıdaki “güncel/hedef/kaldırılacak” ifadeleri kendi tarihindeki yönü anlatır; yeni uygulama talimatı olarak kullanılmaz.
+
 Tarih: 2026-09-24
 
 Durum: Uygulama planı; yerel Codex → `agy` ve PC bağlayıcısı denemeleri doğrulandı. Kullanıcının güncel hedef akışı Hermes'in açılıştan sonra yerel yönetici olmasıdır; PC uyandırma, Hermes otomatik başlatma ve masaüstü kullanımı henüz uçtan uca doğrulanmadı.

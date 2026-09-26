@@ -1,5 +1,7 @@
 # JARVIS sadeleşiyor
 
+> **Tarihsel yön:** 25 Eylül kullanıcı notlarıyla yerini [modüler kişisel asistan mimarisine](2026-09-25-moduler-kisisel-asistan-mimarisi.md) bıraktı. Zorunlu Google Chat/Hermes ve PWA'yı kapsamdan çıkarma varsayımları güncel değildir. Aşağıdaki metin önceki değerlendirmeyi korur.
+
 Tarih: 2026-09-23
 
 Durum: Kullanıcının ileride projeye dönerken ele alınmak üzere kaydedilmesini istediği mimari yön ve değerlendirme. Bu belge kurulum veya geçiş yapıldığı anlamına gelmez. Uygulamaya sonraki proje çalışmasında başlanacak; entegrasyon ayrıntıları o zaman doğrulanacak.

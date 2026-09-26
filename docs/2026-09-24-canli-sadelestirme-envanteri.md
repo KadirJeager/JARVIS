@@ -1,5 +1,7 @@
 # JARVIS canlı sadeleştirme envanteri
 
+> **Tarihsel envanter — 2026-09-25:** Yeni karar kaynağı [modüler kişisel asistan mimarisidir](2026-09-25-moduler-kisisel-asistan-mimarisi.md). Aşağıdaki eski kaldırma matrisi güncel uygulama emri değildir: PWA paneli, ses ve görüşme yetenekleri kapsamda kalır; eski uygulamaları parça bazında değerlendirilecektir. Canlı gözlemler aşağıdaki tarihlere aittir, bu yeni değerlendirmede tekrar doğrulanmadı.
+
 Tarih: 2026-09-24. Kaynaklar: Google Cloud Console'da salt okunur kontrol, mevcut depo kodu ve [harness yönetimi planı](2026-09-24-harness-yonetim-plani.md). Bu belge canlıda yapılmış değişiklik iddiası değildir.
 
 ## Bugünkü dağıtım

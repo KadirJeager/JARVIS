@@ -1,0 +1,52 @@
+{
+  "started_at": "2026-09-25T21:58:35.449430+00:00",
+  "runtime": "2.50.0",
+  "process_id": 140616,
+  "mode": "resume",
+  "protocol": "google",
+  "selection": [],
+  "tools": [],
+  "wire_requests": [
+    {
+      "tools": [
+        "fetch_package_release",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools",
+        "fetch_package_release"
+      ],
+      "signed_parts": 3
+    }
+  ],
+  "catalog": [
+    "gemini-3-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-pro-agent",
+    "gemini-3.1-pro-low",
+    "gpt-oss-120b-medium",
+    "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6",
+    "gemini-3.6-flash-high",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash-high",
+    "gemini-3.8-flash-high"
+  ],
+  "model": "gemini-3.8-flash-high",
+  "answer": "Based on the previous tool result:\n\n- **Package Version:** `2.50.0`\n- **Source URL:** `https://pypi.org/pypi/pydantic-ai-slim/json`\n- **Response SHA256:** `7d02721f4a3ad1f8e680ffeb262899b020d7ee5e0baca966b82a180a04942405`",
+  "usage": {
+    "requests": 1,
+    "input_tokens": 688,
+    "output_tokens": 266,
+    "tool_calls": 0
+  },
+  "history_messages": 6,
+  "checks": {
+    "history_loaded": true,
+    "saved_tool_result_sent": true,
+    "no_new_tool_execution": true,
+    "answer_matches_saved_result": true
+  },
+  "status": "history_resume_passed"
+}

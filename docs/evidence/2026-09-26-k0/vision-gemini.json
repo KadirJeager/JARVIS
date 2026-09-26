@@ -1,0 +1,37 @@
+{
+  "started_at": "2026-09-25T22:10:32.409972+00:00",
+  "runtime": "2.50.0",
+  "process_id": 151478,
+  "mode": "vision",
+  "protocol": "google",
+  "selection": [],
+  "tools": [],
+  "wire_requests": [
+    {
+      "tools": [
+        "search_tools"
+      ],
+      "tool_results": [],
+      "signed_parts": 0,
+      "media_parts": 0
+    }
+  ],
+  "catalog": [
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash-high",
+    "gemini-3.8-flash-high",
+    "gemini-3-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-pro-agent",
+    "gemini-3.1-pro-low",
+    "gpt-oss-120b-medium",
+    "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6",
+    "gemini-3.6-flash-high",
+    "gemini-3.1-flash-image"
+  ],
+  "model": "gemini-3.8-flash-high",
+  "status": "error",
+  "error_type": "ModelHTTPError",
+  "http_status": 403
+}

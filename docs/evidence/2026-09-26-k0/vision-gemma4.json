@@ -1,0 +1,103 @@
+{
+  "started_at": "2026-09-25T22:14:12.072934+00:00",
+  "runtime": "2.50.0",
+  "process_id": 160818,
+  "mode": "vision",
+  "protocol": "openai",
+  "selection": [
+    {
+      "queries": [
+        "get image",
+        "view image",
+        "read image",
+        "image analysis"
+      ],
+      "candidates": [
+        "read_attached_image",
+        "fetch_package_release",
+        "get_utc_time"
+      ],
+      "selected": "read_attached_image",
+      "model": "jev-1.13.0",
+      "confidence": {
+        "response": 0.98
+      },
+      "usage": {
+        "requests": 1,
+        "input_tokens": 441,
+        "output_tokens": 58,
+        "tool_calls": 0
+      }
+    }
+  ],
+  "tools": [
+    {
+      "tool": "read_attached_image",
+      "result": {
+        "media_type": "image/png",
+        "bytes": 7853,
+        "sha256": "15dc9e964b7adfe1dd2b899d5ffeb7fa1aea4f06279b43584b7dc3d52b62d12c"
+      }
+    }
+  ],
+  "wire_requests": [
+    {
+      "tools": [
+        "search_tools"
+      ],
+      "tool_results": [],
+      "signed_parts": 0,
+      "media_parts": 0
+    },
+    {
+      "tools": [
+        "read_attached_image",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools"
+      ],
+      "signed_parts": 0,
+      "media_parts": 0
+    },
+    {
+      "tools": [
+        "read_attached_image",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools",
+        "read_attached_image"
+      ],
+      "signed_parts": 0,
+      "media_parts": 1
+    }
+  ],
+  "catalog": [
+    "google/gemma-4-26b-a4b-qat",
+    "unsloth/qwen3.8-27b-gguf/qwen3.8-27b-q4_0.gguf",
+    "qwen3.8-27b@iq2_s",
+    "unsloth/qwen3.8-27b-gguf/mtp-qwen3.8-27b-q4_0.gguf",
+    "prism-ml/bonsai-27b",
+    "text-embedding-nomic-embed-text-v1.5"
+  ],
+  "model": "google/gemma-4-26b-a4b-qat",
+  "answer": "XZ9W-UJ5Y",
+  "usage": {
+    "requests": 3,
+    "input_tokens": 1044,
+    "output_tokens": 389,
+    "tool_calls": 2
+  },
+  "expected_code": "XZ9W-UJ5Y",
+  "checks": {
+    "initial_tools_deferred": true,
+    "jev_selected_real_tool": true,
+    "model_continued_after_tool": true,
+    "image_tool_executed": true,
+    "image_sent_after_tool": true,
+    "no_image_before_tool": true,
+    "answer_contains_code": true
+  },
+  "status": "tool_round_trip_passed"
+}

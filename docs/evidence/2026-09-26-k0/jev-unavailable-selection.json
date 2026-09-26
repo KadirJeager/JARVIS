@@ -1,0 +1,32 @@
+{
+  "started_at": "2026-09-25T21:36:58.141970+00:00",
+  "runtime": "2.50.0",
+  "mode": "select",
+  "protocol": "google",
+  "selection": [
+    {
+      "queries": [
+        "Retrieve the image digest of a deployed Google Cloud Run service from Google Cloud."
+      ],
+      "candidates": [
+        "fetch_package_release",
+        "get_utc_time"
+      ],
+      "selected": "no_matching_tool",
+      "model": "jev-1.13.0",
+      "confidence": {
+        "response": 1.0
+      },
+      "usage": {
+        "requests": 1,
+        "input_tokens": 408,
+        "output_tokens": 47,
+        "tool_calls": 0
+      }
+    }
+  ],
+  "tools": [],
+  "wire_requests": [],
+  "selected_tools": [],
+  "status": "selection_only"
+}

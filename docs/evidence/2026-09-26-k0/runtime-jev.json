@@ -1,0 +1,68 @@
+{
+  "http_status": 200,
+  "request": {
+    "model": "jev-latest",
+    "state": {
+      "goal": "Choose the first ready-made Python agent runtime to experimentally validate, not the final production architecture. Modular personal assistant; few core tools, deferred discovery, configurable model providers, multimodal content, persistent conversation plus event-driven durable continuation. No custom new framework or upstream patch. TypeSafe Jev handles semantic choices.",
+      "evidence": {
+        "pydantic_ai": {
+          "version": "2.50.0",
+          "deferred_tools": "FunctionToolset.defer_loading and automatic ToolSearch; custom search callable supported",
+          "decisions": "native TypeSafeModel integration",
+          "persistence": "message history can be stored separately; durable engines or backend builder available; cloud recovery not yet tested",
+          "limits": "proxy compatibility and real tool round trip untested",
+          "sources": [
+            "https://pydantic.dev/docs/ai/capabilities/tool-search/",
+            "https://pydantic.dev/docs/ai/models/typesafe/",
+            "https://pydantic.dev/docs/ai/capabilities/durable_execution/overview/"
+          ]
+        },
+        "langgraph": {
+          "version": "1.2.12",
+          "persistence": "persistent checkpoints for thread state, stores for long term memory; resume and fault tolerance documented",
+          "limits": "deferred tool integration and model/proxy compatibility not tested in this task",
+          "source": "https://docs.langchain.com/oss/python/langgraph/persistence"
+        },
+        "existing_adk": {
+          "installed_project_constraint": ">=1.16,<2.0",
+          "latest_registry_version": "2.10.0",
+          "existing_project": "agent eagerly loads all tools; current model configuration assumes Google; heavy embeddings share package; redesign required, not necessarily inherent SDK limitation",
+          "limits": "new modular requirements not tested"
+        }
+      },
+      "rule": "Unknown is not unsupported. Choose which small live spike should run first based only on evidence; do not declare production readiness."
+    },
+    "questions": {
+      "first_spike": {
+        "type": "choice",
+        "instructions": "Which ready-made runtime should be tested first for the goal, minimizing new framework code while addressing deferred tools and TypeSafe decisions?",
+        "criteria": {
+          "pydantic_ai": "Use the documented deferred tools and TypeSafe integration, test the real proxy and persistence boundaries.",
+          "langgraph": "Start with graph checkpointing and compose the necessary tool selection and model integrations.",
+          "existing_adk": "Start by upgrading and restructuring the existing ADK-based code.",
+          "insufficient_evidence": "No candidate has enough evidence even to choose a first bounded experimental spike."
+        }
+      }
+    }
+  },
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "first_spike": {
+        "type": "choice",
+        "choice": "pydantic_ai",
+        "confidence": 1.0,
+        "probabilities": {
+          "langgraph": 0.0,
+          "insufficient_evidence": 0.0,
+          "pydantic_ai": 1.0,
+          "existing_adk": 0.0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 892,
+      "output_tokens": 64
+    }
+  }
+}

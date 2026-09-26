@@ -1,0 +1,102 @@
+{
+  "started_at": "2026-09-25T22:15:18.987137+00:00",
+  "runtime": "2.50.0",
+  "process_id": 162188,
+  "mode": "vision",
+  "protocol": "openai",
+  "selection": [
+    {
+      "queries": [
+        "image",
+        "attached file",
+        "view attachment"
+      ],
+      "candidates": [
+        "read_attached_image",
+        "fetch_package_release",
+        "get_utc_time"
+      ],
+      "selected": "read_attached_image",
+      "model": "jev-1.13.0",
+      "confidence": {
+        "response": 0.99
+      },
+      "usage": {
+        "requests": 1,
+        "input_tokens": 436,
+        "output_tokens": 58,
+        "tool_calls": 0
+      }
+    }
+  ],
+  "tools": [
+    {
+      "tool": "read_attached_image",
+      "result": {
+        "media_type": "image/png",
+        "bytes": 8154,
+        "sha256": "47d3bae88b750082089772051f8c7db78281e27f01c8d169984a241ab3e2386c"
+      }
+    }
+  ],
+  "wire_requests": [
+    {
+      "tools": [
+        "search_tools"
+      ],
+      "tool_results": [],
+      "signed_parts": 0,
+      "media_parts": 0
+    },
+    {
+      "tools": [
+        "read_attached_image",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools"
+      ],
+      "signed_parts": 0,
+      "media_parts": 0
+    },
+    {
+      "tools": [
+        "read_attached_image",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools",
+        "read_attached_image"
+      ],
+      "signed_parts": 0,
+      "media_parts": 1
+    }
+  ],
+  "catalog": [
+    "qwen3.8-27b@iq2_s",
+    "unsloth/qwen3.8-27b-gguf/qwen3.8-27b-q4_0.gguf",
+    "unsloth/qwen3.8-27b-gguf/mtp-qwen3.8-27b-q4_0.gguf",
+    "google/gemma-4-26b-a4b-qat",
+    "prism-ml/bonsai-27b",
+    "text-embedding-nomic-embed-text-v1.5"
+  ],
+  "model": "qwen3.8-27b@iq2_s",
+  "answer": "The verification code printed in the image is: **FC8Q-ZC8B**",
+  "usage": {
+    "requests": 3,
+    "input_tokens": 2002,
+    "output_tokens": 198,
+    "tool_calls": 2
+  },
+  "expected_code": "FC8Q-ZC9B",
+  "checks": {
+    "initial_tools_deferred": true,
+    "jev_selected_real_tool": true,
+    "model_continued_after_tool": true,
+    "image_tool_executed": true,
+    "image_sent_after_tool": true,
+    "no_image_before_tool": true,
+    "answer_contains_code": false
+  },
+  "status": "acceptance_failed"
+}

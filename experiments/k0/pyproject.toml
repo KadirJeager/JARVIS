@@ -1,0 +1,8 @@
+[project]
+name = "jarvis-k0-live-probe"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pydantic-ai-slim[google,openai,typesafe]==2.50.0"]
+
+[tool.uv]
+package = false

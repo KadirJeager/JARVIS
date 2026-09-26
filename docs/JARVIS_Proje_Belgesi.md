@@ -1,6 +1,6 @@
 # JARVIS — Kişisel Otonom Asistan Projesi
 
-> ⛔ **BAYAT KOPYA (damgalandı 6 Ağu 2026):** Bu dosya 23 Tem 2026 sürümünde kalmış bir kopyadır. Kanonik ve güncel North Star repo kökündeki **`/JARVIS_Proje_Belgesi.md`** dosyasıdır (31 Tem revizyonu + sonrası). Planlama yaparken BU dosyayı okuma; kökteki belgeyi esas al. Silinmiyor çünkü ilk niyetin kaydı değerlidir.
+> **Tarihsel North Star:** Bu dosya 23 Temmuz 2026 niyetini korur. Güncel ürün ve mimari kaynağı [25 Eylül modüler kişisel asistan mimarisidir](2026-09-25-moduler-kisisel-asistan-mimarisi.md). Buradaki teknoloji, kanal ve telefon tercihleri yeni görevler için zorunluluk değildir.
 
 **Belge tarihi:** 23 Temmuz 2026
 **Revizyon:** 23 Temmuz 2026 — SIP/dış telefon hizmetleri çıkarıldı (GSM köprüsü + telesekreter modeli), Tailscale çıkarıldı (GCP-yerli connector deseni), Telegram kanal olmaktan çıkıp Kadir adına kullanılan araca dönüştü (uygulama ana kanal — Gemini benzeri tek yüzey), kademeli ajan fabrikası eklendi, bulut-öncelikli yerleşim ilkesi (İlke 12) eklendi. Nihai amaç "ikame" olarak netlendi (§1): görev döngüsü (§7.6), araç kazanım merdiveni (§8.5) ve Geliştirici ajanı eklendi; fabrika, ikame ufkunun ölçeklenme motoru olarak yeniden gerekçelendirildi.

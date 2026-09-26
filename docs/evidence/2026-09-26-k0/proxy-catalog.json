@@ -1,0 +1,25 @@
+{
+  "started_at": "2026-09-25T21:58:07.110526+00:00",
+  "runtime": "2.50.0",
+  "process_id": 139799,
+  "mode": "catalog",
+  "protocol": "google",
+  "selection": [],
+  "tools": [],
+  "wire_requests": [],
+  "catalog": [
+    "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6",
+    "gemini-3.6-flash-high",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash-high",
+    "gemini-3.8-flash-high",
+    "gemini-3-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-pro-agent",
+    "gemini-3.1-pro-low",
+    "gpt-oss-120b-medium"
+  ],
+  "status": "catalog_only"
+}

@@ -1,0 +1,103 @@
+{
+  "started_at": "2026-09-25T22:15:43.096172+00:00",
+  "runtime": "2.50.0",
+  "process_id": 162721,
+  "mode": "vision",
+  "protocol": "openai",
+  "selection": [
+    {
+      "queries": [
+        "vision",
+        "image",
+        "text recognition",
+        "OCR"
+      ],
+      "candidates": [
+        "read_attached_image",
+        "fetch_package_release",
+        "get_utc_time"
+      ],
+      "selected": "read_attached_image",
+      "model": "jev-1.13.0",
+      "confidence": {
+        "response": 0.87
+      },
+      "usage": {
+        "requests": 1,
+        "input_tokens": 438,
+        "output_tokens": 58,
+        "tool_calls": 0
+      }
+    }
+  ],
+  "tools": [
+    {
+      "tool": "read_attached_image",
+      "result": {
+        "media_type": "image/png",
+        "bytes": 6644,
+        "sha256": "c092ab88d8f4db24ffaf7844c72de08c7b57db5171397d822d1b444fb26f19dd"
+      }
+    }
+  ],
+  "wire_requests": [
+    {
+      "tools": [
+        "search_tools"
+      ],
+      "tool_results": [],
+      "signed_parts": 0,
+      "media_parts": 0
+    },
+    {
+      "tools": [
+        "read_attached_image",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools"
+      ],
+      "signed_parts": 0,
+      "media_parts": 0
+    },
+    {
+      "tools": [
+        "read_attached_image",
+        "search_tools"
+      ],
+      "tool_results": [
+        "search_tools",
+        "read_attached_image"
+      ],
+      "signed_parts": 0,
+      "media_parts": 1
+    }
+  ],
+  "catalog": [
+    "prism-ml/bonsai-27b",
+    "unsloth/qwen3.8-27b-gguf/qwen3.8-27b-q4_0.gguf",
+    "qwen3.8-27b@iq2_s",
+    "unsloth/qwen3.8-27b-gguf/mtp-qwen3.8-27b-q4_0.gguf",
+    "google/gemma-4-26b-a4b-qat",
+    "text-embedding-nomic-embed-text-v1.5"
+  ],
+  "model": "prism-ml/bonsai-27b",
+  "answer": "TK4C - 2VGJ",
+  "usage": {
+    "requests": 3,
+    "input_tokens": 2265,
+    "output_tokens": 882,
+    "tool_calls": 2
+  },
+  "expected_code": "TK4C-2VGJ",
+  "checks": {
+    "initial_tools_deferred": true,
+    "jev_selected_real_tool": true,
+    "model_continued_after_tool": true,
+    "image_tool_executed": true,
+    "image_sent_after_tool": true,
+    "no_image_before_tool": true,
+    "answer_contains_code": false
+  },
+  "status": "acceptance_failed"
+}
