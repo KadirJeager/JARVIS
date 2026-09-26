@@ -297,3 +297,30 @@ class FirestoreStepStore:
             filter=FieldFilter('status', '==', 'started')
         )
         return [_tool_effect_from_dict(snapshot.to_dict() or {}) async for snapshot in query.stream()]
+
+    # -- deletion -----------------------------------------------------------
+
+    async def delete_run(self, *, run_id: str) -> None:
+        """Delete everything stored for `run_id`: record, events, snapshots, keys, effects and counters.
+
+        Not part of the `StepStore` protocol; it serves the owner's request to
+        forget a conversation. Externalized media is content-addressed and may
+        be shared with other runs, so it is not deleted here.
+        """
+        references: list[Any] = [
+            self._runs.document(_doc_id(run_id)),
+            self._counters.document(_doc_id('events', run_id)),
+            self._counters.document(_doc_id('snapshots', run_id)),
+        ]
+        by_run = FieldFilter('run_id', '==', run_id)
+        for collection in (self._events, self._snapshot_keys, self._tool_effects):
+            references += [doc.reference async for doc in collection.where(filter=by_run).select([]).stream()]
+        async for doc in self._snapshots.where(filter=by_run).select([]).stream():
+            references += [part.reference async for part in doc.reference.collection('parts').select([]).stream()]
+            references.append(doc.reference)
+        # Firestore caps one batched write at 500 operations.
+        for start in range(0, len(references), 500):
+            batch = self._client.batch()
+            for reference in references[start:start + 500]:
+                batch.delete(reference)
+            await batch.commit()

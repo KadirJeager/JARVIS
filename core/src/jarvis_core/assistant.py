@@ -25,13 +25,16 @@ from pydantic_ai.providers.typesafe import TypeSafeProvider
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory._toolset import MAIN_FILENAME  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from jarvis_core.firestore_stores import FirestoreMemoryStore
 from jarvis_core.secrets import SecretResolver
-from jarvis_core.settings import AssistantSettings, EndpointConnection, ModelConnection
+from jarvis_core.settings import AssistantSettings, EndpointConnection, ModelConnection, ToolSelection
 
 AGENT_NAME = 'jarvis'
+# The vault file Harness `Memory` injects into every turn.
+MAIN_MEMORY_FILE = MAIN_FILENAME
 
 
 def memory_scope(uid: str) -> str:
@@ -114,10 +117,25 @@ async def build_agent(
         capabilities=[
             search,
             WebFetch(native=False, local=True, defer_loading=True),
-            Memory(memory_store, namespace=uid, agent_name=AGENT_NAME),
+            memory_capability(memory_store, uid),
             StepPersistence(store=step_store, run_id=run_id, agent_name=AGENT_NAME),
         ],
     )
+
+
+def memory_capability(store: FirestoreMemoryStore, uid: str) -> Memory[None]:
+    return Memory(store, namespace=uid, agent_name=AGENT_NAME)
+
+
+def capability_manifest(settings: AssistantSettings | None) -> list[dict[str, str]]:
+    """What `build_agent` gives a turn, for the owner's panel; a test keeps the two in step."""
+    strategy = settings.tool_selection.strategy if settings is not None else ToolSelection().strategy
+    return [
+        {'id': 'memory', 'loading': 'core', 'tools': 'read_memory, write_memory, delete_memory, search_memory'},
+        {'id': 'tool_search', 'loading': 'core', 'tools': 'search_tools', 'strategy': strategy},
+        {'id': 'web_fetch', 'loading': 'deferred', 'tools': 'web_fetch'},
+        {'id': 'step_persistence', 'loading': 'core', 'tools': ''},
+    ]
 
 
 def turn_limits(settings: AssistantSettings) -> UsageLimits:

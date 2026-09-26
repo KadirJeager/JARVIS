@@ -22,7 +22,7 @@ import hashlib
 from typing import Any
 from uuid import uuid4
 
-from google.cloud.firestore import AsyncClient, AsyncTransaction, async_transactional
+from google.cloud.firestore import SERVER_TIMESTAMP, AsyncClient, AsyncTransaction, async_transactional
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from pydantic_ai_harness.memory import (
@@ -143,6 +143,9 @@ class FirestoreMemoryStore:
                         'content': content,
                         'version': version,
                         'last_operation_id': operation.id if operation else None,
+                        # Listing fields for the owner's vault view; not part of the store protocol.
+                        'chars': len(content),
+                        'updated_at': SERVER_TIMESTAMP,
                     },
                 )
             else:
@@ -179,6 +182,32 @@ class FirestoreMemoryStore:
             raise ValueError('limit must be positive')
         query = self._prefix_query(prefix).select(['path']).limit(limit)
         return [snapshot.get('path') async for snapshot in query.stream()]
+
+    async def list_files(self, prefix: str = '', *, limit: int) -> list[dict[str, Any]]:
+        """Path, version, size and last change of each file under `prefix`, for the owner's vault view.
+
+        Files written before size tracking report their size from the content.
+        """
+        validate_store_prefix(prefix)
+        if limit <= 0:
+            raise ValueError('limit must be positive')
+        files: list[dict[str, Any]] = []
+        query = self._prefix_query(prefix).select(['path', 'version', 'chars', 'updated_at']).limit(limit)
+        async for snapshot in query.stream():
+            data = snapshot.to_dict() or {}
+            chars = data.get('chars')
+            if chars is None:
+                full = await self._files.document(snapshot.id).get()
+                chars = len((full.to_dict() or {}).get('content', ''))
+            files.append({'path': data['path'], 'version': data['version'], 'chars': chars,
+                          'updated_at': data.get('updated_at')})
+        return files
+
+    async def read_all(self, prefix: str, *, limit: int) -> list[tuple[str, str]]:
+        """`(path, content)` of every file under `prefix`, for the owner's export."""
+        validate_store_prefix(prefix)
+        query = self._prefix_query(prefix).select(['path', 'content']).limit(limit)
+        return [(snapshot.get('path'), snapshot.get('content')) async for snapshot in query.stream()]
 
     async def search(
         self,

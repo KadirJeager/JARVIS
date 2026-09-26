@@ -17,18 +17,32 @@ other failures settle it as failed. Error records keep the exception type,
 HTTP status and the provider's machine-readable reason codes (for example
 `RESOURCE_EXHAUSTED` or `VALIDATION_REQUIRED`), never response messages or
 links, which can carry account-specific tokens.
+
+While the model runs, each tool call and its outcome is written to the turn's
+`activity` so the owner sees what the assistant is doing. The worker also
+watches for the owner's cancel request: it stops the run and settles the turn
+as cancelled, or as awaiting reconciliation when a tool call was cut off
+before its outcome was recorded. When a turn settles with a reply or an error
+the optional notifier tells the owner's devices.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import Literal
+from collections.abc import AsyncIterable, Awaitable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal, Protocol, TypeVar
 
+from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import (
+    AgentStreamEvent,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -37,6 +51,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
+from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.step_persistence.recovery import inspect_recovery
 
 from jarvis_core.assistant import build_agent, turn_limits
@@ -45,10 +60,78 @@ from jarvis_core.secrets import SecretResolutionError, SecretResolver
 from jarvis_core.settings import FirestoreSettingsStore
 from jarvis_core.turns import Claim, FirestoreTurnStore
 
-Outcome = Literal['not_runnable', 'completed', 'failed', 'requeued', 'reconciling']
+Outcome = Literal['not_runnable', 'completed', 'failed', 'requeued', 'reconciling', 'cancelled']
+
+_logger = logging.getLogger(__name__)
+_T = TypeVar('_T')
 
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _REASON_CODE = re.compile(r'[A-Z][A-Z_]{2,63}')
+# Tool arguments shown to the owner are shortened to this many characters.
+_ARGS_PREVIEW_CHARS = 300
+_USAGE_FIELDS = ('requests', 'tool_calls', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens')
+
+
+class TurnNotifier(Protocol):
+    """Tells the owner's devices that a turn settled; failures must not raise."""
+
+    async def turn_settled(self, turn: dict[str, Any], *, kind: Literal['reply', 'error'], text: str) -> None: ...
+
+
+class _Cancelled(Exception):
+    """The owner asked to cancel the running turn."""
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _preview(part: ToolCallPart) -> str:
+    try:
+        text = json.dumps(part.args_as_dict(), ensure_ascii=False, default=str)
+    except ValueError:
+        text = part.args_as_json_str()
+    return text if len(text) <= _ARGS_PREVIEW_CHARS else text[: _ARGS_PREVIEW_CHARS - 1] + '…'
+
+
+def usage_record(usage: RunUsage) -> dict[str, int]:
+    """Counts the provider reported; zero means not reported, so zeros are left out."""
+    return {name: value for name in _USAGE_FIELDS if (value := int(getattr(usage, name, 0) or 0))}
+
+
+@dataclass
+class _ActivityLog:
+    """Mirror of a running attempt's tool calls in the turn record."""
+
+    turns: FirestoreTurnStore
+    turn_id: str
+    run_id: str
+    items: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+
+    async def _save(self) -> None:
+        try:
+            await self.turns.record_activity(self.turn_id, self.run_id, self.items)
+        except Exception:  # noqa: BLE001 - display state only; the run itself must not fail on it
+            _logger.warning('could not record activity for turn %s', self.turn_id, exc_info=True)
+
+    async def handle(self, ctx: RunContext[Any], events: AsyncIterable[AgentStreamEvent]) -> None:
+        async for event in events:
+            if isinstance(event, FunctionToolCallEvent):
+                self.items.append({
+                    'id': event.tool_call_id,
+                    'tool': event.part.tool_name,
+                    'args': _preview(event.part),
+                    'state': 'running',
+                    'started_at': _now(),
+                    'attempt_run_id': self.run_id,
+                })
+                await self._save()
+            elif isinstance(event, FunctionToolResultEvent):
+                for item in self.items:
+                    if item['id'] == event.tool_call_id and item['state'] == 'running':
+                        item['state'] = 'retry' if isinstance(event.part, RetryPromptPart) else 'done'
+                        item['ended_at'] = _now()
+                await self._save()
 
 
 def provider_reasons(body: object) -> list[str]:
@@ -99,6 +182,44 @@ class TurnWorker:
     worker_id: str
     lease: timedelta = timedelta(minutes=15)
     max_attempts: int = 5
+    notifier: TurnNotifier | None = None
+    cancel_poll_seconds: float = 2.0
+
+    async def _notify(self, turn: dict[str, Any], kind: Literal['reply', 'error'], text: str) -> None:
+        if self.notifier is not None:
+            await self.notifier.turn_settled(turn, kind=kind, text=text)
+
+    async def _fail(self, turn: dict[str, Any], run_id: str, error_type: str, detail: str) -> Outcome:
+        settled = await self.turns.fail(turn['turn_id'], run_id, error_type=error_type, detail=detail)
+        await self._notify(settled, 'error', f'{error_type}: {detail}')
+        return 'failed'
+
+    async def _until_cancelled(self, turn_id: str, work: Awaitable[_T]) -> _T:
+        """Await `work`, stopping it when the owner requests cancellation."""
+        task = asyncio.ensure_future(work)
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=self.cancel_poll_seconds)
+                if task in done:
+                    return task.result()
+                if await self.turns.cancel_requested(turn_id):
+                    task.cancel()
+                    await asyncio.wait({task})
+                    raise _Cancelled
+        finally:
+            if not task.done():
+                task.cancel()
+
+    async def _settle_cancelled(self, claim: Claim, run_id: str | None) -> Outcome:
+        """Cancel the claimed attempt, unless a tool call of `run_id` was cut off before its outcome."""
+        if run_id is not None:
+            facts = await inspect_recovery(store=self.steps, run_id=run_id)
+            if facts.unresolved:
+                unresolved = [f'{effect.tool_name}:{effect.tool_call_id}' for effect in facts.unresolved]
+                await self.turns.require_reconciliation(claim.turn['turn_id'], claim.run_id, unresolved=unresolved)
+                return 'reconciling'
+        await self.turns.cancel(claim.turn['turn_id'], claim.run_id)
+        return 'cancelled'
 
     async def _head_history(self, head_run_id: str | None) -> list[ModelMessage]:
         if head_run_id is None:
@@ -132,37 +253,38 @@ class TurnWorker:
         if claim is None:
             return 'not_runnable'
         turn = claim.turn
+        if turn.get('cancel_requested_at') is not None:
+            return await self._settle_cancelled(claim, claim.previous_run_id)
         if claim.attempt > self.max_attempts:
-            await self.turns.fail(
-                turn_id, claim.run_id, error_type='AttemptsExhausted', detail=f'{self.max_attempts} attempts'
-            )
-            return 'failed'
+            return await self._fail(turn, claim.run_id, 'AttemptsExhausted', f'{self.max_attempts} attempts')
         plan = _Plan(prompt=turn['text'], history=[])
         if claim.previous_run_id is not None:
             uncertain, settled = await self._uncertain_tool_calls(claim.previous_run_id)
             if uncertain:
-                await self.turns.require_reconciliation(turn_id, claim.run_id, unresolved=uncertain)
+                settled_turn = await self.turns.require_reconciliation(turn_id, claim.run_id, unresolved=uncertain)
+                await self._notify(settled_turn, 'error', 'unresolved_tool_effects')
                 return 'reconciling'
             if settled is not None:
                 reply = final_reply(settled)
                 if reply is not None:
-                    await self.turns.complete(turn_id, claim.run_id, reply=reply, history_run_id=claim.previous_run_id)
+                    done = await self.turns.complete(
+                        turn_id, claim.run_id, reply=reply, history_run_id=claim.previous_run_id
+                    )
+                    await self._notify(done, 'reply', reply)
                     return 'completed'
                 plan = _Plan(prompt=None, history=settled)
         if plan.prompt is not None:
             try:
                 plan = _Plan(prompt=turn['text'], history=await self._head_history(claim.head_run_id))
             except LookupError as exc:
-                await self.turns.fail(turn_id, claim.run_id, error_type='HistoryMissing', detail=str(exc))
-                return 'failed'
+                return await self._fail(turn, claim.run_id, 'HistoryMissing', str(exc))
         return await self._execute(claim, plan)
 
     async def _execute(self, claim: Claim, plan: _Plan) -> Outcome:
         turn = claim.turn
         stored = await self.settings.get(turn['uid'])
         if stored is None:
-            await self.turns.fail(turn['turn_id'], claim.run_id, error_type='SettingsMissing', detail='no settings saved')
-            return 'failed'
+            return await self._fail(turn, claim.run_id, 'SettingsMissing', 'no settings saved')
         try:
             agent = await build_agent(
                 stored.settings,
@@ -173,19 +295,24 @@ class TurnWorker:
                 secrets=self.secrets,
             )
         except SecretResolutionError as exc:
-            await self.turns.fail(turn['turn_id'], claim.run_id, error_type='SecretResolutionError', detail=str(exc))
-            return 'failed'
+            return await self._fail(turn, claim.run_id, 'SecretResolutionError', str(exc))
+        activity = _ActivityLog(self.turns, turn['turn_id'], claim.run_id, list(turn.get('activity') or []))
         try:
-            result = await agent.run(
-                plan.prompt,
-                message_history=plan.history,
-                conversation_id=turn['conversation_id'],
-                usage_limits=turn_limits(stored.settings),
+            result = await self._until_cancelled(
+                turn['turn_id'],
+                agent.run(
+                    plan.prompt,
+                    message_history=plan.history,
+                    conversation_id=turn['conversation_id'],
+                    usage_limits=turn_limits(stored.settings),
+                    event_stream_handler=activity.handle,
+                ),
             )
+        except _Cancelled:
+            return await self._settle_cancelled(claim, claim.run_id)
         except (UsageLimitExceeded, UnexpectedModelBehavior) as exc:
             # Messages only; `UnexpectedModelBehavior.body` may hold the provider response.
-            await self.turns.fail(turn['turn_id'], claim.run_id, error_type=type(exc).__name__, detail=exc.message)
-            return 'failed'
+            return await self._fail(turn, claim.run_id, type(exc).__name__, exc.message)
         except ModelAPIError as exc:
             status = exc.status_code if isinstance(exc, ModelHTTPError) else None
             reasons = provider_reasons(exc.body) if isinstance(exc, ModelHTTPError) else []
@@ -194,7 +321,9 @@ class TurnWorker:
             if transient and claim.attempt < self.max_attempts:
                 await self.turns.release(turn['turn_id'], claim.run_id, error_type=type(exc).__name__, detail=detail)
                 return 'requeued'
-            await self.turns.fail(turn['turn_id'], claim.run_id, error_type=type(exc).__name__, detail=detail)
-            return 'failed'
-        await self.turns.complete(turn['turn_id'], claim.run_id, reply=result.output)
+            return await self._fail(turn, claim.run_id, type(exc).__name__, detail)
+        done = await self.turns.complete(
+            turn['turn_id'], claim.run_id, reply=result.output, usage=usage_record(result.usage)
+        )
+        await self._notify(done, 'reply', result.output)
         return 'completed'

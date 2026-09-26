@@ -18,11 +18,19 @@ Additions for the event-driven core:
   whether it may continue; uncertain side effects end in `reconciling`.
 - Completing a turn moves the conversation head to the successful run, whose
   final snapshot is the history for the next turn.
+- The owner may cancel a turn. A queued turn is cancelled at once, even when
+  it waits behind earlier turns: `settled_seq` then advances over it only
+  once every earlier turn has settled (`settled_ahead` holds the gap). A
+  running turn gets `cancel_requested_at`; its worker stops the run and
+  settles it, or leaves it for reconciliation when a tool may have acted.
+- While a turn runs, the worker records its tool calls in `activity`; the
+  reply or error message keeps that list so the conversation shows what the
+  assistant did.
 
 Collections: `turns/{turn_id}`, `users/{uid}/conversations/{cid}` and
 `users/{uid}/conversations/{cid}/messages/{turn_id}.{role}`. Messages carry
-`position` (`2*seq` for the user message, `2*seq+1` for the reply or error)
-so a client orders a conversation with one single-field index.
+`position` (`2*seq` for the user message, `2*seq+1` for the reply, error or
+notice) so a client orders a conversation with one single-field index.
 """
 
 from __future__ import annotations
@@ -57,6 +65,9 @@ _ALLOWED = {
 }
 _IMMUTABLE = ('schema_version', 'turn_id', 'uid', 'conversation_id', 'client_message_id', 'text')
 _TITLE_CHARS = 80
+_CANCELLED_NOTICE = {'role': 'notice', 'type': 'cancelled'}
+# Firestore caps one batched write at 500 operations.
+_BATCH_OPS = 500
 
 
 class TurnConflict(ValueError):
@@ -65,6 +76,27 @@ class TurnConflict(ValueError):
 
 class InvalidTransition(ValueError):
     """The requested change is outside the turn lifecycle or from a stale attempt."""
+
+
+class ConversationBusy(RuntimeError):
+    """The conversation has a queued or running turn, so it cannot be deleted yet."""
+
+
+def _settle_seq(conversation: dict[str, Any], seq: int) -> dict[str, Any]:
+    """Conversation fields after turn `seq` settles.
+
+    `settled_seq` only advances over a contiguous run of settled turns, so a
+    turn cancelled while earlier ones are still open never lets a later turn
+    start before them.
+    """
+    settled = int(conversation.get('settled_seq', 0))
+    ahead = {int(value) for value in conversation.get('settled_ahead', [])}
+    if seq > settled:
+        ahead.add(seq)
+    while settled + 1 in ahead:
+        settled += 1
+        ahead.discard(settled)
+    return {'settled_seq': settled, 'settled_ahead': sorted(ahead)}
 
 
 def _required(value: object, name: str) -> str:
@@ -229,6 +261,12 @@ class FirestoreTurnStore:
                 return None
             if turn['status'] == RUNNING and turn['lease_expires_at'] > now:
                 return None
+            if turn.get('cancel_requested_at') is not None and not turn['run_ids']:
+                # Nothing ran yet, so nothing can be uncertain. A turn with earlier attempts is
+                # claimed normally and its worker checks their tool effects before cancelling.
+                self._settle(transaction, turn_ref, turn, conversation_ref, conversation, CANCELLED, now,
+                             message=dict(_CANCELLED_NOTICE))
+                return None
             if int(conversation.get('settled_seq', 0)) != int(turn['seq']) - 1:
                 return None
             attempt = int(turn['attempt']) + 1
@@ -240,6 +278,7 @@ class FirestoreTurnStore:
                 'run_ids': [*turn['run_ids'], run_id],
                 'lease_owner': worker_id,
                 'lease_expires_at': now + lease,
+                'started_at': turn.get('started_at') or now,
                 'updated_at': now,
             }
             transaction.update(turn_ref, updates)
@@ -252,6 +291,62 @@ class FirestoreTurnStore:
             )
 
         return await apply(self._client.transaction(max_attempts=TRANSACTION_ATTEMPTS))
+
+    def _settle(
+        self,
+        transaction: AsyncTransaction,
+        turn_ref: Any,
+        turn: dict[str, Any],
+        conversation_ref: Any,
+        conversation: dict[str, Any],
+        status: str,
+        now: datetime,
+        *,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        message: dict[str, Any] | None = None,
+        move_head_to: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Write a status change, its conversation effects and its message inside `transaction`.
+
+        Every read must happen before this call: Firestore transactions read before they write.
+        """
+        updates: dict[str, Any] = {
+            **(extra or {}),
+            'status': status,
+            'lease_owner': None,
+            'lease_expires_at': None,
+            'result': result,
+            'error': error,
+            'updated_at': now,
+        }
+        if status != QUEUED:
+            updates['finished_at'] = now
+        transaction.update(turn_ref, updates)
+        if status != QUEUED:
+            seq = int(turn['seq'])
+            settled = int(conversation.get('settled_seq', 0))
+            head_updates: dict[str, Any] = {**_settle_seq(conversation, seq), 'updated_at': now}
+            # A reconciled older turn must not move the head behind later completed turns.
+            if move_head_to is not None and settled <= seq:
+                head_updates['head_run_id'] = move_head_to
+                head_updates['revision'] = int(conversation.get('revision', 0)) + 1
+            transaction.update(conversation_ref, head_updates)
+        if message is not None:
+            activity = turn.get('activity') or []
+            transaction.set(
+                self._message(turn, message['role']),
+                {
+                    **message,
+                    **({'activity': activity} if activity else {}),
+                    'started_at': turn.get('started_at'),
+                    'turn_id': turn['turn_id'],
+                    'position': 2 * int(turn['seq']) + 1,
+                    'created_at': now,
+                },
+            )
+        return {**turn, **updates}
 
     async def _finish(
         self,
@@ -283,46 +378,152 @@ class FirestoreTurnStore:
                 raise InvalidTransition(f'run {run_id!r} is not the current attempt of this turn')
             conversation_ref = self._conversation(turn['uid'], turn['conversation_id'])
             conversation = (await conversation_ref.get(transaction=transaction)).to_dict() or {}
-            now = self._now()
-            updates: dict[str, Any] = {
-                'status': status,
-                'lease_owner': None,
-                'lease_expires_at': None,
-                'result': result,
-                'error': error,
-                'updated_at': now,
-            }
-            transaction.update(turn_ref, updates)
-            if status != QUEUED:
-                settled = int(conversation.get('settled_seq', 0))
-                head_updates: dict[str, Any] = {'settled_seq': max(settled, int(turn['seq'])), 'updated_at': now}
-                # A reconciled older turn must not move the head behind later completed turns.
-                if move_head_to is not None and settled <= int(turn['seq']):
-                    head_updates['head_run_id'] = move_head_to
-                    head_updates['revision'] = int(conversation.get('revision', 0)) + 1
-                transaction.update(conversation_ref, head_updates)
-            if message is not None:
-                transaction.set(
-                    self._message(turn, message['role']),
-                    {**message, 'turn_id': key, 'position': 2 * int(turn['seq']) + 1, 'created_at': now},
-                )
-            return {**turn, **updates}
+            return self._settle(
+                transaction, turn_ref, turn, conversation_ref, conversation, status, self._now(),
+                result=result, error=error, message=message, move_head_to=move_head_to,
+            )
 
         return await apply(self._client.transaction(max_attempts=TRANSACTION_ATTEMPTS))
 
+    async def record_activity(self, key: str, run_id: str, activity: list[dict[str, Any]]) -> bool:
+        """Replace the tool activity shown for a running turn; a stale attempt changes nothing."""
+        turn_ref = self._turns.document(_required(key, 'turn_id'))
+
+        @async_transactional
+        async def apply(transaction: AsyncTransaction) -> bool:
+            snapshot = await turn_ref.get(transaction=transaction)
+            turn = snapshot.to_dict() or {}
+            if turn.get('status') != RUNNING or not turn.get('run_ids') or turn['run_ids'][-1] != run_id:
+                return False
+            transaction.update(turn_ref, {'activity': activity, 'updated_at': self._now()})
+            return True
+
+        return await apply(self._client.transaction(max_attempts=TRANSACTION_ATTEMPTS))
+
+    async def request_cancel(self, key: str, *, uid: str) -> dict[str, Any]:
+        """Cancel the owner's turn: at once when queued, through its worker when running.
+
+        Cancelling an already cancelled turn returns it unchanged; any other
+        settled turn raises `InvalidTransition`. A turn of another user is
+        reported as missing.
+        """
+        turn_ref = self._turns.document(_required(key, 'turn_id'))
+
+        @async_transactional
+        async def apply(transaction: AsyncTransaction) -> dict[str, Any]:
+            snapshot = await turn_ref.get(transaction=transaction)
+            turn = snapshot.to_dict() if snapshot.exists else None
+            if turn is None or turn['uid'] != uid:
+                raise KeyError(key)
+            status = turn['status']
+            if status == CANCELLED:
+                return turn
+            if status in SETTLED:
+                raise InvalidTransition(f'turn is already {status}')
+            now = self._now()
+            requested = {'cancel_requested_at': turn.get('cancel_requested_at') or now}
+            if status == QUEUED and not turn['run_ids']:
+                conversation_ref = self._conversation(turn['uid'], turn['conversation_id'])
+                conversation = (await conversation_ref.get(transaction=transaction)).to_dict() or {}
+                return self._settle(transaction, turn_ref, {**turn, **requested}, conversation_ref, conversation,
+                                    CANCELLED, now, message=dict(_CANCELLED_NOTICE), extra=requested)
+            if turn.get('cancel_requested_at') is None:
+                transaction.update(turn_ref, {**requested, 'updated_at': now})
+            return {**turn, **requested}
+
+        return await apply(self._client.transaction(max_attempts=TRANSACTION_ATTEMPTS))
+
+    async def cancel_requested(self, key: str) -> bool:
+        turn = await self.get(key)
+        return turn is not None and turn.get('cancel_requested_at') is not None
+
+    async def cancel(self, key: str, run_id: str) -> dict[str, Any]:
+        """Settle the current attempt as cancelled by the owner; nothing is left uncertain."""
+        return await self._finish(key, run_id, CANCELLED, message=dict(_CANCELLED_NOTICE))
+
+    async def update_conversation(
+        self, uid: str, conversation_id: str, *, title: str | None = None, pinned: bool | None = None
+    ) -> dict[str, Any]:
+        """Rename or pin an existing conversation; raise `KeyError` when it does not exist."""
+        conversation_ref = self._conversation(uid, conversation_id)
+        updates: dict[str, Any] = {}
+        if title is not None:
+            if not title.strip():
+                raise ValueError('title must not be empty')
+            updates['title'] = title.strip()[:_TITLE_CHARS * 2]
+        if pinned is not None:
+            updates['pinned'] = pinned
+        snapshot = await conversation_ref.get()
+        if not snapshot.exists:
+            raise KeyError(conversation_id)
+        if updates:
+            await conversation_ref.update(updates)
+        return {**(snapshot.to_dict() or {}), **updates}
+
+    async def delete_conversation(self, uid: str, conversation_id: str) -> list[str]:
+        """Delete a settled conversation, its messages and its turns; return the run ids it used.
+
+        The caller deletes those runs from the step store, which holds the
+        model-facing copy of the conversation. A conversation with a queued or
+        running turn raises `ConversationBusy`.
+        """
+        conversation_ref = self._conversation(uid, conversation_id)
+        if not (await conversation_ref.get()).exists:
+            raise KeyError(conversation_id)
+        turns = [
+            snapshot
+            async for snapshot in self._turns.where(filter=FieldFilter('uid', '==', uid))
+            .where(filter=FieldFilter('conversation_id', '==', conversation_id))
+            .stream()
+        ]
+        if any((snapshot.to_dict() or {}).get('status') not in SETTLED for snapshot in turns):
+            raise ConversationBusy(conversation_id)
+        run_ids = sorted({run for snapshot in turns for run in (snapshot.to_dict() or {}).get('run_ids', [])})
+        references = [snapshot.reference async for snapshot in conversation_ref.collection('messages').stream()]
+        references += [snapshot.reference for snapshot in turns]
+        for start in range(0, len(references), _BATCH_OPS):
+            batch = self._client.batch()
+            for reference in references[start:start + _BATCH_OPS]:
+                batch.delete(reference)
+            await batch.commit()
+        await conversation_ref.delete()
+        return run_ids
+
     async def complete(
-        self, key: str, run_id: str, *, reply: str, history_run_id: str | None = None
+        self,
+        key: str,
+        run_id: str,
+        *,
+        reply: str,
+        history_run_id: str | None = None,
+        usage: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Record the reply, append it to the conversation and move the head.
 
         The head moves to `history_run_id` when an earlier attempt already
         produced the reply and the current attempt only recorded it; otherwise
-        to `run_id`.
+        to `run_id`. `usage` holds the token and request counts the provider
+        reported for this attempt, when it reported any.
         """
         history = history_run_id or run_id
+        result: dict[str, Any] = {'reply': reply, 'history_run_id': history}
+        if usage:
+            result['usage'] = usage
         return await self._finish(
-            key, run_id, COMPLETED, result={'reply': reply, 'history_run_id': history},
-            message={'role': 'assistant', 'text': reply}, move_head_to=history,
+            key, run_id, COMPLETED, result=result,
+            message={'role': 'assistant', 'text': reply, **({'usage': usage} if usage else {})},
+            move_head_to=history,
+        )
+
+    async def close_reconciliation(self, key: str, *, uid: str) -> dict[str, Any]:
+        """The owner checked an uncertain turn and closes it; later turns are not affected."""
+        turn = await self.get(key)
+        if turn is None or turn['uid'] != uid:
+            raise KeyError(key)
+        if turn['status'] != RECONCILING:
+            raise InvalidTransition(f'turn is {turn["status"]}, not awaiting reconciliation')
+        return await self._finish(
+            key, turn['run_ids'][-1], CANCELLED, message={'role': 'notice', 'type': 'closed_by_owner'}
         )
 
     async def fail(self, key: str, run_id: str, *, error_type: str, detail: str) -> dict[str, Any]:

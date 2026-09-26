@@ -12,28 +12,39 @@ annotations`): FastAPI resolves route annotations when routes are declared,
 and the dependency aliases are local to `create_app`.
 """
 
+import io
 import logging
+import os
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.staticfiles import StaticFiles
-from google.api_core.exceptions import GoogleAPICallError
+from google.api_core.exceptions import GoogleAPICallError, NotFound, PermissionDenied
 from pydantic_ai_harness.memory import MemoryConflictError
 from pydantic_ai_harness.memory._store import validate_store_path  # pyright: ignore[reportPrivateUsage]
 from google.cloud.firestore import AsyncClient
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import ModelHTTPError
 
-from jarvis_core.assistant import list_models, memory_scope
+from jarvis_core.assistant import MAIN_MEMORY_FILE, capability_manifest, list_models, memory_capability, memory_scope
 from jarvis_core.auth import User, require_invoker, require_user
 from jarvis_core.config import DeploymentConfig
 from jarvis_core.dispatch import CloudTasksDispatcher
 from jarvis_core.firestore_stores import FirestoreMemoryStore, FirestoreStepStore
-from jarvis_core.secrets import SecretResolver
+from jarvis_core.notify import PushNotifier, PushSubscriptionIn
+from jarvis_core.secrets import SecretCatalog, SecretResolver
 from jarvis_core.settings import AssistantSettings, EndpointConnection, FirestoreSettingsStore, SettingsConflictError
-from jarvis_core.turns import QUEUED, SETTLED, FirestoreTurnStore, TurnConflict
+from jarvis_core.turns import (
+    QUEUED,
+    SETTLED,
+    ConversationBusy,
+    FirestoreTurnStore,
+    InvalidTransition,
+    TurnConflict,
+)
 from jarvis_core.worker import TurnWorker
 
 _logger = logging.getLogger(__name__)
@@ -59,9 +70,20 @@ class MemoryWriteIn(BaseModel):
     expected_version: str | None
 
 
+class SecretIn(BaseModel):
+    value: str = Field(min_length=1, max_length=64_000)
+
+
+class ConversationPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    pinned: bool | None = None
+
+
 _WEB_DIR = FilePath(__file__).parent / 'web'
 # Largest memory file the vault view reads back in one request.
 _MEMORY_READ_CHARS = 1_000_000
+# Upper bound on files one vault listing, search or export covers.
+_MEMORY_FILES_LIMIT = 1000
 
 
 def create_app(config: DeploymentConfig | None = None) -> FastAPI:
@@ -70,17 +92,25 @@ def create_app(config: DeploymentConfig | None = None) -> FastAPI:
     turns = FirestoreTurnStore(client)
     settings_store = FirestoreSettingsStore(client)
     secrets = SecretResolver()
+    catalog = SecretCatalog(config.project_id, config.secret_prefix or '')
     dispatcher = CloudTasksDispatcher(config)
     memory = FirestoreMemoryStore(client)
+    # Media offload to Cloud Storage comes with attachments; until then snapshots keep
+    # media inline within the chunked size limit.
+    steps = FirestoreStepStore(client, media_store=None)
+    notifier = (
+        PushNotifier(client, secrets, key_ref=config.vapid_key_ref, subject=config.service_url)
+        if config.vapid_key_ref is not None
+        else None
+    )
     worker = TurnWorker(
         turns=turns,
         settings=settings_store,
-        # Media offload to Cloud Storage is added with the deployment slice; until then
-        # snapshots keep media inline within the chunked size limit.
-        steps=FirestoreStepStore(client, media_store=None),
+        steps=steps,
         memory=memory,
         secrets=secrets,
         worker_id=config.worker_id,
+        notifier=notifier,
     )
     app = FastAPI(title='JARVIS core', docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -97,6 +127,11 @@ def create_app(config: DeploymentConfig | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         """Process liveness only; it does not claim model, channel or tool health."""
         return {'status': 'alive'}
+
+    @app.get('/v1/me')
+    async def me(user: UserDep) -> dict[str, str]:
+        """The signed-in account, if this installation allows it (403 otherwise)."""
+        return {'uid': user.uid, 'email': user.email}
 
     @app.post('/v1/conversations/{conversation_id}/messages', status_code=202)
     async def post_message(conversation_id: IdPath, body: MessageIn, user: UserDep) -> dict[str, Any]:
@@ -143,6 +178,43 @@ def create_app(config: DeploymentConfig | None = None) -> FastAPI:
             return {'ok': False, 'error': type(exc).__name__, 'http_status': status}
         return {'ok': True, 'models': models}
 
+    @app.get('/v1/secrets')
+    async def list_secrets(user: UserDep) -> dict[str, Any]:
+        """Secret names and references for the settings picker; values are never returned."""
+        try:
+            items = await catalog.list()
+        except PermissionDenied:
+            raise HTTPException(status_code=403, detail='the service may not list secrets') from None
+        return {'items': items, 'managed_prefix': config.secret_prefix, 'can_store': config.secret_prefix is not None}
+
+    @app.put('/v1/secrets/{slug}')
+    async def store_secret(slug: IdPath, body: SecretIn, user: UserDep) -> dict[str, str]:
+        """Store a key the owner pasted as the newest version of a managed secret; return its reference."""
+        if config.secret_prefix is None:
+            raise HTTPException(status_code=404, detail='storing secrets is not configured')
+        try:
+            ref = await catalog.put(slug, body.value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except PermissionDenied:
+            raise HTTPException(status_code=403, detail='the service may not store this secret') from None
+        secrets.forget(ref)
+        return {'ref': ref}
+
+    @app.delete('/v1/secrets/{slug}')
+    async def delete_secret(slug: IdPath, user: UserDep) -> dict[str, bool]:
+        if config.secret_prefix is None:
+            raise HTTPException(status_code=404, detail='storing secrets is not configured')
+        try:
+            await catalog.delete(slug)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except NotFound:
+            raise HTTPException(status_code=404, detail='secret not found') from None
+        except PermissionDenied:
+            raise HTTPException(status_code=403, detail='the service may not delete this secret') from None
+        return {'deleted': True}
+
     @app.get('/config.json')
     async def web_config() -> dict[str, Any]:
         """Public client configuration for the PWA (Firebase web config is not a secret)."""
@@ -157,10 +229,41 @@ def create_app(config: DeploymentConfig | None = None) -> FastAPI:
         return full
 
     @app.get('/v1/memory')
-    async def list_memory(user: UserDep) -> dict[str, list[str]]:
+    async def list_memory(user: UserDep) -> dict[str, Any]:
         prefix = f'{memory_scope(user.uid)}/'
-        paths = await memory.list_paths(prefix, limit=1000)
-        return {'paths': [path.removeprefix(prefix) for path in paths]}
+        files = await memory.list_files(prefix, limit=_MEMORY_FILES_LIMIT)
+        return {'files': [{**file, 'path': file['path'].removeprefix(prefix)} for file in files]}
+
+    @app.get('/v1/memory-search')
+    async def search_memory(user: UserDep, q: Annotated[str, Query(min_length=1, max_length=500)]) -> dict[str, Any]:
+        """The same lexical search the assistant's `search_memory` tool uses, over the owner's vault."""
+        prefix = f'{memory_scope(user.uid)}/'
+        result = await memory.search(
+            prefix, q, limit=50, max_files=_MEMORY_FILES_LIMIT, max_chars=20_000, max_file_chars=_MEMORY_READ_CHARS
+        )
+        return {
+            'matches': [
+                {'path': match.path.removeprefix(prefix), 'snippet': match.snippet, 'score': match.score}
+                for match in result.matches
+            ],
+            'scanned': result.scanned,
+            'truncated': result.truncated,
+        }
+
+    @app.get('/v1/memory-export')
+    async def export_memory(user: UserDep) -> Response:
+        """Every vault file in a zip archive with the vault's own paths."""
+        prefix = f'{memory_scope(user.uid)}/'
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for path, content in await memory.read_all(prefix, limit=_MEMORY_FILES_LIMIT):
+                archive.writestr(path.removeprefix(prefix), content)
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        return Response(
+            buffer.getvalue(),
+            media_type='application/zip',
+            headers={'Content-Disposition': f'attachment; filename="jarvis-hafiza-{stamp}.zip"'},
+        )
 
     @app.get('/v1/memory/{path:path}')
     async def read_memory(path: str, user: UserDep) -> dict[str, Any]:
@@ -185,6 +288,111 @@ def create_app(config: DeploymentConfig | None = None) -> FastAPI:
         except MemoryConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         return {'path': path, 'deleted': result.existed}
+
+    @app.patch('/v1/conversations/{conversation_id}')
+    async def update_conversation(conversation_id: IdPath, body: ConversationPatch, user: UserDep) -> dict[str, Any]:
+        try:
+            await turns.update_conversation(user.uid, conversation_id, title=body.title, pinned=body.pinned)
+        except KeyError:
+            raise HTTPException(status_code=404, detail='conversation not found') from None
+        return {'conversation_id': conversation_id}
+
+    @app.delete('/v1/conversations/{conversation_id}')
+    async def delete_conversation(conversation_id: IdPath, user: UserDep) -> dict[str, Any]:
+        """Forget a conversation: its messages, turns and the model-facing history of every attempt."""
+        try:
+            run_ids = await turns.delete_conversation(user.uid, conversation_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail='conversation not found') from None
+        except ConversationBusy:
+            raise HTTPException(status_code=409, detail='conversation has a queued or running turn') from None
+        for run_id in run_ids:
+            await steps.delete_run(run_id=run_id)
+        return {'conversation_id': conversation_id, 'deleted_runs': len(run_ids)}
+
+    @app.post('/v1/turns/{turn_id}/cancel')
+    async def cancel_turn(turn_id: IdPath, user: UserDep) -> dict[str, Any]:
+        try:
+            turn = await turns.request_cancel(turn_id, uid=user.uid)
+        except KeyError:
+            raise HTTPException(status_code=404, detail='turn not found') from None
+        except InvalidTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {'turn_id': turn_id, 'status': turn['status']}
+
+    @app.post('/v1/turns/{turn_id}/close')
+    async def close_turn(turn_id: IdPath, user: UserDep) -> dict[str, Any]:
+        """The owner checked a turn awaiting reconciliation and closes it."""
+        try:
+            turn = await turns.close_reconciliation(turn_id, uid=user.uid)
+        except KeyError:
+            raise HTTPException(status_code=404, detail='turn not found') from None
+        except InvalidTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {'turn_id': turn_id, 'status': turn['status']}
+
+    def _push() -> PushNotifier:
+        if notifier is None:
+            raise HTTPException(status_code=404, detail='push notifications are not configured')
+        return notifier
+
+    @app.get('/v1/push')
+    async def push_status(user: UserDep) -> dict[str, Any]:
+        return await notifier.status(user.uid) if notifier is not None else {'configured': False}
+
+    @app.put('/v1/push/subscriptions')
+    async def push_subscribe(body: PushSubscriptionIn, request: Request, user: UserDep) -> dict[str, str]:
+        key = await _push().subscribe(user.uid, body, user_agent=request.headers.get('user-agent', ''))
+        return {'id': key}
+
+    @app.delete('/v1/push/subscriptions/{subscription_id}')
+    async def push_unsubscribe(subscription_id: IdPath, user: UserDep) -> dict[str, bool]:
+        return {'deleted': await _push().unsubscribe(user.uid, subscription_id)}
+
+    @app.post('/v1/push/test')
+    async def push_test(
+        user: UserDep, subscription_id: Annotated[str | None, Query(pattern=_ID_PATTERN)] = None
+    ) -> dict[str, Any]:
+        """Send a real test message; the result is what each push service answered."""
+        outcomes = await _push().send(user.uid, {'kind': 'test'}, only=subscription_id)
+        return {'outcomes': outcomes}
+
+    @app.get('/v1/status')
+    async def status(user: UserDep) -> dict[str, Any]:
+        """Installation facts the panel shows; each value is read, none is assumed."""
+        stored = await settings_store.get(user.uid)
+        prefix = f'{memory_scope(user.uid)}/'
+        files = await memory.list_files(prefix, limit=_MEMORY_FILES_LIMIT)
+        main = await memory.read(f'{prefix}{MAIN_MEMORY_FILE}', max_chars=_MEMORY_READ_CHARS)
+        injection = memory_capability(memory, user.uid)
+        return {
+            'service': {
+                'revision': os.environ.get('K_REVISION'),
+                'build': os.environ.get('JARVIS_BUILD'),
+                'project_id': config.project_id,
+                'service_url': config.service_url,
+            },
+            'account': {'email': user.email},
+            'settings': None if stored is None else {
+                'version': stored.version,
+                'updated_at': stored.updated_at,
+                'protocol': stored.settings.model.protocol,
+                'base_url': stored.settings.model.base_url,
+                'model': stored.settings.model.model,
+                'tool_selection': stored.settings.tool_selection.strategy,
+            },
+            'memory': {
+                'files': len(files),
+                'total_chars': sum(int(file['chars']) for file in files),
+                'main_file': MAIN_MEMORY_FILE,
+                'main_chars': None if main is None else len(main.content),
+                'main_lines': None if main is None else len(main.content.splitlines()),
+                'injection_max_tokens': injection.max_tokens,
+                'injection_max_lines': injection.max_lines,
+            },
+            'push': await notifier.status(user.uid) if notifier is not None else {'configured': False},
+            'capabilities': capability_manifest(None if stored is None else stored.settings),
+        }
 
     @app.post('/internal/turns/{turn_id}/run', dependencies=[Depends(invoker)])
     async def run_turn(turn_id: IdPath, response: Response) -> dict[str, str]:

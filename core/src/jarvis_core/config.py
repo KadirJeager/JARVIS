@@ -41,6 +41,10 @@ class DeploymentConfig:
     worker_id: str
     firebase_web_config: dict[str, str] = field(default_factory=dict)
     """Public Firebase web app config the PWA initializes with (`apiKey`, `authDomain`, `projectId`, `appId`)."""
+    vapid_key_ref: str | None = None
+    """Secret reference to the Web Push VAPID private key (PEM); unset turns push notifications off."""
+    secret_prefix: str | None = None
+    """Secret id prefix the service may create and rotate for keys the owner enters; unset disables that."""
 
     @classmethod
     def from_env(cls) -> DeploymentConfig:
@@ -65,4 +69,6 @@ class DeploymentConfig:
             tasks_queue=_required('JARVIS_TASKS_QUEUE'),
             invoker_service_account=_required('JARVIS_INVOKER_SERVICE_ACCOUNT'),
             worker_id=f'{revision}/{socket.gethostname()}/{os.getpid()}',
+            vapid_key_ref=os.environ.get('JARVIS_VAPID_KEY_REF', '').strip() or None,
+            secret_prefix=os.environ.get('JARVIS_SECRET_PREFIX', '').strip() or None,
         )
