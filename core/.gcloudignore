@@ -1,0 +1,7 @@
+# Upload only what the image build needs.
+.gcloudignore
+.venv/
+tests/
+deploy/
+**/__pycache__/
+.pytest_cache/
