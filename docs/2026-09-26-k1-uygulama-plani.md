@@ -153,6 +153,17 @@ gelir. Kaynaklar:
    koleksiyonu, eski indeksler, boş eski imaj depoları ve eski hizmet hesapları
    silindi. Gerçek model turu abonelik kotası ve Google hesap doğrulaması
    beklediği için henüz yapılmadı.
+   **Güncelleme (2026-09-27, bulut oturumu):** Yeni React PWA'nın `vite build`
+   adımı Node 22 ve Node 24 ile, yerelde ve imaj içinde hatasız geçti; önceki
+   çökme o makineye özgüydü. Core imajı artık PWA'yı Node 24 aşamasında
+   derliyor, eski elle yazılmış PWA kaldırıldı. İmaj yerelde derlendi,
+   kapsayıcı emülatöre karşı açıldı; giriş ekranı Chromium'da (telefon ve
+   masaüstü boyutu) konsol hatasız çizildi, service worker kaydoldu.
+   `deploy.sh` VAPID anahtarını, `<servis>-key-` önekli sır izinlerini ve
+   `turns(uid, created_at desc)` indeksini kuruyor; gerçek projede henüz
+   çalıştırılmadı (bu oturumda Google Cloud kimliği yok). Emülatörde 125 test
+   geçiyor (29 HTTP API testi dahil); ara sıra düşen test, testler arası
+   kapanan event loop'a geç gelen gRPC olayıydı ve düzeltildi.
 5. K1 kabulü: PC kapalıyken PWA'dan gerçek iş, soğuk başlangıç, servis
    yeniden başlatma ve ayar değişikliği kanıtları.
 
