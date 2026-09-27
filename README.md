@@ -1,5 +1,7 @@
 # JARVIS
 
+**Türkçe** · [English](README.en.md)
+
 Kişisel otonom asistan projesi: bulutta çalışan bir "beyin", Android telefon
 uygulaması, Wear OS saat uygulaması ve web istemcisinden oluşur. Temmuz–Eylül
 2026 arasında geliştirildi.
