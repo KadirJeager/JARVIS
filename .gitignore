@@ -8,3 +8,5 @@ brain/.venv-speaker/
 .claude/
 .superpowers/
 client_secret*.json
+google-services.json
+.freebuff/
