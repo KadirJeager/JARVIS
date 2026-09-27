@@ -28,6 +28,7 @@ from pydantic_ai_harness.memory._store import validate_store_path  # pyright: ig
 from google.cloud.firestore import AsyncClient
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import ModelHTTPError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jarvis_core.assistant import MAIN_MEMORY_FILE, capability_manifest, list_models, memory_capability, memory_scope
 from jarvis_core.auth import User, require_invoker, require_user
@@ -80,6 +81,31 @@ class ConversationPatch(BaseModel):
 
 
 _WEB_DIR = FilePath(__file__).parent / 'web'
+# Paths the PWA never routes; a miss there is a real 404, not the app shell.
+_NOT_APP_ROUTES = ('v1/', 'internal/', 'assets/')
+
+
+class WebApp(StaticFiles):
+    """The built PWA: files as they are, and the app shell for its client-side routes.
+
+    A first visit to `/c/<id>` or the share target reaches the server before
+    the service worker exists, so any other extensionless path gets
+    `index.html`. Hashed `assets/` never change under a name and are cached
+    for a year; everything else is revalidated so a new build is seen.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path.startswith(_NOT_APP_ROUTES) or '.' in path.rsplit('/', 1)[-1]:
+                raise
+            response = await super().get_response('index.html', scope)
+        if path.startswith('assets/') and response.status_code == 200:
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        else:
+            response.headers['Cache-Control'] = 'no-cache'
+        return response
 # Largest memory file the vault view reads back in one request.
 _MEMORY_READ_CHARS = 1_000_000
 # Upper bound on files one vault listing, search or export covers.
@@ -418,6 +444,7 @@ def create_app(config: DeploymentConfig | None = None) -> FastAPI:
             await turns.mark_dispatched(turn['turn_id'])
         return {'redispatched': len(stale)}
 
-    # Mounted last so API routes take precedence over the PWA files.
-    app.mount('/', StaticFiles(directory=_WEB_DIR, html=True), name='web')
+    # Mounted last so API routes take precedence over the PWA files. The image
+    # build places the PWA here (see Dockerfile); `npm run dev` serves it locally.
+    app.mount('/', WebApp(directory=_WEB_DIR, html=True), name='web')
     return app

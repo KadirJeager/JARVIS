@@ -15,7 +15,7 @@ import socket
 import subprocess
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from uuid import uuid4
 
 import pytest
@@ -71,9 +71,21 @@ def firestore_emulator() -> Iterator[str]:
             os.killpg(process.pid, signal.SIGKILL)
 
 
-@pytest.fixture
+@pytest.fixture(scope='session')
 def anyio_backend() -> str:
     return 'asyncio'
+
+
+@pytest.fixture(scope='session', autouse=True)
+async def one_event_loop(anyio_backend: str) -> AsyncIterator[None]:
+    """Keep one event loop for the whole session.
+
+    anyio closes the loop after each test unless a wider async fixture holds
+    it. gRPC channels opened by the Firestore clients deliver completions to
+    the loop they started on; with a loop per test, a late completion hit an
+    already closed loop and failed whichever test was running then.
+    """
+    yield
 
 
 @pytest.fixture

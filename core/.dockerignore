@@ -3,3 +3,6 @@ tests
 deploy
 **/__pycache__
 .pytest_cache
+web/node_modules
+web/dist
+src/jarvis_core/web

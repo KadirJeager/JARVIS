@@ -10,3 +10,4 @@ brain/.venv-speaker/
 client_secret*.json
 core/web/node_modules/
 core/web/dist/
+core/src/jarvis_core/web/
