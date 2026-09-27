@@ -24,6 +24,10 @@ def main() -> None:
         'JARVIS_TASKS_QUEUE': env('TASKS_QUEUE'),
         'JARVIS_INVOKER_SERVICE_ACCOUNT': env('INVOKER_SA'),
         'JARVIS_FIREBASE_WEB_CONFIG': env('FIREBASE_WEB_CONFIG'),
+        'JARVIS_VAPID_KEY_REF': env('VAPID_KEY_REF'),
+        'JARVIS_SECRET_PREFIX': env('SECRET_PREFIX'),
+        # The image tag, shown on the panel's system page.
+        'JARVIS_BUILD': env('CORE_IMAGE').rsplit(':', 1)[-1],
     }
     containers = [
         {

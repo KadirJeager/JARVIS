@@ -65,7 +65,20 @@ sınanmadı, dağıtımda gerçek hesapla doğrulanacak.
 Servis ortam değişkenleri: `JARVIS_PROJECT_ID`, `JARVIS_ALLOWED_EMAILS`,
 `JARVIS_SERVICE_URL`, `JARVIS_TASKS_QUEUE`, `JARVIS_INVOKER_SERVICE_ACCOUNT`,
 `JARVIS_FIREBASE_WEB_CONFIG`. Varsayılanları yoktur; eksik değer açılışı açık
-hatayla durdurur. Dağıtım betiği bunları kendisi üretir.
+hatayla durdurur. İsteğe bağlı olanlar: `JARVIS_VAPID_KEY_REF` (yoksa Web Push
+kapalı), `JARVIS_SECRET_PREFIX` (yoksa panelden anahtar saklama kapalı),
+`JARVIS_BUILD` (panelde gösterilen imaj etiketi). Dağıtım betiği hepsini
+kendisi üretir.
+
+## PWA
+
+Kaynak [web/](web/) altında (React + Vite). İmaj derlenirken Node 24 aşaması
+`npm ci && npm run build` çalıştırır, çıktı paket içinde `jarvis_core/web`
+dizinine kopyalanır ve servis onu sunar; bu dizin depoda tutulmaz. Uygulama
+rotaları (`/c/<id>`, `/share` vb.) ilk ziyarette de uygulama kabuğunu alır;
+hash'li `assets/` bir yıl önbelleğe alınır, diğer dosyalar her açılışta
+yeniden doğrulanır. Geliştirmede `cd web && npm run dev`; `/v1` ve
+`/config.json` istekleri `127.0.0.1:8080`'deki çekirdeğe yönlenir.
 
 ## Kurulum ve güncelleme
 
@@ -79,7 +92,11 @@ hatayla durdurur. Dağıtım betiği bunları kendisi üretir.
 Betik her adımda var olanı yeniden kullanır; güncelleme için aynı komut
 çalıştırılır. Yaptıkları: gerekli API'ler, Artifact Registry deposu, çalışma ve
 çağırıcı hizmet hesapları ile en az yetkiler, Cloud Build ile imajlar,
-Firestore indeksleri ve kuralları, Cloud Tasks kuyruğu, Cloud Run servisi
+Web Push için VAPID anahtarı (`<servis>-vapid` sırrı; yoksa bir kez üretilir,
+değeri diske ve çıktıya düşmez), panelden girilen anahtarlar için
+`<servis>-key-` önekiyle sınırlı özel rol (oluştur, sürüm ekle, oku, sil) ve
+yalnız ad/üstveri listeleme yetkisi, Firestore indeksleri ve kuralları, Cloud
+Tasks kuyruğu, Cloud Run servisi
 (PWA ve API tek servis; isteğe bağlı CLIProxyAPI yan kapsayıcısı), 5 dakikada
 bir onarım zamanlaması ve servis alan adının Firebase giriş izinlerine
 eklenmesi. Servis adresi `https://<servis>-<proje numarası>.<bölge>.run.app`

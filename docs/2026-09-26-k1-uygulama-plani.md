@@ -163,5 +163,6 @@ gelir. Kaynaklar:
   hesap doğrulanmadan yapılamaz. Ücretli API yedeği açılmaz.
 - Firebase Authentication'ın projede etkin olup olmadığı dağıtım dilimi
   başında gerçek hesapla kontrol edilecek.
-- PWA ilk sürümde Cloud Run servisinden sunulur (derleme adımı ve Node
-  bağımlılığı yok). Firebase Hosting'e geçiş ayrı karar olarak kalır.
+- PWA Cloud Run servisinden sunulur. İlk sürüm derlemesizdi; 2026-09-27'den
+  beri React PWA imajın Node 24 aşamasında derlenir. Firebase Hosting'e geçiş
+  ayrı karar olarak kalır.

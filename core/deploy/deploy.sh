@@ -39,6 +39,13 @@ REPOSITORY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${SERVICE}"
 CORE_IMAGE="${REPOSITORY}/core:$(date -u +%Y%m%d%H%M%S)"
 CLIPROXY_VERSION="$(sed -n 's/^ARG CLIPROXY_VERSION=//p' "$HERE/cliproxy/Dockerfile")"
 CLIPROXY_IMAGE="${REPOSITORY}/cliproxy:${CLIPROXY_VERSION}"
+# Web Push signing key, created once by this script and never printed.
+VAPID_SECRET="${SERVICE}-vapid"
+VAPID_KEY_REF="projects/${PROJECT_ID}/secrets/${VAPID_SECRET}/versions/latest"
+# Keys the owner pastes in the panel become secrets with this id prefix; the
+# service may create, rotate, read and delete only those.
+SECRET_PREFIX="${SERVICE}-key-"
+SECRET_KEEPER_ROLE="projects/${PROJECT_ID}/roles/${SERVICE//-/_}SecretKeeper"
 gc() { gcloud --project "$PROJECT_ID" --quiet "$@"; }
 
 step "APIs"
@@ -62,7 +69,28 @@ done
 # Creating tasks with OIDC tokens requires acting as the invoker account.
 gc iam service-accounts add-iam-policy-binding "$INVOKER_SA" --member "serviceAccount:$RUNTIME_SA" \
   --role roles/iam.serviceAccountUser >/dev/null
-for secret in ${CLIPROXY_KEY_SECRET:-} ${CLIPROXY_OAUTH_SECRET:-} ${EXTRA_SECRETS:-}; do
+
+step "Secrets"
+if ! gc secrets describe "$VAPID_SECRET" >/dev/null 2>&1; then
+  # P-256 private key straight into Secret Manager; it never touches disk.
+  openssl ecparam -name prime256v1 -genkey -noout \
+    | gc secrets create "$VAPID_SECRET" --replication-policy automatic --data-file=- >/dev/null
+fi
+# Listing shows names and metadata only; values stay limited to the grants below.
+gc projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:$RUNTIME_SA" \
+  --role roles/secretmanager.viewer --condition None >/dev/null
+keeper_permissions=secretmanager.secrets.create,secretmanager.secrets.get,secretmanager.secrets.delete,\
+secretmanager.versions.add,secretmanager.versions.access
+if gcloud --quiet iam roles describe "${SECRET_KEEPER_ROLE##*/}" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud --quiet iam roles update "${SECRET_KEEPER_ROLE##*/}" --project "$PROJECT_ID" --permissions "$keeper_permissions" >/dev/null
+else
+  gcloud --quiet iam roles create "${SECRET_KEEPER_ROLE##*/}" --project "$PROJECT_ID" --title "JARVIS owner-entered keys" \
+    --permissions "$keeper_permissions" --stage GA >/dev/null
+fi
+gc projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:$RUNTIME_SA" --role "$SECRET_KEEPER_ROLE" \
+  --condition "expression=resource.name.startsWith(\"projects/${PROJECT_NUMBER}/secrets/${SECRET_PREFIX}\"),title=${SERVICE}-owner-keys" \
+  >/dev/null
+for secret in "$VAPID_SECRET" ${CLIPROXY_KEY_SECRET:-} ${CLIPROXY_OAUTH_SECRET:-} ${EXTRA_SECRETS:-}; do
   gc secrets add-iam-policy-binding "$secret" --member "serviceAccount:$RUNTIME_SA" \
     --role roles/secretmanager.secretAccessor >/dev/null
 done
@@ -106,7 +134,7 @@ gc tasks queues update "$QUEUE" --location "$REGION" --max-attempts 100 --min-ba
 step "Cloud Run service"
 FIREBASE_WEB_CONFIG="$(api GET "https://firebase.googleapis.com/v1beta1/projects/$PROJECT_ID/webApps/$FIREBASE_WEB_APP_ID/config")"
 export PROJECT_ID ALLOWED_EMAILS SERVICE SERVICE_URL TASKS_QUEUE INVOKER_SA RUNTIME_SA CORE_IMAGE \
-  FIREBASE_WEB_CONFIG CLIPROXY CLIPROXY_IMAGE CLIPROXY_KEY_SECRET CLIPROXY_OAUTH_SECRET
+  VAPID_KEY_REF SECRET_PREFIX FIREBASE_WEB_CONFIG CLIPROXY CLIPROXY_IMAGE CLIPROXY_KEY_SECRET CLIPROXY_OAUTH_SECRET
 spec="$(mktemp --suffix .yaml)"
 trap 'rm -f "$spec"' EXIT
 python3 "$HERE/render_service.py" >"$spec"
